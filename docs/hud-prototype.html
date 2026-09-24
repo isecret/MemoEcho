@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MemoEcho HUD Prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --hud-scale: 1.2;
+      --hud-hidden-width: 115.2px;
+      --hud-active-width: 105.6px;
+      --hud-result-width: 86.4px;
+      --hud-height: 31.2px;
+      --hud-text-size: 12px;
+      --hud-icon-size: 16.8px;
+      --hud-button-size: 21.6px;
+      --hud-compact-v: 3.6px;
+      --hud-compact-h: 6px;
+      --hud-regular-h: 12px;
+      --hud-wave-width: 40.8px;
+      --bg: #0b0b0d;
+      --panel: rgba(255, 255, 255, 0.05);
+      --panel-border: rgba(255, 255, 255, 0.12);
+      --panel-shadow: rgba(0, 0, 0, 0.45);
+      --text: rgba(255, 255, 255, 0.94);
+      --text-dim: rgba(255, 255, 255, 0.54);
+      --button: rgba(255, 255, 255, 0.08);
+      --button-hover: rgba(255, 255, 255, 0.14);
+      --button-active: rgba(255, 255, 255, 0.2);
+      --line: rgba(255, 255, 255, 0.2);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "SF Pro Display", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 50% 18%, rgba(255, 255, 255, 0.08), transparent 26%),
+        linear-gradient(180deg, #131316 0%, var(--bg) 58%);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .playground {
+      position: relative;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .controls {
+      position: absolute;
+      top: 24px;
+      left: 24px;
+      width: 320px;
+      padding: 18px;
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--panel-border);
+      box-shadow: 0 22px 50px var(--panel-shadow);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+    }
+
+    .controls h1 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .controls p {
+      margin: 0 0 16px;
+      color: var(--text-dim);
+      line-height: 1.4;
+      font-size: 13px;
+    }
+
+    .control-group + .control-group {
+      margin-top: 18px;
+    }
+
+    .control-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-dim);
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .segmented button,
+    .secondary-row button {
+      appearance: none;
+      border: 0;
+      color: var(--text);
+      background: var(--button);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      cursor: pointer;
+      transition: background 140ms ease, transform 140ms ease, color 140ms ease;
+    }
+
+    .segmented button:hover,
+    .secondary-row button:hover {
+      background: var(--button-hover);
+    }
+
+    .segmented button:active,
+    .secondary-row button:active {
+      background: var(--button-active);
+      transform: scale(0.98);
+    }
+
+    .segmented button.active,
+    .secondary-row button.active {
+      background: rgba(255, 255, 255, 0.92);
+      color: #0d0d0f;
+      font-weight: 600;
+    }
+
+    .secondary-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #fff;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.05);
+      outline: none;
+      transition: border-color 140ms ease, background 140ms ease;
+    }
+
+    input[type="text"]:focus {
+      border-color: rgba(255, 255, 255, 0.26);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.45;
+    }
+
+    .stage {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding-bottom: 40px;
+    }
+
+    .hud {
+      pointer-events: auto;
+      min-width: var(--hud-hidden-width);
+      height: var(--hud-height);
+      padding: var(--hud-compact-v) var(--hud-compact-h);
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06)),
+        rgba(11, 11, 13, 0.84);
+      outline: 0.5px solid rgba(255, 255, 255, 0.06);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4.8px;
+      transform-origin: center bottom;
+      transition:
+        width 220ms ease,
+        opacity 220ms ease,
+        transform 220ms ease;
+    }
+
+    .hud.compact {
+      min-width: var(--hud-active-width);
+    }
+
+    .hud.result {
+      min-width: var(--hud-result-width);
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .hud.notice {
+      width: auto;
+      min-width: 0;
+      padding-left: 9px;
+      padding-right: 11px;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .hud.recording {
+      width: var(--hud-active-width);
+      min-width: var(--hud-active-width);
+      padding-left: var(--hud-compact-h);
+      padding-right: var(--hud-compact-h);
+    }
+
+    .hud.recording.mode-cue {
+      width: var(--hud-active-width);
+      min-width: var(--hud-active-width);
+      padding-left: var(--hud-regular-h);
+      padding-right: var(--hud-regular-h);
+    }
+
+    .hud-btn {
+      width: var(--hud-button-size);
+      height: var(--hud-button-size);
+      flex: 0 0 var(--hud-button-size);
+      border-radius: 999px;
+      border: 0;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      cursor: pointer;
+      transition: background 140ms ease, transform 140ms ease;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    }
+
+    .hud-btn:hover {
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .hud-btn:active {
+      transform: scale(0.96);
+    }
+
+    .hud-btn svg {
+      width: var(--hud-icon-size);
+      height: var(--hud-icon-size);
+      stroke-width: 1.2;
+      transform-origin: center;
+      overflow: visible;
+    }
+
+    .hud-btn.confirm {
+      background: rgba(255, 255, 255, 0.96);
+      color: #0b0b0d;
+      box-shadow: none;
+    }
+
+    .hud-btn.confirm:hover {
+      background: rgba(255, 255, 255, 1);
+    }
+
+    .hud.recording .hud-btn:first-child {
+      transform: translateX(-2.4px);
+    }
+
+    .hud.recording .hud-btn.confirm {
+      transform: translateX(2.4px);
+    }
+
+    .recording-middle {
+      flex: 0 0 var(--hud-wave-width);
+      position: relative;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: flex-basis 220ms ease;
+    }
+
+    .hud.recording .recording-middle {
+      flex-basis: calc(var(--hud-wave-width) - 4.8px);
+    }
+
+    .wave {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.2px;
+      padding: 0 1.2px;
+      opacity: 1;
+      transform: scaleY(1);
+      transition: opacity 120ms ease, transform 160ms ease;
+    }
+
+    .mode-cue-text {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: var(--hud-text-size);
+      font-weight: 700;
+      letter-spacing: 0.035em;
+      line-height: 1;
+      text-transform: uppercase;
+      white-space: nowrap;
+      animation: modeCuePop 220ms cubic-bezier(0.2, 0.9, 0.24, 1.16);
+    }
+
+    .bar {
+      width: 3.6px;
+      min-height: 1.2px;
+      height: 1.2px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 1);
+      transition: height 90ms linear, opacity 90ms linear;
+      opacity: 0.9;
+    }
+
+    .thinking {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 var(--hud-regular-h);
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .thinking-base,
+    .thinking-shine {
+      font-size: var(--hud-text-size);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+
+    .thinking-base {
+      color: rgba(255, 255, 255, 0.18);
+    }
+
+    .thinking-shine {
+      position: absolute;
+      inset: 50% auto auto 50%;
+      transform: translate(-50%, -50%);
+      color: transparent;
+      background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 255, 255, 0.12) 28%,
+        rgba(255, 255, 255, 0.92) 46%,
+        rgba(255, 255, 255, 0.98) 50%,
+        rgba(255, 255, 255, 0.92) 54%,
+        rgba(255, 255, 255, 0.12) 72%,
+        rgba(255, 255, 255, 0) 100%
+      );
+      background-size: 260% 100%;
+      background-repeat: no-repeat;
+      -webkit-background-clip: text;
+      background-clip: text;
+      animation: shimmer 1.55s linear infinite;
+      pointer-events: none;
+    }
+
+    .result-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.92);
+    }
+
+    .hud.notice .result-icon {
+      width: var(--hud-icon-size);
+      height: var(--hud-icon-size);
+      flex: 0 0 var(--hud-icon-size);
+      color: rgba(255, 255, 255, 0.96);
+    }
+
+    .result-icon svg {
+      display: block;
+      width: var(--hud-icon-size);
+      height: var(--hud-icon-size);
+      stroke: currentColor;
+      stroke-width: 1.2;
+      overflow: visible;
+    }
+
+    .hud.notice .result-icon svg {
+      stroke-width: 1.32;
+    }
+
+    .hud.notice .result-icon svg.fill-icon {
+      stroke: none;
+      transform: scale(0.88);
+      transform-origin: center;
+    }
+
+    .result-text {
+      font-size: var(--hud-text-size);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.88);
+    }
+
+    .hud.notice .result-text {
+      letter-spacing: 0.01em;
+      text-transform: none;
+      line-height: 1;
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: 140% 0;
+      }
+      100% {
+        background-position: -40% 0;
+      }
+    }
+
+    @keyframes modeCuePop {
+      0% {
+        opacity: 0;
+        transform: translateY(1px) scale(0.96);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @media (max-width: 720px) {
+      .controls {
+        right: 16px;
+        left: 16px;
+        width: auto;
+      }
+
+      .segmented {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .stage {
+        padding: 0 16px 40px;
+      }
+
+      .hud,
+      .hud.compact {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="playground">
+    <section class="controls">
+      <h1>HUD Prototype</h1>
+      <p>用于验证 MemoEcho 录音 HUD 的视觉和交互节奏。录音态是 `X + 声波 + ✓`，处理态只保留黑白灰 `Thinking` 动画；成功或取消后 HUD 直接消失。</p>
+
+      <div class="control-group">
+        <div class="control-label">
+          <span>状态</span>
+          <span id="stateLabel">Recording</span>
+        </div>
+        <div class="segmented" id="stateSwitch">
+          <button data-state="recording" class="active">录音</button>
+          <button data-state="thinking">Thinking</button>
+          <button data-state="failure">失败</button>
+          <button data-state="notice">新词</button>
+          <button data-state="hidden">隐藏</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-label">
+          <span>声波强度</span>
+          <span id="levelValue">68%</span>
+        </div>
+        <input id="levelRange" type="range" min="0" max="100" value="68">
+        <div class="hint">拖动这个滑块，模拟用户说话强弱。录音态会用它驱动中间声波。</div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-label">
+          <span>动画方式</span>
+          <span>波形测试</span>
+        </div>
+        <div class="secondary-row" id="modeSwitch">
+          <button data-mode="manual" class="active">手动</button>
+          <button data-mode="auto">自动起伏</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-label">
+          <span>录音模式</span>
+          <span id="processingModeLabel">Dictate</span>
+        </div>
+        <div class="secondary-row">
+          <button id="toggleProcessingModeBtn">切换模式</button>
+          <button id="replayCueBtn">重放提示</button>
+        </div>
+        <div class="hint">录音态按 Shift+Tab 可切换。切换时短暂收起左右按钮，只显示 TRANSLATE 或 DICTATE，随后恢复声波。</div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-label">
+          <span>新词提示</span>
+          <span id="noticePreviewLabel">朴邻</span>
+        </div>
+        <input id="noticeTermInput" type="text" value="朴邻" maxlength="24" placeholder="输入新词预览">
+        <div class="secondary-row" style="margin-top: 8px;">
+          <button id="playNoticeBtn">播放提示</button>
+          <button id="fillLongNoticeBtn">长词示例</button>
+        </div>
+        <div class="hint">文案格式为“图标 + 词条”，HUD 内最多显示 4 个汉字，超出以省略号展示；这里仅预览显示效果，不影响实际存储。</div>
+      </div>
+    </section>
+
+    <section class="stage">
+      <div class="hud" id="hudRoot" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script>
+    const hudRoot = document.getElementById("hudRoot");
+    const stateLabel = document.getElementById("stateLabel");
+    const levelRange = document.getElementById("levelRange");
+    const levelValue = document.getElementById("levelValue");
+    const stateSwitch = document.getElementById("stateSwitch");
+    const modeSwitch = document.getElementById("modeSwitch");
+    const processingModeLabel = document.getElementById("processingModeLabel");
+    const toggleProcessingModeBtn = document.getElementById("toggleProcessingModeBtn");
+    const replayCueBtn = document.getElementById("replayCueBtn");
+    const noticeTermInput = document.getElementById("noticeTermInput");
+    const noticePreviewLabel = document.getElementById("noticePreviewLabel");
+    const playNoticeBtn = document.getElementById("playNoticeBtn");
+    const fillLongNoticeBtn = document.getElementById("fillLongNoticeBtn");
+
+    const barsCount = 11;
+    let state = "recording";
+    let previousState = "recording";
+    let processingMode = "dictate";
+    let mode = "manual";
+    let level = Number(levelRange.value) / 100;
+    let bars = [];
+    let tickId = null;
+    let thinkingTimeoutId = null;
+    let cueTimeoutId = null;
+    let noticeTimeoutId = null;
+    let activeCueLabel = "";
+    let noticeTerm = noticeTermInput.value.trim() || "朴邻";
+
+    function icon(type) {
+      if (type === "x") {
+        return `
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3.5 3.5L16.5 16.5M16.5 3.5L3.5 16.5" />
+          </svg>
+        `;
+      }
+      if (type === "check") {
+        return `
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.8 10.6L7.6 15.4L17.4 5.2" />
+          </svg>
+        `;
+      }
+      if (type === "warn") {
+        return `
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10 4V12.2M10 15.8h0.01" />
+            <circle cx="10" cy="15.95" r="0.78" fill="currentColor" stroke="none" />
+          </svg>
+        `;
+      }
+      if (type === "dictionary") {
+        return `
+          <svg class="fill-icon" viewBox="0 0 1024 1024" fill="none" aria-hidden="true">
+            <path fill="currentColor" stroke="none" d="M110.933333 829.44c-13.653333 0-25.6-11.946667-25.6-25.6V220.16c0-88.746667 71.68-160.426667 160.426667-160.426667h493.226667c13.653333 0 25.6 11.946667 25.6 25.6v583.68c0 13.653333-11.946667 25.6-25.6 25.6H245.76c-59.733333 0-109.226667 49.493333-109.226667 109.226667 0 13.653333-10.24 25.6-25.6 25.6z m134.826667-718.506667C186.026667 110.933333 136.533333 160.426667 136.533333 220.16v465.92c29.013333-27.306667 66.56-42.666667 109.226667-42.666667h467.626667V110.933333H245.76z" />
+            <path fill="currentColor" stroke="none" d="M875.52 964.266667H245.76c-88.746667 0-160.426667-71.68-160.426667-160.426667s71.68-160.426667 160.426667-160.426667h493.226667c13.653333 0 25.6 11.946667 25.6 25.6s-11.946667 25.6-25.6 25.6H245.76c-59.733333 0-109.226667 49.493333-109.226667 109.226667s49.493333 109.226667 109.226667 109.226667h602.453333V129.706667c0-13.653333 11.946667-25.6 25.6-25.6s25.6 11.946667 25.6 25.6V938.666667c1.706667 13.653333-10.24 25.6-23.893333 25.6z" />
+            <path fill="currentColor" stroke="none" d="M718.506667 829.44H269.653333c-13.653333 0-25.6-11.946667-25.6-25.6s11.946667-25.6 25.6-25.6h448.853334c13.653333 0 25.6 11.946667 25.6 25.6s-11.946667 25.6-25.6 25.6z" />
+          </svg>
+        `;
+      }
+      return `
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2.8 10.6L7.6 15.4L17.4 5.2" />
+        </svg>
+      `;
+    }
+
+    function render() {
+      hudRoot.className = "hud";
+
+      if (state === "hidden") {
+        hudRoot.innerHTML = "";
+        stopWaveAnimation();
+      } else if (state === "recording") {
+        hudRoot.classList.add("recording");
+        if (activeCueLabel) {
+          hudRoot.classList.add("mode-cue");
+          hudRoot.innerHTML = `<div class="mode-cue-text">${activeCueLabel}</div>`;
+          bars = [];
+          stopWaveAnimation();
+          updateRecordingLabels();
+          return;
+        }
+        hudRoot.innerHTML = `
+          <button class="hud-btn" id="cancelBtn" aria-label="取消录音">${icon("x")}</button>
+          <div class="recording-middle">
+            <div class="wave" id="wave"></div>
+          </div>
+          <button class="hud-btn confirm" id="confirmBtn" aria-label="完成录音">${icon("check")}</button>
+        `;
+        const wave = document.getElementById("wave");
+        wave.innerHTML = Array.from({ length: barsCount }).map(() => '<span class="bar"></span>').join("");
+        bars = Array.from(wave.querySelectorAll(".bar"));
+        document.getElementById("cancelBtn").addEventListener("click", cancelRecording);
+        document.getElementById("confirmBtn").addEventListener("click", finishRecording);
+        startWaveAnimation();
+      } else if (state === "thinking") {
+        hudRoot.classList.add("compact");
+        hudRoot.innerHTML = `
+          <div class="thinking">
+            <span class="thinking-base">Thinking</span>
+            <span class="thinking-shine">Thinking</span>
+          </div>
+        `;
+        stopWaveAnimation();
+      } else if (state === "notice") {
+        hudRoot.classList.add("notice");
+        hudRoot.innerHTML = `
+          <div class="result-icon">${icon("dictionary")}</div>
+          <div class="result-text">${formatNoticeTerm(noticeTerm)}</div>
+        `;
+        stopWaveAnimation();
+      } else {
+        hudRoot.classList.add("result");
+        const meta = {
+          failure: ["失败", "warn"]
+        }[state];
+        hudRoot.innerHTML = `
+          <div class="result-icon">${icon(meta[1])}</div>
+          <div class="result-text">${meta[0]}</div>
+        `;
+        stopWaveAnimation();
+      }
+
+      stateLabel.textContent = {
+        hidden: "Hidden",
+        recording: "Recording",
+        thinking: "Thinking",
+        failure: "Failure",
+        notice: "Notice"
+      }[state];
+      updateRecordingLabels();
+
+      Array.from(stateSwitch.querySelectorAll("button")).forEach((button) => {
+        button.classList.toggle("active", button.dataset.state === state);
+      });
+    }
+
+    function updateRecordingLabels() {
+      processingModeLabel.textContent = processingMode === "translate" ? "Translate" : "Dictate";
+    }
+
+    function setState(nextState) {
+      clearThinkingTimeout();
+      clearCueTimeout();
+      clearNoticeTimeout();
+      if (nextState === "recording" && state !== "recording") {
+        processingMode = "dictate";
+      }
+      state = nextState;
+      render();
+    }
+
+    function clearThinkingTimeout() {
+      if (thinkingTimeoutId) {
+        window.clearTimeout(thinkingTimeoutId);
+        thinkingTimeoutId = null;
+      }
+    }
+
+    function clearCueTimeout() {
+      if (cueTimeoutId) {
+        window.clearTimeout(cueTimeoutId);
+        cueTimeoutId = null;
+      }
+      activeCueLabel = "";
+    }
+
+    function clearNoticeTimeout() {
+      if (noticeTimeoutId) {
+        window.clearTimeout(noticeTimeoutId);
+        noticeTimeoutId = null;
+      }
+    }
+
+    function formatNoticeTerm(term) {
+      const trimmed = term.trim();
+      if (!trimmed) return "朴邻";
+      const glyphs = Array.from(trimmed);
+      if (glyphs.length <= 4) return glyphs.join("");
+      return `${glyphs.slice(0, 4).join("")}…`;
+    }
+
+    function updateNoticePreview() {
+      noticeTerm = noticeTermInput.value.trim() || "朴邻";
+      noticePreviewLabel.textContent = formatNoticeTerm(noticeTerm);
+      if (state === "notice") {
+        render();
+      }
+    }
+
+    function showNotice(term = noticeTerm) {
+      clearThinkingTimeout();
+      clearCueTimeout();
+      clearNoticeTimeout();
+      noticeTerm = term.trim() || "朴邻";
+      noticeTermInput.value = noticeTerm;
+      updateNoticePreview();
+      previousState = state === "notice" ? previousState : state;
+      state = "notice";
+      render();
+      noticeTimeoutId = window.setTimeout(() => {
+        noticeTimeoutId = null;
+        state = previousState;
+        render();
+      }, 1200);
+    }
+
+    function showModeCue(label) {
+      if (state !== "recording") return;
+      if (cueTimeoutId) {
+        window.clearTimeout(cueTimeoutId);
+      }
+      activeCueLabel = label;
+      render();
+      cueTimeoutId = window.setTimeout(() => {
+        cueTimeoutId = null;
+        activeCueLabel = "";
+        if (state === "recording") {
+          render();
+        }
+      }, 720);
+    }
+
+    function toggleProcessingMode() {
+      if (state !== "recording") return;
+      processingMode = processingMode === "translate" ? "dictate" : "translate";
+      showModeCue(processingMode === "translate" ? "TRANSLATE" : "DICTATE");
+    }
+
+    function finishRecording() {
+      if (state !== "recording") return;
+      clearCueTimeout();
+      state = "thinking";
+      render();
+      thinkingTimeoutId = window.setTimeout(() => {
+        thinkingTimeoutId = null;
+        if (state === "thinking") {
+          setState("hidden");
+        }
+      }, 1400);
+    }
+
+    function cancelRecording() {
+      if (state !== "recording") return;
+      setState("hidden");
+    }
+
+    function startWaveAnimation() {
+      stopWaveAnimation();
+      const animate = () => {
+        if (state !== "recording" || bars.length === 0) {
+          return;
+        }
+
+        let target = level;
+        if (mode === "auto") {
+          const time = performance.now() / 900;
+          target = 0.24 + 0.42 * (0.5 + 0.5 * Math.sin(time * 1.2)) + Math.random() * 0.12;
+          target = Math.max(0.08, Math.min(1, target));
+          levelRange.value = Math.round(target * 100);
+          levelValue.textContent = `${Math.round(target * 100)}%`;
+        }
+
+        bars.forEach((bar, index) => {
+          const centerWeight = 1 - Math.abs(index - (bars.length - 1) / 2) / ((bars.length - 1) / 2);
+          const noise = 0.65 + Math.random() * 0.45;
+          const eased = 0.18 + target * (0.38 + centerWeight * 0.62) * noise;
+          const maxHeight = Math.round(24 * 0.5);
+          const minHeight = 1;
+          const height = minHeight + eased * (maxHeight - minHeight);
+          const opacity = 0.28 + Math.min(0.72, eased);
+          bar.style.height = `${Math.round(height)}px`;
+          bar.style.opacity = opacity.toFixed(2);
+        });
+
+        tickId = requestAnimationFrame(animate);
+      };
+      animate();
+    }
+
+    function stopWaveAnimation() {
+      if (tickId) {
+        cancelAnimationFrame(tickId);
+        tickId = null;
+      }
+    }
+
+    stateSwitch.addEventListener("click", (event) => {
+      const target = event.target.closest("button[data-state]");
+      if (!target) return;
+      if (target.dataset.state === "notice") {
+        clearThinkingTimeout();
+        clearCueTimeout();
+        clearNoticeTimeout();
+        state = "notice";
+        render();
+        return;
+      }
+      setState(target.dataset.state);
+    });
+
+    modeSwitch.addEventListener("click", (event) => {
+      const target = event.target.closest("button[data-mode]");
+      if (!target) return;
+      mode = target.dataset.mode;
+      Array.from(modeSwitch.querySelectorAll("button")).forEach((button) => {
+        button.classList.toggle("active", button.dataset.mode === mode);
+      });
+    });
+
+    toggleProcessingModeBtn.addEventListener("click", toggleProcessingMode);
+
+    replayCueBtn.addEventListener("click", () => {
+      if (state !== "recording") return;
+      showModeCue(processingMode === "translate" ? "TRANSLATE" : "DICTATE");
+    });
+
+    noticeTermInput.addEventListener("input", updateNoticePreview);
+
+    playNoticeBtn.addEventListener("click", () => {
+      showNotice(noticeTermInput.value);
+    });
+
+    fillLongNoticeBtn.addEventListener("click", () => {
+      noticeTermInput.value = "客户成功部";
+      updateNoticePreview();
+      showNotice(noticeTermInput.value);
+    });
+
+    levelRange.addEventListener("input", () => {
+      level = Number(levelRange.value) / 100;
+      levelValue.textContent = `${levelRange.value}%`;
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (state !== "recording") return;
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelRecording();
+        return;
+      }
+
+      if (event.key === "Tab" && event.shiftKey) {
+        event.preventDefault();
+        toggleProcessingMode();
+      }
+    });
+
+    updateNoticePreview();
+    render();
+  </script>
+</body>
+</html>

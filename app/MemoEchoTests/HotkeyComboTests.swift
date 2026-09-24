@@ -1,0 +1,201 @@
+import AppKit
+import XCTest
+@testable import MemoEcho
+
+final class HotkeyComboTests: XCTestCase {
+
+    func testShortcutWithoutKindIsRejected() {
+        let json = Data(#"{"displayString":"Space","keyCode":49,"modifiers":0}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(HotkeyCombo.self, from: json))
+    }
+
+    func testDefaultHotkeyIsRightCommandOnly() {
+        let combo = HotkeyCombo.default
+
+        XCTAssertEqual(combo, .special(modifiers: [HotkeyModifierSpec(key: .command, side: .right)]))
+        XCTAssertTrue(combo.isPureModifier)
+        XCTAssertNil(combo.keyCode)
+        XCTAssertEqual(combo.displayString, "R ⌘")
+    }
+
+    func testSpecialHotkeyRoundTripsThroughCodable() throws {
+        let original = HotkeyCombo.special(
+            modifiers: [
+                HotkeyModifierSpec(key: .command, side: .left),
+                HotkeyModifierSpec(key: .option, side: .right),
+            ]
+        )
+
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(HotkeyCombo.self, from: data)
+
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.keyCode, nil)
+    }
+
+    func testSpecialHotkeyUsesAbbreviatedDisplayString() {
+        let combo = HotkeyCombo.special(
+            modifiers: [
+                HotkeyModifierSpec(key: .command, side: .left),
+                HotkeyModifierSpec(key: .option, side: .right),
+                HotkeyModifierSpec(key: .control),
+            ]
+        )
+
+        XCTAssertEqual(combo.displayString, "⌃ + R ⌥ + L ⌘")
+    }
+
+    func testStandardHotkeyUsesAbbreviatedDisplayString() {
+        let combo = HotkeyCombo.standard(
+            keyCode: 0,
+            modifiers: NSEvent.ModifierFlags([.control, .option, .command]).rawValue,
+            keyLabel: "A"
+        )
+
+        XCTAssertEqual(combo.displayString, "⌃ + ⌥ + ⌘ + A")
+    }
+
+    func testStandardHotkeyUsesPhysicalModifierDisplayStringWhenAvailable() {
+        let combo = HotkeyCombo.standard(
+            keyCode: 6,
+            modifiers: NSEvent.ModifierFlags([.control, .shift]).rawValue,
+            keyLabel: "Z",
+            physicalModifiers: [
+                HotkeyModifierSpec(key: .shift, side: .left),
+                HotkeyModifierSpec(key: .control, side: .left),
+            ]
+        )
+
+        XCTAssertEqual(combo.displayString, "L ⌃ + L ⇧ + Z")
+    }
+
+    func testStandardHotkeyRoundTripsPhysicalModifiersThroughCodable() throws {
+        let original = HotkeyCombo.standard(
+            keyCode: 6,
+            modifiers: NSEvent.ModifierFlags([.control, .shift]).rawValue,
+            keyLabel: "Z",
+            physicalModifiers: [
+                HotkeyModifierSpec(key: .shift, side: .left),
+                HotkeyModifierSpec(key: .control, side: .left),
+            ]
+        )
+
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(HotkeyCombo.self, from: data)
+
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.displayString, "L ⌃ + L ⇧ + Z")
+    }
+
+    func testSideQualifiedStandardHotkeyDecodesKeyLabelFromDisplayString() throws {
+        let json = """
+        {
+          "kind": "standard",
+          "displayString": "L ⇧ + L ⌃ + Z",
+          "keyCode": 6,
+          "modifiers": \(NSEvent.ModifierFlags([.control, .shift]).rawValue)
+        }
+        """
+
+        let combo = try JSONDecoder().decode(HotkeyCombo.self, from: Data(json.utf8))
+
+        XCTAssertEqual(combo.displayString, "⌃ + ⇧ + Z")
+        XCTAssertTrue(combo.specialModifiers.isEmpty)
+    }
+
+    func testSpecialHotkeyMatchesSpecificPressedModifiers() {
+        let combo = HotkeyCombo.special(
+            modifiers: [
+                HotkeyModifierSpec(key: .command, side: .left),
+                HotkeyModifierSpec(key: .option, side: .right),
+            ]
+        )
+
+        XCTAssertTrue(combo.matchesSpecialPressedModifiers([.leftCommand, .rightOption]))
+        XCTAssertFalse(combo.matchesSpecialPressedModifiers([.leftCommand, .leftOption]))
+        XCTAssertFalse(combo.matchesSpecialPressedModifiers([.leftCommand, .rightOption, .leftShift]))
+    }
+
+    func testStandardHotkeyMatchesSpecificPressedModifiers() {
+        let combo = HotkeyCombo.standard(
+            keyCode: 6,
+            modifiers: NSEvent.ModifierFlags([.control, .shift]).rawValue,
+            keyLabel: "Z",
+            physicalModifiers: [
+                HotkeyModifierSpec(key: .shift, side: .left),
+                HotkeyModifierSpec(key: .control, side: .left),
+            ]
+        )
+
+        XCTAssertTrue(combo.matchesStandardPressedModifiers(keyCode: 6, pressed: [.leftControl, .leftShift]))
+        XCTAssertFalse(combo.matchesStandardPressedModifiers(keyCode: 6, pressed: [.rightControl, .leftShift]))
+        XCTAssertFalse(combo.matchesStandardPressedModifiers(keyCode: 7, pressed: [.leftControl, .leftShift]))
+    }
+
+    func testPhysicalModifierSetBuildsGenericFlags() {
+        let flags = Set<HotkeyPhysicalModifier>([.leftControl, .rightOption]).genericFlags
+
+        XCTAssertTrue(flags.contains(.control))
+        XCTAssertTrue(flags.contains(.option))
+        XCTAssertFalse(flags.contains(.command))
+    }
+
+    func testFnHotkeyDisplayString() {
+        let combo = HotkeyCombo.special(
+            modifiers: [HotkeyModifierSpec(key: .function)]
+        )
+
+        XCTAssertEqual(combo.displayString, "Fn")
+        XCTAssertTrue(combo.isPureModifier)
+        XCTAssertEqual(combo.modifiers, 0x800000)
+    }
+
+    func testFnHotkeyRoundTripsThroughCodable() throws {
+        let original = HotkeyCombo.special(
+            modifiers: [HotkeyModifierSpec(key: .function)]
+        )
+
+        let data = try JSONEncoder().encode(original)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"function\""))
+
+        let decoded = try JSONDecoder().decode(HotkeyCombo.self, from: data)
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.displayString, "Fn")
+    }
+
+    func testFnHotkeyMatchesPressedFunctionOnly() {
+        let combo = HotkeyCombo.special(
+            modifiers: [HotkeyModifierSpec(key: .function)]
+        )
+
+        XCTAssertTrue(combo.matchesSpecialPressedModifiers([.function]))
+        XCTAssertFalse(combo.matchesSpecialPressedModifiers([.function, .leftCommand]))
+        XCTAssertFalse(combo.matchesSpecialPressedModifiers([]))
+    }
+
+    func testFnSortsAfterOtherModifiersInDisplayString() {
+        let combo = HotkeyCombo.special(
+            modifiers: [
+                HotkeyModifierSpec(key: .function),
+                HotkeyModifierSpec(key: .command, side: .left),
+            ]
+        )
+
+        XCTAssertEqual(combo.displayString, "L ⌘ + Fn")
+    }
+
+    func testPhysicalFunctionModifierBuildsGenericFlags() {
+        let flags = Set<HotkeyPhysicalModifier>([.function]).genericFlags
+
+        XCTAssertEqual(flags.rawValue, 0x800000)
+    }
+
+    func testPressedSetIncludesFunctionFromFlagBit() {
+        let pressed = HotkeyPhysicalModifier.pressedSet(
+            from: NSEvent.ModifierFlags(rawValue: 0x800000)
+        )
+
+        XCTAssertEqual(pressed, [.function])
+    }
+}

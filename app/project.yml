@@ -1,0 +1,123 @@
+name: MemoEcho
+
+options:
+  bundleIdPrefix: com.isecret
+  deploymentTarget:
+    macOS: "14.0"
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.1"
+
+targets:
+  MemoEcho:
+    type: application
+    platform: macOS
+    sources:
+      - path: MemoEcho
+        excludes:
+          - "**/.gitkeep"
+          - "Resources/rnnoise"
+          - "Resources/sherpa-onnx"
+    resources:
+      - path: MemoEcho/Resources/zh-Hans.lproj
+        buildPhase: resources
+      - path: MemoEcho/Resources/rnnoise
+        buildPhase: resources
+        optional: true
+      - path: MemoEcho/Resources/sherpa-onnx
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: Sparkle
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.isecret.memoecho
+        CODE_SIGN_ENTITLEMENTS: MemoEcho/MemoEcho.entitlements
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1.0.0"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: MemoEcho/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: MemoEcho/Platform/SherpaOnnxBridge.h
+    preBuildScripts:
+      - name: "Validate Source Resources"
+        outputFiles:
+          - "$(DERIVED_FILE_DIR)/validate-source-resources.stamp"
+        script: |
+          # RNNoise (required for new pipeline)
+          RNNOISE_DIR="${SRCROOT}/MemoEcho/Resources/rnnoise"
+          if [ ! -f "${RNNOISE_DIR}/lib/librnnoise.dylib" ]; then
+            echo "error: RNNoise library not found. Run ./scripts/setup-rnnoise.sh first."
+            exit 1
+          fi
+
+          # sherpa-onnx runtime（SenseVoice 本地 ASR）
+          SHERPA_DIR="${SRCROOT}/MemoEcho/Resources/sherpa-onnx"
+          if [ ! -f "${SHERPA_DIR}/lib/libsherpa-onnx-c-api.dylib" ]; then
+            echo "error: sherpa-onnx C API library not found."
+            exit 1
+          fi
+          if [ ! -f "${SHERPA_DIR}/lib/libonnxruntime.1.24.4.dylib" ]; then
+            echo "error: onnxruntime library not found."
+            exit 1
+          fi
+          if [ -e "${SHERPA_DIR}/lib/libonnxruntime.dylib" ] && [ ! -L "${SHERPA_DIR}/lib/libonnxruntime.dylib" ]; then
+            echo "error: libonnxruntime.dylib must be a symlink to libonnxruntime.1.24.4.dylib"
+            exit 1
+          fi
+          if [ ! -f "${SHERPA_DIR}/include/sherpa-onnx/c-api/c-api.h" ]; then
+            echo "error: sherpa-onnx C API header not found."
+            exit 1
+          fi
+          touch "${SCRIPT_OUTPUT_FILE_0}"
+    postBuildScripts:
+      - name: "Copy Resources and Fix Permissions"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/.resources-copied.stamp"
+        script: |
+          sign_resource_binary() {
+            local path="$1"
+            if [ -f "$path" ]; then
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "$path"
+            fi
+          }
+
+          # RNNoise
+          RNNOISE_SRC="${SRCROOT}/MemoEcho/Resources/rnnoise"
+          RNNOISE_DST="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/rnnoise"
+          if [ -d "${RNNOISE_SRC}" ]; then
+            mkdir -p "$(dirname "${RNNOISE_DST}")"
+            ditto "${RNNOISE_SRC}" "${RNNOISE_DST}"
+            sign_resource_binary "${RNNOISE_DST}/lib/librnnoise.dylib"
+          fi
+
+          # sherpa-onnx
+          SHERPA_SRC="${SRCROOT}/MemoEcho/Resources/sherpa-onnx"
+          SHERPA_DST="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/sherpa-onnx"
+          if [ -d "${SHERPA_SRC}" ]; then
+            mkdir -p "$(dirname "${SHERPA_DST}")"
+            rm -rf "${SHERPA_DST}"
+            ditto "${SHERPA_SRC}" "${SHERPA_DST}"
+            sign_resource_binary "${SHERPA_DST}/lib/libonnxruntime.1.24.4.dylib"
+            sign_resource_binary "${SHERPA_DST}/lib/libsherpa-onnx-c-api.dylib"
+          fi
+          touch "${SCRIPT_OUTPUT_FILE_0}"
+
+  MemoEchoTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: MemoEchoTests
+    dependencies:
+      - target: MemoEcho
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.isecret.memoecho.tests
+        GENERATE_INFOPLIST_FILE: YES
