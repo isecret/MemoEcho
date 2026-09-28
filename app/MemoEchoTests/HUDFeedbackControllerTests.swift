@@ -297,6 +297,15 @@ final class HUDFeedbackControllerTests: XCTestCase {
         XCTAssertNil(controller.modeCueLabel)
     }
 
+    func testUnverifiedPasteShowsNeutralNoticeWithoutRetryAction() {
+        let controller = HUDFeedbackController()
+        controller.recoveryActionTitle = "重试写入"
+        controller.handleEvent(.outputDispatched)
+        XCTAssertEqual(controller.hudState, .notice("已尝试粘贴"))
+        XCTAssertNil(controller.recoveryActionTitle)
+        controller.handleEvent(.processingCancelled)
+    }
+
     func testProcessingFinishedDismissesHUDWithoutSuccessState() async {
         let controller = HUDFeedbackController()
 

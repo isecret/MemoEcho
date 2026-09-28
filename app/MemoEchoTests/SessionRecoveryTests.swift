@@ -470,6 +470,48 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(session.recovery?.stage, .translation)
     }
 
+    func testUnverifiedPasteCompletesWithCopyOnlyRecoveryAndNoFailure() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        let (session, directory) = makeCoordinator(driver: driver, worker: processor(), lifetime: 0.15)
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        var dispatched = 0
+        var finished = 0
+        var failed = 0
+        session.onFeedbackEvent = { event in
+            switch event {
+            case .outputDispatched: dispatched += 1
+            case .processingFinished: finished += 1
+            case .processingFailed: failed += 1
+            default: break
+            }
+        }
+        let cp = checkpoint(target: target)
+        session.retainRecovery(cp)
+        session.retryRecovery()
+        await waitUntil { !session.isRecovering }
+        XCTAssertEqual(session.state, .done)
+        XCTAssertNil(session.currentError)
+        XCTAssertEqual(dispatched, 1)
+        XCTAssertEqual(finished, 0)
+        XCTAssertEqual(failed, 0)
+        XCTAssertEqual(session.lastInjectionFailureText, "整理结果")
+        XCTAssertTrue(cp.outputUnverified)
+        XCTAssertTrue(cp.outputAttempted)
+        XCTAssertEqual(cp.stage, .output)
+        XCTAssertFalse(cp.canRetry)
+        XCTAssertFalse(session.canRetryRecovery)
+        XCTAssertNil(cp.target)
+        XCTAssertNil(cp.context)
+        XCTAssertNil(cp.polished)
+        XCTAssertTrue(cp.transcripts.isEmpty)
+        session.retryRecovery()
+        XCTAssertEqual(driver.pastes, 1)
+        await waitUntil { session.recovery == nil }
+        XCTAssertNil(session.lastInjectionFailureText)
+    }
+
     private func makeCoordinator(driver: FakeInjectionDriver = FakeInjectionDriver(), worker: SessionRecoveryProcessor,
                                  lifetime: TimeInterval = 600) -> (SessionCoordinator, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

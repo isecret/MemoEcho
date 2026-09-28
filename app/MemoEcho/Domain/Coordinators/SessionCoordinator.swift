@@ -873,21 +873,39 @@ final class SessionCoordinator {
             }
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             if let result { diagnostics.injectionCompleted(sessionID: sessionID, path: result.path, breakdown: result.breakdown) }
-            if !isOnboardingTrial {
-                lastInjectionFailureText = nil
-                beginPostInjectionLearningIfNeeded(generation: generation, mode: checkpoint.mode, sessionID: sessionID,
-                                                   beforeInjection: result?.beforeInjection, insertedText: text)
+            let unverified = result?.confirmation == .dispatched
+            if result != nil {
+                diagnostics.log(sessionID: sessionID, event: "output_confirmation", detail: unverified ? "dispatched" : "verified")
             }
             isRecovering = false
-            if !isOnboardingTrial { discardRecovery() }
-            checkpoint.discard()
+            if !isOnboardingTrial, unverified {
+                // Keep only the final text for explicit copying, never for another automatic write.
+                checkpoint.outputAttempted = true
+                checkpoint.outputUnverified = true
+                checkpoint.pendingSegments.removeAll()
+                checkpoint.transcripts.removeAll()
+                checkpoint.polished = nil
+                checkpoint.context = nil
+                checkpoint.target = nil
+                retainRecovery(checkpoint)
+                lastInjectionFailureText = text
+            } else {
+                if !isOnboardingTrial {
+                    lastInjectionFailureText = nil
+                    beginPostInjectionLearningIfNeeded(generation: generation, mode: checkpoint.mode, sessionID: sessionID,
+                                                       beforeInjection: result?.beforeInjection, insertedText: text)
+                    discardRecovery()
+                }
+                checkpoint.discard()
+            }
+            targetInput = nil
             lastResult = nil
             clearWindowContextCapture()
             state = .done
             finishStageTiming()
             diag.totalMs = initial.totalMs + Int(Date().timeIntervalSince(start) * 1000)
             diagnostics.sessionEnded(sessionID: sessionID, result: diag)
-            onFeedbackEvent?(.processingFinished)
+            onFeedbackEvent?(unverified ? .outputDispatched : .processingFinished)
             scheduleResetToIdle()
         } catch {
             guard sessionGeneration == generation, !Task.isCancelled, checkpoint.isValid(at: Date()) else { return }
@@ -996,7 +1014,7 @@ final class SessionCoordinator {
         windowContextTask = nil
         guard configStore.windowContextEnabled else { return }
 
-        let identity = targetInput?.identity
+        let identity = targetInput?.scope == .field ? targetInput?.identity : nil
         windowContextTask = Task { [weak self] in
             guard let self else { return }
             let result = await self.windowContextService.captureContextResult(

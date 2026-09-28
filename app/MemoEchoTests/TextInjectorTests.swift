@@ -135,12 +135,122 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.axWrites, 1)
     }
 
-    func testUnreadableFieldPastesOnceButDoesNotClaimConfirmation() async {
+    func testUnreadableFieldPastesOnceButDoesNotClaimConfirmation() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.focus(readable: false)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertNil(result.beforeInjection)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testCapturedReadableFieldCannotBecomeUnverified() async throws {
+        let driver = FakeInjectionDriver()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        driver.current = FakeInjectionDriver.focus(readable: false)
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.pastes, 0)
+    }
+
+    func testUnreadableFieldCannotReportDispatchAfterCompositionStarts() async {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.focus(readable: false)
+        driver.onWait = { tick in if tick == 2 { driver.current = FakeInjectionDriver.focus(composing: true) } }
         await fails(driver)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
+    }
+
+    func testWindowTargetPastesOnceWithoutActivatingAndRestoresClipboard() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let injector = TextInjector(driver: driver)
+        let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
+        let result = try await injector.inject(text: "hello", target: target)
+        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertNil(result.beforeInjection)
+        XCTAssertEqual(driver.activations, 0)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testWindowSwitchAndReturnPermanentlyPreventsPaste() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let injector = TextInjector(driver: driver)
+        let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
+        driver.continuity.invalidate()
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.activations, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.pastes, 0)
+    }
+
+    func testWindowWithoutMonitorCannotBeCaptured() {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        driver.canMonitor = false
+        XCTAssertNil(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+    }
+
+    func testWindowChangeDuringClipboardPropagationPreventsPaste() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        driver.onWait = { _ in driver.continuity.invalidate() }
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testFieldDisappearanceCannotDowngradeToWindow() async {
+        let driver = FakeInjectionDriver()
+        let target = driver.current
+        driver.current = FakeInjectionDriver.window()
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+    }
+
+    func testWindowEventFailureDoesNotAttemptAX() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        driver.canPost = false
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testWindowLossAfterDispatchDrainsWithoutRetryOrConfirmation() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        driver.onWait = { tick in if tick == 2 { driver.continuity.invalidate() } }
+        await fails(driver, target: target)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testWindowPastePreservesLaterUserCopy() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let injector = TextInjector(driver: driver)
+        let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
+        driver.onWait = { tick in if tick == 2 { driver.board.userCopy("new copy") } }
+        let result = try await injector.inject(text: "hello", target: target)
+        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertEqual(driver.board.restores, 0)
+        XCTAssertEqual(driver.board.items, [[.string: Data("new copy".utf8)]])
     }
 
     func testIMECompositionPreventsInsertion() async {
@@ -323,6 +433,9 @@ final class FakeInjectionDriver: TextInjectionDriver {
     var isInjecting = false
     let board = FakeInjectionPasteboard()
     var pasteboard: any InjectionPasteboard { board }
+    var activations = 0
+    var canMonitor = true
+    let continuity = InjectionTargetContinuity()
     var canActivate = true
     var canPost = true
     var axUpdatesValue = false
@@ -340,7 +453,11 @@ final class FakeInjectionDriver: TextInjectionDriver {
                                                              value: value, selection: selection, isComposing: composing) : nil
         return .init(pid: 42, bundleID: "test", identity: id, snapshot: snapshot)
     }
-    func activate(pid: pid_t, bundleID: String?) -> Bool { canActivate }
+    static func window(identity: String = "window") -> TextInjectionFocus {
+        .init(pid: 42, bundleID: "test", identity: .init(token: identity), snapshot: nil, scope: .window)
+    }
+    func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity? { canMonitor ? continuity : nil }
+    func activate(pid: pid_t, bundleID: String?) -> Bool { activations += 1; return canActivate }
     func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus? { current }
     func postPaste(into target: TextInjectionFocus) -> Bool { if canPost { pastes += 1 }; return canPost }
     func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool {

@@ -9,6 +9,7 @@ enum SessionFeedbackEvent: Sendable {
     case recordingStopped
     case modeSwitched(TextProcessingMode)
     case recoveryStarted
+    case outputDispatched
     case processingFinished
     case dictionaryTermLearned(String)
     case processingCancelled

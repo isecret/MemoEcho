@@ -26,6 +26,7 @@ final class SessionRecoveryCheckpoint {
     var transcripts: [String]
     var polished: PolishResult?
     var finalText: String?
+    var outputUnverified = false
     var outputAttempted = false
     var isPartialRecording = false
     private(set) var expiresAt: Date?
@@ -44,6 +45,7 @@ final class SessionRecoveryCheckpoint {
     }
 
     var stage: Stage {
+        if outputUnverified { return .output }
         if !pendingSegments.isEmpty { return .recognition }
         if polished == nil { return .polish }
         if finalText == nil { return .translation }

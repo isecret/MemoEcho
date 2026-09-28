@@ -171,6 +171,17 @@ final class HUDFeedbackController {
             hudState = .processing
             showHUD()
 
+        case .outputDispatched:
+            cancelPendingStartSound()
+            clearModeCue()
+            stopLevelPolling()
+            stopEscMonitor()
+            resetBars()
+            clearRecoveryAction()
+            hudState = .notice("已尝试粘贴")
+            showHUD()
+            scheduleDismiss(after: 1.8)
+
         case .processingFinished:
             cancelPendingStartSound()
             clearModeCue()

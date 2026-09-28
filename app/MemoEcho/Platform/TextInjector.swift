@@ -10,9 +10,13 @@ struct TextInjectionFocus: Sendable {
     let bundleID: String?
     let identity: FocusedElementIdentity
     let snapshot: FocusedElementTextSnapshot?
+    enum Scope: Sendable { case field, window }
+    var scope: Scope = .field
+    var continuity: InjectionTargetContinuity? = nil
+    var requiresVerification = false
 
     func isSameField(as other: Self) -> Bool {
-        pid == other.pid && bundleID == other.bundleID && identity == other.identity
+        pid == other.pid && bundleID == other.bundleID && scope == other.scope && identity == other.identity
     }
 }
 
@@ -66,13 +70,14 @@ protocol TextInjectionDriver: AnyObject {
     var pasteboard: any InjectionPasteboard { get }
     func activate(pid: pid_t, bundleID: String?) -> Bool
     func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus?
+    func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity?
     /// False must mean no event was posted; once posted, never retry through AX.
     func postPaste(into target: TextInjectionFocus) -> Bool
     func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool
     func wait(milliseconds: Int) async
 }
 
-/// Clipboard paste is primary. Success requires a confirmed replacement in the same field.
+/// AX verification is optional only for targets captured without readable text.
 @MainActor
 struct TextInjector {
     private let driver: any TextInjectionDriver
@@ -85,6 +90,11 @@ struct TextInjector {
         let path: InjectionPath
         let breakdown: InjectionBreakdown
         var beforeInjection: FocusedElementTextSnapshot? = nil
+        var confirmation: Confirmation = .verified
+    }
+
+    enum Confirmation: Sendable {
+        case verified, dispatched
     }
 
     enum InjectionPath: String, Sendable { case paste, axFallback }
@@ -105,7 +115,13 @@ struct TextInjector {
         guard driver.authorized, let pid else { return nil }
         guard let focus = driver.focus(pid: pid, bundleID: bundleID) else { return nil }
         // Keep only the field identity throughout recording; read text at delivery time.
-        return .init(pid: focus.pid, bundleID: focus.bundleID, identity: focus.identity, snapshot: nil)
+        var target = TextInjectionFocus(pid: focus.pid, bundleID: focus.bundleID, identity: focus.identity,
+                                        snapshot: nil, scope: focus.scope, requiresVerification: focus.snapshot != nil)
+        if focus.scope == .window {
+            guard let continuity = driver.monitorWindow(target), continuity.isValid else { return nil }
+            target.continuity = continuity
+        }
+        return target
     }
 
     func inject(text: String, target: TextInjectionFocus?,
@@ -123,24 +139,33 @@ struct TextInjector {
         }
         try checkCurrent()
         let activation = Date()
-        guard driver.activate(pid: target.pid, bundleID: target.bundleID) else {
+        if target.scope == .window {
+            guard target.continuity?.isValid == true else {
+                throw failure("原窗口已变化，请手动复制文本")
+            }
+        } else if !driver.activate(pid: target.pid, bundleID: target.bundleID) {
             throw failure("无法返回原来的应用，请手动复制文本")
         }
         breakdown.activateTargetMs = millisecondsSince(activation)
         try checkCurrent()
         let focusStart = Date()
-        guard let before = driver.focus(pid: target.pid, bundleID: target.bundleID),
-              before.isSameField(as: target), before.snapshot?.isComposing != true else {
+        guard var before = driver.focus(pid: target.pid, bundleID: target.bundleID),
+              before.isSameField(as: target), before.snapshot?.isComposing != true,
+              !target.requiresVerification || before.snapshot != nil else {
             throw failure("输入框已变化，请手动复制文本")
         }
+        before.continuity = target.continuity
         breakdown.focusBeforeMs = millisecondsSince(focusStart)
         // Do not accept selection-only changes as proof when replacement is a no-op.
         let expected: String? = before.snapshot.flatMap { snapshot in
             guard let range = Range(snapshot.selection, in: snapshot.value) else { return nil }
             return snapshot.value.replacingCharacters(in: range, with: text)
         }
+        func continuityIsValid() -> Bool {
+            target.scope != .window || target.continuity?.isValid == true
+        }
         func unchangedTarget() -> Bool {
-            guard let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
+            guard continuityIsValid(), let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
                   current.isSameField(as: before), current.snapshot?.isComposing != true else { return false }
             return current.snapshot == before.snapshot
         }
@@ -189,7 +214,7 @@ struct TextInjector {
             await driver.wait(milliseconds: 50)
             if Task.isCancelled || !shouldContinue() { invalidated = true }
             let current = driver.focus(pid: target.pid, bundleID: target.bundleID)
-            if current?.isSameField(as: before) != true { invalidated = true }
+            if !continuityIsValid() || current?.isSameField(as: before) != true || current?.snapshot?.isComposing == true { invalidated = true }
             if !invalidated, let expected, expected != before.snapshot?.value,
                let snapshot = current?.snapshot, !snapshot.isComposing,
                snapshot.value == expected {
@@ -202,6 +227,14 @@ struct TextInjector {
             }
         }
         try checkCurrent()
+        if !invalidated, before.snapshot == nil, path == .paste {
+            breakdown.pasteVerificationMs = millisecondsSince(verification)
+            let restoration = Date()
+            lease.restore()
+            breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
+            breakdown.totalMs = millisecondsSince(started)
+            return .init(path: path, breakdown: breakdown, confirmation: .dispatched)
+        }
         throw failure("无法确认文本是否写入，请先检查原输入框，避免重复粘贴；文本可从菜单栏复制")
     }
 
@@ -259,10 +292,22 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
     }
 
     func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus? {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-              let resolved = resolver.resolveFocusedElement(targetPID: pid, shouldRestoreTargetApplication: false),
-              bundleID == nil || resolved.bundleID == bundleID else { return nil }
-        let element = resolved.element
+        guard !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let app = NSRunningApplication(processIdentifier: pid),
+              bundleID == nil || app.bundleIdentifier == bundleID else { return nil }
+        let application = AXUIElementCreateApplication(pid)
+        var focused: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &focused)
+        if status == .noValue || status == .attributeUnsupported {
+            var window: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &window) == .success,
+                  let window, CFGetTypeID(window) == AXUIElementGetTypeID(), pid != ProcessInfo.processInfo.processIdentifier else { return nil }
+            return .init(pid: pid, bundleID: app.bundleIdentifier, identity: .init(element: window as! AXUIElement),
+                         snapshot: nil, scope: .window)
+        }
+        guard status == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let element = focused as! AXUIElement
         var role: CFTypeRef?
         var subrole: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
@@ -274,17 +319,25 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &valueWritable)
         var enabled: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabled)
-        guard enabled as? Bool != false else { return nil }
+        var editable: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editable)
+        guard enabled as? Bool != false, editable as? Bool != false else { return nil }
         let textRoles = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
         guard writable.boolValue || valueWritable.boolValue || textRoles.contains(role as? String ?? "") else { return nil }
         let identity = FocusedElementIdentity(element: element)
         let snapshot = FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundleID)
         if let snapshot, snapshot.identity != identity { return nil }
-        return .init(pid: pid, bundleID: resolved.bundleID, identity: identity, snapshot: snapshot)
+        return .init(pid: pid, bundleID: app.bundleIdentifier, identity: identity, snapshot: snapshot)
+    }
+
+    func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity? {
+        InjectionTargetContinuity.monitor(target: target) { [weak self] in
+            self?.focus(pid: target.pid, bundleID: target.bundleID)?.isSameField(as: target) == true
+        }
     }
 
     func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool {
-        guard let current = focus(pid: target.pid, bundleID: target.bundleID),
+        guard target.scope == .field, let current = focus(pid: target.pid, bundleID: target.bundleID),
               current.isSameField(as: target), current.snapshot == target.snapshot,
               let resolved = resolver.resolveFocusedElement(targetPID: target.pid, shouldRestoreTargetApplication: false),
               FocusedElementIdentity(element: resolved.element) == target.identity else { return false }
@@ -297,6 +350,7 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
     }
 
     func postPaste(into target: TextInjectionFocus) -> Bool {
+        guard target.scope != .window || target.continuity?.isValid == true else { return false }
         let shortcut = Self.resolvePasteShortcut()
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true),
