@@ -7,9 +7,7 @@ import ApplicationServices
 final class InjectionTargetContinuity {
     private var valid = true
     private var check: (() -> Bool)?
-    private var activationObserver: NSObjectProtocol?
-    private var axObserver: AXObserver?
-    private var timer: Timer?
+    private let observation = WindowObservation()
 
     var isValid: Bool {
         if valid, let check, !check() { invalidate() }
@@ -22,36 +20,54 @@ final class InjectionTargetContinuity {
         guard target.scope == .window, check() else { return nil }
         let monitor = InjectionTargetContinuity()
         monitor.check = check
+        monitor.observation.target = monitor
         var observer: AXObserver?
         guard AXObserverCreate(target.pid, { _, _, _, context in
             guard let context else { return }
             MainActor.assumeIsolated {
-                Unmanaged<InjectionTargetContinuity>.fromOpaque(context).takeUnretainedValue().invalidate()
+                Unmanaged<WindowObservation>.fromOpaque(context).takeUnretainedValue().target?.invalidate()
             }
         }, &observer) == .success, let observer else { return nil }
         let application = AXUIElementCreateApplication(target.pid)
         // If window changes cannot be observed, do not promise a window-bound paste.
         guard AXObserverAddNotification(observer, application, kAXFocusedWindowChangedNotification as CFString,
-                                        Unmanaged.passUnretained(monitor).toOpaque()) == .success else { return nil }
-        monitor.axObserver = observer
+                                        Unmanaged.passUnretained(monitor.observation).toOpaque()) == .success else { return nil }
+        monitor.observation.axObserver = observer
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
-        monitor.activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        monitor.observation.activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak monitor] notification in
             let pid = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             MainActor.assumeIsolated { if pid != target.pid { monitor?.invalidate() } }
         }
-        monitor.timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak monitor] _ in
+        monitor.observation.timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak monitor] _ in
             MainActor.assumeIsolated { _ = monitor?.isValid }
         }
-        if let timer = monitor.timer { RunLoop.main.add(timer, forMode: .common) }
+        if let timer = monitor.observation.timer { RunLoop.main.add(timer, forMode: .common) }
         guard monitor.isValid else { return nil }
         return monitor
     }
 
-    isolated deinit {
-        timer?.invalidate()
-        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-        if let axObserver { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(axObserver), .commonModes) }
+    deinit { observation.cancel() }
+}
+
+/// Resource access is confined to the main queue. The Sendable owner can cross
+/// deinit's executor boundary solely to enqueue cleanup there. Keep it alive
+/// until the AX source is removed so its callback context never dangles.
+private final class WindowObservation: @unchecked Sendable {
+    weak var target: InjectionTargetContinuity?
+    var activationObserver: NSObjectProtocol?
+    var axObserver: AXObserver?
+    var timer: Timer?
+
+    func cancel() {
+        DispatchQueue.main.async { [self] in
+            timer?.invalidate()
+            if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+            if let axObserver { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(axObserver), .commonModes) }
+            timer = nil
+            activationObserver = nil
+            axObserver = nil
+        }
     }
 }
