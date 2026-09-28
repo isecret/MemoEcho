@@ -389,7 +389,7 @@
 - 更新元数据来自 `https://raw.githubusercontent.com/isecret/MemoEcho/main/updates/appcast.xml`
 - 更新包来自 GitHub Release 中的已签名 `.zip` 资产，应用内直接下载并安装
 - 自动检查开关仅放在关于窗口，不在菜单栏增加入口
-- 本地构建使用 `app/project.yml` 中的版本号，当前显示版本为 `1.0.0-beta.1`，构建号为 `1.0.0b1`
+- 本地构建使用 `app/project.yml` 中的版本号，当前显示版本为 `1.0.0-beta.2`，构建号为 `1.0.0b2`
 - 发布工作流支持 `vX.Y.Z` 与 `vX.Y.Z-beta.N`（N 为 1–255）；正式版两种版本号均为 `X.Y.Z`，beta 的 `CFBundleShortVersionString` 为 `X.Y.Z-beta.N`、`CFBundleVersion` 为 `X.Y.ZbN`，GitHub Release 标记为预发布
 
 ### 5.10 PersonalDictionaryStore
