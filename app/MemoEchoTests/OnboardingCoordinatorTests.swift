@@ -52,6 +52,40 @@ final class OnboardingTestFixture {
 
 @MainActor
 final class OnboardingCoordinatorTests: XCTestCase {
+    func testFirstSetupStepCannotReturnToWelcome() throws {
+        let fixture = try OnboardingTestFixture()
+        defer { fixture.cleanup() }
+        let coordinator = fixture.coordinator
+        coordinator.prepareForPresentation(at: .welcome)
+        XCTAssertFalse(coordinator.canGoBack)
+        coordinator.goForward()
+        XCTAssertEqual(coordinator.step, .asr)
+        XCTAssertFalse(coordinator.canGoBack)
+
+        coordinator.goBack()
+
+        XCTAssertEqual(coordinator.step, .asr)
+        XCTAssertEqual(fixture.store.onboardingProgress.lastVisitedStep, .asr)
+        XCTAssertFalse(fixture.store.hasCompletedInitialSetup)
+    }
+
+    func testConfigurationStepsCanReturnToPreviousSetupStep() throws {
+        let fixture = try OnboardingTestFixture()
+        defer { fixture.cleanup() }
+        let coordinator = fixture.coordinator
+        coordinator.prepareForPresentation(at: .llm)
+
+        for (current, previous): (SetupStep, SetupStep) in [
+            (.llm, .asr), (.permissions, .llm), (.hotkey, .permissions)
+        ] {
+            coordinator.go(to: current)
+            XCTAssertTrue(coordinator.canGoBack)
+            coordinator.goBack()
+            XCTAssertEqual(coordinator.step, previous)
+            XCTAssertEqual(fixture.store.onboardingProgress.lastVisitedStep, previous)
+        }
+    }
+
     func testCompletedUserCanTryVoiceInputWithoutEditorClick() async throws {
         let fixture = try OnboardingTestFixture()
         defer { fixture.cleanup() }

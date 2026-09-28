@@ -1,5 +1,25 @@
 import Foundation
 
+enum DictionaryFilter: CaseIterable, Identifiable {
+    case all, autoAdded, manualAdded
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .all: "全部"
+        case .autoAdded: "自动添加"
+        case .manualAdded: "手动添加"
+        }
+    }
+    func includes(_ entry: DictionaryEntry) -> Bool {
+        switch self {
+        case .all: true
+        case .autoAdded: entry.source == .autoLearned
+        case .manualAdded: entry.source == .manual
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class PersonalDictionaryViewModel {
@@ -7,10 +27,11 @@ final class PersonalDictionaryViewModel {
         case empty = "请输入词条"
         case duplicate = "词条已存在"
         case saveFailed = "保存失败"
-        case importFailed = "导入失败，请检查词典文件格式或访问权限"
+        case importFailed = "导入失败，请使用 UTF-8 单列 CSV，每行一个词，无表头"
         case exportFailed = "导出失败"
     }
 
+    var selectedFilter: DictionaryFilter = .all
     var errorMessage: String?
     var statusMessage: String?
 
@@ -30,8 +51,7 @@ final class PersonalDictionaryViewModel {
 
     func filteredEntries(matching query: String) -> [DictionaryEntry] {
         let query = normalizedTerm(query)
-        guard !query.isEmpty else { return entries }
-        return entries.filter { $0.term.localizedCaseInsensitiveContains(query) }
+        return entries.filter { selectedFilter.includes($0) && (query.isEmpty || $0.term.localizedCaseInsensitiveContains(query)) }
     }
 
     @discardableResult
@@ -50,7 +70,8 @@ final class PersonalDictionaryViewModel {
         }
     }
 
-    func neighboringEntryID(afterDeleting id: String) -> String? {
+    func neighboringEntryID(afterDeleting id: String, matching query: String = "") -> String? {
+        let entries = filteredEntries(matching: query)
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
         if index + 1 < entries.count {
             return entries[index + 1].id
@@ -137,7 +158,7 @@ final class PersonalDictionaryViewModel {
         }
 
         let hasDuplicate = entries.contains { entry in
-            entry.id != editingID && normalizedTerm(entry.term) == term
+            entry.id != editingID && normalizedTerm(entry.term).precomposedStringWithCanonicalMapping.lowercased() == term.precomposedStringWithCanonicalMapping.lowercased()
         }
         guard !hasDuplicate else {
             showError(.duplicate)

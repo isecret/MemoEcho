@@ -17,16 +17,12 @@ struct FocusedElementResolver {
         targetPID: pid_t?,
         shouldRestoreTargetApplication: Bool = true
     ) -> ResolvedFocusedElement? {
-        if let targetPID,
-           (!shouldRestoreTargetApplication || restoreTargetApplication(pid: targetPID)),
-           let app = NSRunningApplication(processIdentifier: targetPID),
-           !app.isTerminated,
-           let element = focusedElement(for: targetPID) {
-            return ResolvedFocusedElement(
-                element: element,
-                appName: app.localizedName,
-                bundleID: app.bundleIdentifier
-            )
+        if let targetPID {
+            guard (!shouldRestoreTargetApplication || restoreTargetApplication(pid: targetPID)),
+                  let app = NSRunningApplication(processIdentifier: targetPID), !app.isTerminated,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
+                  let element = focusedElement(for: targetPID, retry: shouldRestoreTargetApplication) else { return nil }
+            return ResolvedFocusedElement(element: element, appName: app.localizedName, bundleID: app.bundleIdentifier)
         }
 
         let systemWide = AXUIElementCreateSystemWide()
@@ -79,17 +75,17 @@ struct FocusedElementResolver {
         _ = app.activate(options: [.activateAllWindows])
 
         for interval in Self.frontmostRetryIntervals {
-            if app.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
                 return true
             }
 
             RunLoop.current.run(until: Date().addingTimeInterval(interval))
         }
 
-        return app.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     }
 
-    func focusedElement(for pid: pid_t) -> AXUIElement? {
+    func focusedElement(for pid: pid_t, retry: Bool = true) -> AXUIElement? {
         let appElement = AXUIElementCreateApplication(pid)
 
         for interval in Self.focusRetryIntervals {
@@ -106,6 +102,7 @@ struct FocusedElementResolver {
                 return focusedElement
             }
 
+            guard retry else { return nil }
             RunLoop.current.run(until: Date().addingTimeInterval(interval))
         }
 

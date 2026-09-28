@@ -10,6 +10,8 @@ ISSUER_ID=""
 APPLE_ID=""
 TEAM_ID=""
 APP_PASSWORD=""
+KEYCHAIN_PROFILE=""
+KEYCHAIN_PATH=""
 NOTARY_RESULT_PLIST=""
 NOTARY_LOG_PATH=""
 
@@ -19,6 +21,7 @@ Usage:
   ./scripts/ci/notarize-macos-file.sh \
     --file <path> \
     [--staple <path>] \
+    [--keychain-profile <name> [--keychain <path>]] \
     [--key-path <path/to/AuthKey_xxx.p8> --key-id <apple-notary-key-id> --issuer <apple-notary-issuer-id>] \
     [--apple-id <apple-id> --team-id <team-id> --password <app-specific-password>]
 EOF
@@ -36,6 +39,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --key-path)
             KEY_PATH="$2"
+            shift 2
+            ;;
+        --keychain-profile)
+            KEYCHAIN_PROFILE="$2"
+            shift 2
+            ;;
+        --keychain)
+            KEYCHAIN_PATH="$2"
             shift 2
             ;;
         --key-id)
@@ -136,7 +147,26 @@ NOTARY_RESULT_PLIST="$(create_temp_plist)"
 NOTARY_LOG_PATH="$(create_temp_log)"
 trap 'rm -f "$NOTARY_RESULT_PLIST" "$NOTARY_LOG_PATH"' EXIT
 
-if [[ -n "$KEY_PATH" || -n "$KEY_ID" || -n "$ISSUER_ID" ]]; then
+if [[ -n "$KEYCHAIN_PATH" && -z "$KEYCHAIN_PROFILE" ]]; then
+    echo "error: --keychain requires --keychain-profile" >&2
+    exit 1
+fi
+
+if [[ -n "$KEYCHAIN_PROFILE" ]]; then
+    if [[ -n "$KEY_PATH$KEY_ID$ISSUER_ID$APPLE_ID$TEAM_ID$APP_PASSWORD" ]]; then
+        echo "error: --keychain-profile cannot be combined with explicit credentials" >&2
+        exit 1
+    fi
+    KEYCHAIN_ARGS=(--keychain-profile "$KEYCHAIN_PROFILE")
+    if [[ -n "$KEYCHAIN_PATH" ]]; then
+        KEYCHAIN_ARGS+=(--keychain "$KEYCHAIN_PATH")
+    fi
+    xcrun notarytool submit "$FILE_PATH" "${KEYCHAIN_ARGS[@]}" \
+        --output-format plist --wait >"$NOTARY_RESULT_PLIST"
+    print_notary_log() {
+        xcrun notarytool log "$1" "$2" "${KEYCHAIN_ARGS[@]}"
+    }
+elif [[ -n "$KEY_PATH" || -n "$KEY_ID" || -n "$ISSUER_ID" ]]; then
     if [[ -z "$KEY_PATH" || -z "$KEY_ID" || -z "$ISSUER_ID" ]]; then
         echo "error: --key-path, --key-id, and --issuer must be provided together" >&2
         exit 1

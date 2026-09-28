@@ -435,7 +435,7 @@ final class PermissionsManagerTests: XCTestCase {
         panel.orderFrontRegardless()
         defer { panel.close() }
         host.layoutSubtreeIfNeeded()
-        for point in [NSPoint(x: 150, y: 75), NSPoint(x: 40, y: 70),
+        for point in [NSPoint(x: 150, y: AccessibilityGuideView.size.height - 2), NSPoint(x: 2, y: 34),
                       NSPoint(x: 180, y: 41), NSPoint(x: 150, y: 10)] {
             let hit = host.hitTest(point)
             XCTAssertEqual(hit.map { String(describing: type(of: $0)) }, "WindowDragSurfaceView",
@@ -443,6 +443,8 @@ final class PermissionsManagerTests: XCTestCase {
         }
         XCTAssertTrue(host.hitTest(NSPoint(x: 40, y: 40)) is ApplicationDragSourceView,
                       "The application icon should be directly draggable")
+        XCTAssertTrue(host.hitTest(NSPoint(x: 40, y: 62)) is ApplicationDragSourceView,
+                      "The enlarged icon's edge should also drag the application")
     }
 
     @MainActor

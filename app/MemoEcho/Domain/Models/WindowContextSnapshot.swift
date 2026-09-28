@@ -13,4 +13,16 @@ struct WindowContextSnapshot: Equatable, Sendable {
     let surroundingTextBefore: String?
     let surroundingTextAfter: String?
     let nearbyLabels: [String]
+    var browserURL: String? = nil
+    var visibleText: String? = nil
+    var isEditable: Bool? = nil
+    var supportsMarkdown: Bool? = nil
+    var selection: NSRange? = nil
+    var textCaptureBlocked = false
+    var fieldStatus: [String: ContextFieldStatus] = [:]
+    var captureMilliseconds = 0
+}
+
+enum ContextFieldStatus: String, Sendable, Equatable {
+    case available, unavailable, redacted, truncated, timeout
 }

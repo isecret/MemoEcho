@@ -6,13 +6,14 @@ import SwiftUI
 @MainActor
 @Observable
 final class HUDFeedbackController {
-    private static let logger = Logger(subsystem: "com.isecret.memoecho", category: "HUDFeedback")
+    private static let logger = Logger(subsystem: "me.wangmao.memoecho", category: "HUDFeedback")
     private static let learnedTermDisplayLimit = 4
     static let defaultLearnedTermNoticeDismissSeconds = 1.8
 
     // MARK: - Observable State (HUDContentView 读取)
 
     private(set) var hudState: HUDState = .hidden
+    private(set) var recordingSignalMissing = false
     private(set) var modeCueLabel: String?
     private(set) var barHeights: [CGFloat] = Array(repeating: HUDLayout.resetBarHeight, count: 7)
     private(set) var isHUDPresented = false
@@ -22,6 +23,27 @@ final class HUDFeedbackController {
     var onCancelRecording: (() -> Void)?
     var onConfirmRecording: (() -> Void)?
     var onToggleProcessingMode: (() -> Void)?
+    var recoveryActionTitle: String?
+    var onRecoveryAction: (() -> Void)?
+
+    func performRecoveryAction() {
+        guard case .failure = hudState, recoveryActionTitle != nil else { return }
+        onRecoveryAction?()
+    }
+
+    func showCopyConfirmation() {
+        dismissTask?.cancel()
+        clearRecoveryAction()
+        hudState = .notice("已复制")
+        showHUD()
+        scheduleDismiss(after: 1.2)
+    }
+
+    func clearRecoveryAction() {
+        recoveryActionTitle = nil
+        onRecoveryAction = nil
+        updateMouseInteraction()
+    }
     /// 返回 0-1 归一化电平的闭包，录音期间由 SessionCoordinator 提供
     var audioLevelProvider: (() -> Float)?
     /// 返回当前是否启用交互音效的闭包，由 AppCoordinator 提供
@@ -41,7 +63,7 @@ final class HUDFeedbackController {
     private var startSoundPlaybackTask: Task<Void, Never>?
     private var escEventTap: CFMachPort?
     private var escRunLoopSource: CFRunLoopSource?
-    private var presentationGeneration: UInt64 = 0
+    private var opacityGeneration: UInt64 = 0
     private var waveformEnvelope: CGFloat = 0
     private var waveformEnergy: CGFloat = 0
     private var waveformPhase: CGFloat = 0
@@ -62,15 +84,10 @@ final class HUDFeedbackController {
 
     // MARK: - Public Event Handler
 
-    func setInteractionSoundKeepAliveEnabled(_ enabled: Bool) {
-        soundPlayer.setSilentKeepAliveEnabled(enabled)
-    }
-
     /// 纯修饰键按下后的候选反馈。此时只显示 HUD，不启动录音相关副作用。
     func presentHotkeyCandidate() {
         dismissTask?.cancel()
         dismissTask = nil
-        presentationGeneration &+= 1
         cancelPendingStartSound()
         clearModeCue()
         stopLevelPolling()
@@ -86,7 +103,6 @@ final class HUDFeedbackController {
         guard hudState == .hotkeyPending else { return }
         dismissTask?.cancel()
         dismissTask = nil
-        presentationGeneration &+= 1
         cancelPendingStartSound()
         clearModeCue()
         stopLevelPolling()
@@ -100,9 +116,15 @@ final class HUDFeedbackController {
         Self.logger.info("handleEvent | \(String(describing: event))")
         dismissTask?.cancel()
         dismissTask = nil
-        presentationGeneration &+= 1
 
         switch event {
+        case .recordingSignalChanged, .startSoundCue, .modeSwitched: break
+        default: recordingSignalMissing = false
+        }
+        switch event {
+        case .recordingSignalChanged(let missing):
+            guard hudState == .recording else { return }
+            recordingSignalMissing = missing
         case .recordingStarted:
             cancelPendingStartSound()
             clearModeCue()
@@ -111,8 +133,8 @@ final class HUDFeedbackController {
             startLevelPolling()
             startEscMonitor()
 
-        case .startSoundCue:
-            playStartSoundWhenReady()
+        case .startSoundCue(let delayMs):
+            playStartSound(after: delayMs)
 
         case .recordingStopped:
             cancelPendingStartSound()
@@ -140,6 +162,15 @@ final class HUDFeedbackController {
                 self.modeCueTask = nil
             }
 
+        case .recoveryStarted:
+            cancelPendingStartSound()
+            clearModeCue()
+            stopLevelPolling()
+            stopEscMonitor()
+            resetBars()
+            hudState = .processing
+            showHUD()
+
         case .processingFinished:
             cancelPendingStartSound()
             clearModeCue()
@@ -165,7 +196,7 @@ final class HUDFeedbackController {
             resetBars()
             hudState = .failure(reason)
             showHUD()
-            scheduleDismiss(after: 1.2)
+            scheduleDismiss(after: recoveryActionTitle == nil ? 1.2 : 5)
 
         case .processingCancelled:
             cancelPendingStartSound()
@@ -177,21 +208,19 @@ final class HUDFeedbackController {
         }
     }
 
-    private func playStartSoundWhenReady() {
+    private func playStartSound(after delayMs: Int) {
         cancelPendingStartSound()
         guard shouldPlayInteractionSound else { return }
 
         startSoundPlaybackTask = Task { [weak self] in
             guard let self else { return }
-            await self.soundPlayer.playStartAfterOutputStabilizes(
-                maxWaitMs: 2_200,
-                minimumWaitMs: 600,
-                pollIntervalMs: 100,
-                retryDelayMs: 200
-            )
-            if !Task.isCancelled {
-                self.startSoundPlaybackTask = nil
+            if delayMs > 0 {
+                do { try await Task.sleep(for: .milliseconds(delayMs)) }
+                catch { return }
             }
+            guard !Task.isCancelled, self.hudState == .recording, self.shouldPlayInteractionSound else { return }
+            self.soundPlayer.playStart()
+            self.startSoundPlaybackTask = nil
         }
     }
 
@@ -387,8 +416,11 @@ final class HUDFeedbackController {
 
     private func animateHUDAlpha(to target: CGFloat, duration: Duration, hideWhenFinished: Bool) {
         opacityTask?.cancel()
+        // Only a new visibility animation supersedes this one. Recording and
+        // sound events must not freeze an in-flight fade at partial opacity.
+        opacityGeneration &+= 1
         let start = hudWindow?.alphaValue ?? target
-        let generation = presentationGeneration
+        let generation = opacityGeneration
         let steps = target == 0 ? 15 : 12
         opacityTask = Task { [weak self] in
             for step in 1...steps {
@@ -397,7 +429,7 @@ final class HUDFeedbackController {
                 } catch {
                     return
                 }
-                guard let self, self.presentationGeneration == generation else { return }
+                guard let self, self.opacityGeneration == generation else { return }
                 self.hudWindow?.alphaValue = start + (target - start) * CGFloat(step) / CGFloat(steps)
             }
             guard let self else { return }
@@ -421,7 +453,10 @@ final class HUDFeedbackController {
 
     /// 录音态需要响应鼠标（X/✓ 按钮），其他态不拦截鼠标事件
     private func updateMouseInteraction() {
-        hudWindow?.ignoresMouseEvents = (hudState != .recording)
+        let hasRecoveryAction: Bool
+        if case .failure = hudState { hasRecoveryAction = recoveryActionTitle != nil }
+        else { hasRecoveryAction = false }
+        hudWindow?.ignoresMouseEvents = hudState != .recording && !hasRecoveryAction
     }
 
     private func ensureWindow() {

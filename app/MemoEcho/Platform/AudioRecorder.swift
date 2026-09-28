@@ -1,8 +1,16 @@
 import AVFoundation
 import Foundation
 
+protocol AudioRecording: AnyObject {
+    @MainActor var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)? { get set }
+    @MainActor var currentDurationMs: Int { get }
+    @MainActor func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws
+    @MainActor func currentLevel() -> Float
+    @MainActor func stopRecording() -> AudioRecordingResult
+}
+
 /// 音频录制器，直接采集为 PCM/WAV 16kHz mono，并支持指定输入设备
-final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
 
     static let sampleRate: Double = 16_000
     static let channels: Int = 1
@@ -18,10 +26,30 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private var audioOutput: AVCaptureAudioDataOutput?
     private let captureQueue = DispatchQueue(label: "memoecho.audio.capture")
     private let sampleLock = NSLock()
+    private let retainsAudio: Bool
     private var capturedPCMData = Data()
     private var latestLevel: Float = 0
     private var recording = false
-    private var recordingStartTime: Date?
+    private var recordingStartTime: TimeInterval?
+    @MainActor var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
+    @MainActor private var captureID = UUID()
+    @MainActor private var observers: [NSObjectProtocol] = []
+    @MainActor private var healthTask: Task<Void, Never>?
+    private var lastBufferAt: TimeInterval?
+    private var intervalPeakRMS: Float = 0
+    private var acceptingOutput: AVCaptureOutput?
+
+    /// Level monitoring discards each PCM chunk after measuring it.
+    init(retainsAudio: Bool = true) {
+        self.retainsAudio = retainsAudio
+        super.init()
+    }
+
+    @MainActor
+    var currentDurationMs: Int {
+        guard recording, let recordingStartTime else { return 0 }
+        return max(0, Int((ProcessInfo.processInfo.systemUptime - recordingStartTime) * 1_000))
+    }
 
     /// 开始录音（MainActor 调用）
     ///
@@ -33,6 +61,7 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         guard !recording else { return }
 
         cleanupRecordingState()
+        let id = captureID
         callbackLock.withLock { _onPCMChunk = onPCMChunk }
 
         let captureDevice: AVCaptureDevice?
@@ -85,6 +114,8 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
 
             captureSession = session
             audioOutput = output
+            sampleLock.withLock { acceptingOutput = output }
+            observeCapture(session: session, device: captureDevice, id: id)
 
             let didStart = await withCheckedContinuation { continuation in
                 captureQueue.async {
@@ -93,6 +124,8 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
                 }
             }
 
+            guard id == captureID else { throw CancellationError() }
+            try Task.checkCancellation()
             guard didStart else {
                 output.setSampleBufferDelegate(nil, queue: nil)
                 captureSession = nil
@@ -100,11 +133,13 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
                 throw AudioRecorderError.startFailed
             }
 
-            recordingStartTime = Date()
+            recordingStartTime = ProcessInfo.processInfo.systemUptime
             recording = true
-        } catch let error as AudioRecorderError {
-            throw error
+            startHealthMonitoring(id: id)
         } catch {
+            if id == captureID { cleanupRecordingState() }
+            if error is CancellationError { throw error }
+            if let error = error as? AudioRecorderError { throw error }
             throw AudioRecorderError.recorderCreationFailed(underlying: error.localizedDescription)
         }
     }
@@ -119,10 +154,13 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     /// 停止录音并返回录音结果（含音频数据和录音时长）
     @MainActor
     func stopRecording() -> AudioRecordingResult {
-        guard recording else { return AudioRecordingResult(data: Data(), durationMs: 0) }
+        guard recording else {
+            cleanupRecordingState()
+            return AudioRecordingResult(data: Data(), durationMs: 0)
+        }
         recording = false
 
-        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+        let duration = recordingStartTime.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
         let durationMs = Int(duration * 1000)
         recordingStartTime = nil
 
@@ -153,11 +191,18 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
 
     @MainActor
     private func cleanupRecordingState() {
+        captureID = UUID()
+        healthTask?.cancel()
+        healthTask = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
         audioOutput?.setSampleBufferDelegate(nil, queue: nil)
         callbackLock.withLock { _onPCMChunk = nil }
-        if let captureSession, captureSession.isRunning {
+        if let captureSession {
+            // Serialize against a queued/in-progress start, even when isRunning is
+            // still false. A cancelled start must not open an orphaned microphone.
             captureQueue.sync {
-                captureSession.stopRunning()
+                if captureSession.isRunning { captureSession.stopRunning() }
             }
         }
         captureSession = nil
@@ -167,6 +212,51 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         sampleLock.withLock {
             capturedPCMData.removeAll(keepingCapacity: true)
             latestLevel = 0
+            lastBufferAt = nil
+            intervalPeakRMS = 0
+            acceptingOutput = nil
+        }
+    }
+
+    @MainActor
+    private func observeCapture(session: AVCaptureSession, device: AVCaptureDevice, id: UUID) {
+        let center = NotificationCenter.default
+        for (name, reason) in [(AVCaptureSession.runtimeErrorNotification, AudioCaptureInterruption.streamFailed),
+                               (AVCaptureSession.wasInterruptedNotification, .interrupted)] {
+            observers.append(center.addObserver(forName: name, object: session, queue: nil) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.reportInterruption(reason, id: id) }
+            })
+        }
+        observers.append(center.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: device, queue: nil) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.reportInterruption(.deviceDisconnected, id: id) }
+        })
+    }
+
+    @MainActor
+    private func reportInterruption(_ reason: AudioCaptureInterruption, id: UUID) {
+        guard captureID == id, captureSession != nil else { return }
+        healthTask?.cancel()
+        onCaptureEvent?(.interrupted(reason))
+    }
+
+    @MainActor
+    private func startHealthMonitoring(id: UUID) {
+        healthTask = Task { @MainActor [weak self] in
+            var health = AudioCaptureHealth(startedAt: ProcessInfo.processInfo.systemUptime)
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                guard let self, self.captureID == id, self.recording else { return }
+                let snapshot = self.sampleLock.withLock {
+                    let value = (self.lastBufferAt, self.intervalPeakRMS)
+                    self.intervalPeakRMS = 0
+                    return value
+                }
+                if let event = health.evaluate(now: ProcessInfo.processInfo.systemUptime,
+                                               lastBufferAt: snapshot.0, peakRMS: snapshot.1) {
+                    self.onCaptureEvent?(event)
+                    if case .interrupted = event { return }
+                }
+            }
         }
     }
 
@@ -182,11 +272,15 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         }
 
         let level = Self.calculateLevel(fromPCM16Data: pcmData)
-        sampleLock.withLock {
-            capturedPCMData.append(pcmData)
+        let accepted = sampleLock.withLock {
+            guard acceptingOutput === output else { return false }
+            if retainsAudio { capturedPCMData.append(pcmData) }
             latestLevel = level
+            lastBufferAt = ProcessInfo.processInfo.systemUptime
+            intervalPeakRMS = max(intervalPeakRMS, Self.rms(fromPCM16Data: pcmData))
+            return true
         }
-
+        guard accepted else { return }
         let chunkHandler = callbackLock.withLock { _onPCMChunk }
         chunkHandler?(pcmData)
     }
@@ -248,6 +342,18 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         }
         _ = retainedBlockBuffer
         return data
+    }
+
+    private static func rms(fromPCM16Data data: Data) -> Float {
+        data.withUnsafeBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            guard !samples.isEmpty else { return 0 }
+            let sum = samples.reduce(Float(0)) { sum, sample in
+                let value = Float(sample) / 32768
+                return sum + value * value
+            }
+            return sqrt(sum / Float(samples.count))
+        }
     }
 
     private static func calculateLevel(fromPCM16Data data: Data) -> Float {

@@ -6,7 +6,7 @@ final class LLMValidationService {
     typealias Validator = @Sendable (LLMValidationInput, @escaping @MainActor @Sendable () -> Void) async throws -> Void
 
     private let validator: Validator
-    private let onThinkingUnsupported: @MainActor @Sendable () -> Void
+    private let onThinkingUnsupported: @MainActor @Sendable (LLMValidationInput) -> Void
 
     private var validationTask: Task<Void, Never>?
     private var activeFingerprint: String?
@@ -17,7 +17,7 @@ final class LLMValidationService {
     private(set) var lastErrorMessage: String?
 
     init(
-        onThinkingUnsupported: @escaping @MainActor @Sendable () -> Void = {},
+        onThinkingUnsupported: @escaping @MainActor @Sendable (LLMValidationInput) -> Void = { _ in },
         validator: @escaping Validator = LLMValidationService.defaultValidator
     ) {
         self.onThinkingUnsupported = onThinkingUnsupported
@@ -71,7 +71,7 @@ final class LLMValidationService {
         let validator = self.validator
         let onThinkingUnsupported: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self, self.activeRequestID == requestID else { return }
-            self.onThinkingUnsupported()
+            self.onThinkingUnsupported(normalizedInput)
         }
 
         validationTask = Task { [weak self] in
@@ -114,7 +114,7 @@ final class LLMValidationService {
     private static func configurationFingerprint(_ input: LLMValidationInput) -> String {
         // 验证中自动记住的兼容开关不改变连接身份，避免 fallback 成功后立即重复验证。
         var identity = input.normalized()
-        identity.thinkingDisabled = false
+        identity.omitThinkingParameter = false
         return identity.fingerprint
     }
 
@@ -126,7 +126,7 @@ final class LLMValidationService {
             baseURL: input.baseURL,
             apiKey: input.apiKey,
             model: input.model,
-            thinkingDisabled: input.thinkingDisabled,
+            omitThinkingParameter: input.omitThinkingParameter,
             onThinkingUnsupported: onThinkingUnsupported
         )
         try await provider.validateConfiguration()

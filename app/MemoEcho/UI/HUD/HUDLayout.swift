@@ -67,6 +67,14 @@ enum HUDLayout {
         value * scale
     }
 
+    static func recoveryWidth(for text: String) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: textSize, weight: .semibold), .kern: resultTracking
+        ]
+        let width = ceil((text as NSString).size(withAttributes: attributes).width)
+        return max(resultWidth, regularHorizontalPadding * 2 + iconSize + compactHorizontalPadding + width)
+    }
+
     static func noticeWidth(for text: String) -> CGFloat {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: textSize, weight: .semibold),

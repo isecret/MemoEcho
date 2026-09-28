@@ -2,7 +2,7 @@ import Foundation
 import os.log
 
 final class SenseVoiceASRProvider: ASRProvider, @unchecked Sendable {
-    private let logger = Logger(subsystem: "com.isecret.memoecho", category: "SenseVoiceASR")
+    private let logger = Logger(subsystem: "me.wangmao.memoecho", category: "SenseVoiceASR")
     private let runtimeManager: SenseVoiceRuntimeManager
 
     init(runtimeManager: SenseVoiceRuntimeManager) {

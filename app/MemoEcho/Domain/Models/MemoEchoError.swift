@@ -2,6 +2,7 @@ import Foundation
 
 /// 统一错误模型，覆盖主链路所有可预期的失败场景
 enum MemoEchoError: Error, Equatable, Sendable {
+    case audioCaptureInterrupted(AudioCaptureInterruption)
     case microphonePermissionDenied
     case audioRecordingUnavailable(detail: String)
     case accessibilityPermissionDenied
@@ -36,6 +37,8 @@ enum MemoEchoError: Error, Equatable, Sendable {
     /// 用户可理解的错误摘要，用于菜单栏和设置页展示
     var userMessage: String {
         switch self {
+        case .audioCaptureInterrupted(let reason):
+            reason.message
         case .microphonePermissionDenied:
             "麦克风权限未开启，无法录音"
         case .audioRecordingUnavailable:
@@ -90,6 +93,8 @@ enum MemoEchoError: Error, Equatable, Sendable {
     /// 映射为 HUD 短错误分类
     var hudFailureReason: HUDFailureReason {
         switch self {
+        case .audioCaptureInterrupted:
+            .recordingInterrupted
         case .microphonePermissionDenied, .accessibilityPermissionDenied:
             .permissionDenied
         case .asrBinaryNotFound, .asrModelMissing, .asrRuntimeMissing, .asrPlatformNotReady:

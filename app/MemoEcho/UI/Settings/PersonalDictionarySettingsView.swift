@@ -8,9 +8,10 @@ struct PersonalDictionarySettingsView: View {
         static let listHeight: CGFloat = 280
         static let accessoryHeight: CGFloat = 30
         static let searchWidth: CGFloat = 180
-        static let headerSpacing: CGFloat = 12
+        // Space between the fading viewport edge and the surrounding controls.
+        static let listSpacing: CGFloat = 16
+        static let edgeFadeHeight: CGFloat = 12
         static let stackSpacing: CGFloat = 7
-        static let listCornerRadius: CGFloat = 6
     }
 
     @State private var viewModel: PersonalDictionaryViewModel
@@ -19,6 +20,7 @@ struct PersonalDictionarySettingsView: View {
     @FocusState private var isListFocused: Bool
     @State private var editorMode: DictionaryEditorMode?
     @State private var pendingScrollTargetID: String?
+    @State private var entryFrames: [String: CGRect] = [:]
     @State private var statusMessage: String?
     @State private var alertMessage: String?
     @State private var statusTask: Task<Void, Never>?
@@ -28,10 +30,10 @@ struct PersonalDictionarySettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Layout.headerSpacing) {
+        VStack(alignment: .leading, spacing: Layout.listSpacing) {
             header
+            listContainer
             VStack(alignment: .leading, spacing: Layout.stackSpacing) {
-                listContainer
                 toolbar
                 footer
             }
@@ -57,6 +59,8 @@ struct PersonalDictionarySettingsView: View {
         .onChange(of: viewModel.entries) {
             reconcileSelection()
         }
+        .onChange(of: viewModel.selectedFilter) { reconcileSelection() }
+        .onChange(of: searchText) { reconcileSelection() }
         .onDisappear {
             statusTask?.cancel()
         }
@@ -64,8 +68,15 @@ struct PersonalDictionarySettingsView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            Text("常用词")
-                .accessibilityAddTraits(.isHeader)
+            Picker("词条分类", selection: $viewModel.selectedFilter) {
+                ForEach(DictionaryFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.regular)
+            .labelsHidden()
+            .fixedSize()
 
             Spacer(minLength: 8)
 
@@ -82,32 +93,35 @@ struct PersonalDictionarySettingsView: View {
 
     private var listContainer: some View {
         ScrollViewReader { proxy in
-            List(selection: $selectedEntryID) {
-                ForEach(displayedEntries) { entry in
-                    Text(entry.term)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .tag(entry.id)
-                        .id(entry.id)
-                        .simultaneousGesture(
-                            TapGesture(count: 2).onEnded {
-                                editorMode = .edit(entry)
-                            }
+            ScrollView(.vertical) {
+                DictionaryTagLayout(spacing: 8) {
+                    ForEach(displayedEntries) { entry in
+                        DictionaryTagView(
+                            term: entry.term,
+                            isAutoLearned: entry.source == .autoLearned,
+                            isSelected: selectedEntryID == entry.id,
+                            onSelect: { selectedEntryID = entry.id; isListFocused = true },
+                            onEdit: { editorMode = .edit(entry) },
+                            onDelete: { delete(entry) }
                         )
-                        .contextMenu {
-                            Button("编辑") {
-                                editorMode = .edit(entry)
-                            }
-                            Button("删除", role: .destructive) {
-                                delete(entry)
+                        .id(entry.id)
+                        .background {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: DictionaryEntryFramesKey.self,
+                                    value: [entry.id: geometry.frame(in: .named("dictionaryViewport"))]
+                                )
                             }
                         }
-                        .accessibilityLabel(entry.term)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                // Keep the first and last rows clear when scrolled to either end.
+                .padding(.vertical, Layout.edgeFadeHeight)
+                .mask(alignment: .topLeading) { listContentMask }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: false))
-            .environment(\.defaultMinListRowHeight, 28)
+            .focusable()
+            .focusEffectDisabled()
             .focused($isListFocused)
             .onChange(of: selectedEntryID) {
                 if selectedEntryID != nil {
@@ -115,16 +129,12 @@ struct PersonalDictionarySettingsView: View {
                 }
             }
             .frame(width: Layout.workspaceWidth, height: Layout.listHeight)
-            .clipShape(
-                RoundedRectangle(cornerRadius: Layout.listCornerRadius, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: Layout.listCornerRadius, style: .continuous)
-                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                    .allowsHitTesting(false)
-            }
+            .coordinateSpace(name: "dictionaryViewport")
+            .onPreferenceChange(DictionaryEntryFramesKey.self) { entryFrames = $0 }
             .onDeleteCommand(perform: deleteSelection)
             .onKeyPress(.return) { handleReturnKey() }
+            .onKeyPress(.leftArrow) { moveSelection(by: -1, proxy: proxy) }
+            .onKeyPress(.rightArrow) { moveSelection(by: 1, proxy: proxy) }
             .overlay {
                 if viewModel.entries.isEmpty {
                     dictionaryEmptyState
@@ -142,6 +152,25 @@ struct PersonalDictionarySettingsView: View {
                 }
             }
             .accessibilityLabel("词条列表")
+        }
+    }
+
+    // Keep the fade fixed to the viewport while masking only the scrolling tags.
+    // The native scroll indicator is a sibling of this content and stays unmasked.
+    private var listContentMask: some View {
+        GeometryReader { geometry in
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: Layout.edgeFadeHeight / Layout.listHeight),
+                    .init(color: .black, location: 1 - Layout.edgeFadeHeight / Layout.listHeight),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Layout.listHeight)
+            .offset(y: -geometry.frame(in: .named("dictionaryViewport")).minY)
         }
     }
 
@@ -169,16 +198,16 @@ struct PersonalDictionarySettingsView: View {
             }
             .frame(maxWidth: .infinity)
 
-            Text("\(viewModel.totalCount) 个词条")
+            Text("\(displayedEntries.count) 个词条")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("\(viewModel.totalCount) 个词条")
+                .accessibilityLabel("\(displayedEntries.count) 个词条")
         }
         .frame(height: Layout.accessoryHeight)
     }
 
     private var footer: some View {
-        Text("添加人名、产品名和专业术语，MemoEcho 会尽量保留这些写法。")
+        Text("双击标签可编辑，点击 × 删除。蓝点表示自动学习的词。")
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -202,10 +231,9 @@ struct PersonalDictionarySettingsView: View {
     }
 
     private var searchEmptyState: some View {
-        Text("未找到词条")
+        Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "暂无\(viewModel.selectedFilter.title)的词条" : "未找到词条")
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityLabel("未找到词条")
     }
 
     private var displayedEntries: [DictionaryEntry] {
@@ -215,12 +243,34 @@ struct PersonalDictionarySettingsView: View {
     private var selectedEntry: DictionaryEntry? {
         guard let selectedEntryID else { return nil }
         return displayedEntries.first(where: { $0.id == selectedEntryID })
-            ?? viewModel.entries.first(where: { $0.id == selectedEntryID })
     }
 
     private func handleReturnKey() -> KeyPress.Result {
         guard editorMode == nil, let selectedEntry else { return .ignored }
         editorMode = .edit(selectedEntry)
+        return .handled
+    }
+
+    private func moveSelection(by offset: Int, proxy: ScrollViewProxy) -> KeyPress.Result {
+        guard editorMode == nil, !displayedEntries.isEmpty else { return .ignored }
+        let entries = displayedEntries
+        let nextIndex: Int
+        if let current = entries.firstIndex(where: { $0.id == selectedEntryID }) {
+            nextIndex = min(max(current + offset, 0), entries.count - 1)
+        } else {
+            nextIndex = offset > 0 ? 0 : entries.count - 1
+        }
+        let targetID = entries[nextIndex].id
+        selectedEntryID = targetID
+        if let frame = entryFrames[targetID] {
+            // Scroll only far enough to clear the fade, keeping visible rows still.
+            let anchorInset = Layout.edgeFadeHeight / max(1, Layout.listHeight - frame.height)
+            if frame.minY < Layout.edgeFadeHeight - 0.5 {
+                proxy.scrollTo(targetID, anchor: UnitPoint(x: 0.5, y: anchorInset))
+            } else if frame.maxY > Layout.listHeight - Layout.edgeFadeHeight + 0.5 {
+                proxy.scrollTo(targetID, anchor: UnitPoint(x: 0.5, y: 1 - anchorInset))
+            }
+        }
         return .handled
     }
 
@@ -246,18 +296,21 @@ struct PersonalDictionarySettingsView: View {
         }
 
         let targetID = id ?? viewModel.entries.first(where: { $0.term == normalized })?.id
+        if let entry = viewModel.entries.first(where: { $0.id == targetID }), !viewModel.selectedFilter.includes(entry) {
+            viewModel.selectedFilter = entry.source == .manual ? .manualAdded : .autoAdded
+        }
         selectedEntryID = targetID
         pendingScrollTargetID = targetID
     }
 
     private func deleteSelection() {
         guard let selectedEntryID,
-              let entry = viewModel.entries.first(where: { $0.id == selectedEntryID }) else { return }
+              let entry = displayedEntries.first(where: { $0.id == selectedEntryID }) else { return }
         delete(entry)
     }
 
     private func delete(_ entry: DictionaryEntry) {
-        let nextSelection = viewModel.neighboringEntryID(afterDeleting: entry.id)
+        let nextSelection = viewModel.neighboringEntryID(afterDeleting: entry.id, matching: searchText)
         guard viewModel.deleteEntry(entry) else {
             presentAlert(viewModel.errorMessage ?? PersonalDictionaryViewModel.ValidationError.saveFailed.rawValue)
             return
@@ -266,7 +319,7 @@ struct PersonalDictionarySettingsView: View {
     }
 
     private func reconcileSelection() {
-        if let selectedEntryID, viewModel.entries.contains(where: { $0.id == selectedEntryID }) == false {
+        if let selectedEntryID, displayedEntries.contains(where: { $0.id == selectedEntryID }) == false {
             self.selectedEntryID = nil
         }
     }
@@ -276,22 +329,26 @@ struct PersonalDictionarySettingsView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowedContentTypes = [.json]
+        panel.allowedContentTypes = [.commaSeparatedText]
         panel.prompt = "导入"
-        panel.message = "选择一个 MemoEcho 词典 JSON 文件"
+        panel.message = "选择 UTF-8 CSV 文件，每行一个词，无表头。导入词归为手动添加。"
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         viewModel.importEntries(from: url)
+        if viewModel.errorMessage == nil {
+            viewModel.selectedFilter = .manualAdded
+            searchText = ""
+        }
         presentOperationResult()
     }
 
     private func exportDictionary() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
+        panel.allowedContentTypes = [.commaSeparatedText]
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "memoecho-dictionary.json"
+        panel.nameFieldStringValue = "memoecho-dictionary.csv"
         panel.prompt = "导出"
-        panel.message = "导出 MemoEcho 词典 JSON 文件"
+        panel.message = "导出全部词条为 CSV，每行一个词，无表头。"
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         viewModel.exportEntries(to: url)
@@ -324,5 +381,13 @@ struct PersonalDictionarySettingsView: View {
                 statusMessage = nil
             }
         }
+    }
+}
+
+private struct DictionaryEntryFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }

@@ -63,14 +63,29 @@ coverage/
 *.profraw
 
 # Temporary files
+__pycache__/
 tmp/
 temp/
 *.tmp
 
 # Local runtime / scripts output
 .runtime/
+.wrangler/
 dist/
 build/
+node_modules/
+
+# Local design and sound experiments; production assets live in app resources
+app/preview-audio/
+docs/previews/
+scripts/preview_*
+scripts/export_ufo_feedback.py
+
+# Signing credentials
+*.p8
+*.p12
+*.pfx
+*.key.pem
 
 # RNNoise resources (set up via scripts/setup-rnnoise.sh)
 app/MemoEcho/Resources/rnnoise/

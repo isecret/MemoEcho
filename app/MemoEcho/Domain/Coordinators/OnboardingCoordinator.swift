@@ -155,8 +155,15 @@ final class OnboardingCoordinator {
         if wasActive { onCancelTrial?() }
     }
 
+    var canGoBack: Bool {
+        switch step {
+        case .llm, .permissions, .hotkey: true
+        case .welcome, .asr, .tryIt: false
+        }
+    }
+
     func goBack() {
-        guard step != .tryIt else { return }
+        guard canGoBack else { return }
         guard let index = SetupStep.allCases.firstIndex(of: step), index > 0 else { return }
         go(to: SetupStep.allCases[index - 1])
     }

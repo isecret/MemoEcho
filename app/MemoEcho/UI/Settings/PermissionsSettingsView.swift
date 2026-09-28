@@ -71,7 +71,7 @@ struct PermissionsSettingsView: View {
                 }
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("用于向其他应用写入文字，也可能读取输入框附近的少量文字；密码框等敏感场景不会发送输入内容。")
+                    Text("用于向其他应用写入文字。")
                     if let error = permissionsManager.accessibilityGuideError {
                         Text(error).foregroundStyle(.red)
                     }

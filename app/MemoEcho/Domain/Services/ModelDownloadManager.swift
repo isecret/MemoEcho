@@ -24,7 +24,7 @@ final class ModelDownloadManager {
     private(set) var isDownloading: Bool = false
     private(set) var lastError: String?
 
-    private let logger = Logger(subsystem: "com.isecret.memoecho", category: "ModelDownload")
+    private let logger = Logger(subsystem: "me.wangmao.memoecho", category: "ModelDownload")
     private let modelRoot: URL
     private let downloadTransport: DownloadTransport?
     private var downloadTask: Task<Void, Never>?
@@ -71,7 +71,7 @@ final class ModelDownloadManager {
         downloadedBytes = 0
         totalBytesExpected = 0
         currentFileExpectedBytes = 0
-        try? configStore?.updateLocalModelStatus(.downloading)
+        configStore?.updateLocalModelStatus(.downloading)
 
         downloadTask = Task { [weak self] in
             await self?.performDownload()
@@ -88,7 +88,7 @@ final class ModelDownloadManager {
         totalBytesExpected = 0
         currentFileExpectedBytes = 0
         removeIncompleteModels()
-        try? configStore?.updateLocalModelStatus(.notDownloaded)
+        configStore?.updateLocalModelStatus(.notDownloaded)
     }
 
     /// 重新下载（先删除再下载）
@@ -109,7 +109,7 @@ final class ModelDownloadManager {
 
         removeIncompleteModels()
 
-        try? configStore?.updateLocalModelStatus(.notDownloaded)
+        configStore?.updateLocalModelStatus(.notDownloaded)
         logger.info("Models deleted")
     }
 
@@ -177,7 +177,7 @@ final class ModelDownloadManager {
         if validateModels() {
             isDownloading = false
             progress = 1.0
-            try? configStore?.updateLocalModelStatus(.ready)
+            configStore?.updateLocalModelStatus(.ready)
             logger.info("All models downloaded and validated")
         } else {
             await handleDownloadFailure("模型校验失败，文件可能不完整")
@@ -280,7 +280,7 @@ final class ModelDownloadManager {
         isDownloading = false
         lastError = message
         currentFileExpectedBytes = 0
-        try? configStore?.updateLocalModelStatus(.failed, error: message)
+        configStore?.updateLocalModelStatus(.failed, error: message)
         logger.error("Download failed: \(message, privacy: .public)")
     }
 

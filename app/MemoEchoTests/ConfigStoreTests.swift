@@ -18,11 +18,35 @@ final class ConfigStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testWindowContextDefaultsOnAndPersistsOffAcrossOtherSaves() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertTrue(store.windowContextEnabled)
+        try store.saveWindowContextEnabled(false)
+        try store.saveGeneralConfig(store.generalConfig)
+        try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "test"), apiKey: "synthetic-key")
+        let reloaded = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(reloaded.windowContextEnabled)
+        XCTAssertFalse(reloaded.configLoadFailed)
+        try reloaded.saveWindowContextEnabled(true)
+        XCTAssertTrue(ConfigStore(configDirectory: tempDirectory).windowContextEnabled)
+    }
+
+    @MainActor
+    func testFailedWindowContextSaveKeepsActualSetting() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        let url = tempDirectory.appendingPathComponent("config.json")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.saveWindowContextEnabled(false))
+        XCTAssertTrue(store.windowContextEnabled)
+    }
+
+    @MainActor
     func testFreshConfigurationUsesCurrentDefaults() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         XCTAssertEqual(store.generalConfig.hotkey, .default)
         XCTAssertTrue(store.requiresInitialSetup)
-        XCTAssertTrue(store.audioInputConfig.usesSystemDefault)
+        XCTAssertTrue(store.audioInputConfig.usesAutomaticSelection)
         XCTAssertTrue(FileManager.default.fileExists(atPath: tempDirectory.appendingPathComponent("config.json").path))
     }
 
@@ -125,7 +149,7 @@ final class ConfigStoreTests: XCTestCase {
     @MainActor
     func testFailedProgressSaveDoesNotUpdateInMemoryCompletion() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
-        let configURL = tempDirectory.appendingPathComponent("config.json")
+        let configURL = tempDirectory.appendingPathComponent("state.json")
         try FileManager.default.removeItem(at: configURL)
         try FileManager.default.createDirectory(at: configURL, withIntermediateDirectories: false)
 
@@ -240,8 +264,7 @@ final class ConfigStoreTests: XCTestCase {
     func testSaveAndReloadAudioInputConfig() throws {
         let firstStore = ConfigStore(configDirectory: tempDirectory)
         let config = AudioInputConfig(
-            selectedDeviceID: "device-1",
-            selectedDeviceName: "Studio Display 麦克风"
+            selectedDeviceID: "device-1"
         )
         try firstStore.saveAudioInputConfig(config)
 
@@ -249,5 +272,179 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(secondStore.audioInputConfig, config)
     }
 
+    @MainActor
+    func testAudioSelectionModesRemainDistinctAfterReload() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        for config in [AudioInputConfig.automatic, .systemDefault,
+                       .init(selectedDeviceID: "headset")] {
+            try store.saveAudioInputConfig(config)
+            XCTAssertEqual(ConfigStore(configDirectory: tempDirectory).audioInputConfig, config)
+        }
+    }
 
+
+    @MainActor
+    func testFilesSeparateSettingsCredentialsAndDurableState() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "test"), apiKey: "synthetic-llm-secret")
+        var asr = store.asrConfig
+        asr.tencentCloud.secretId = "synthetic-id"
+        asr.tencentCloud.secretKey = "synthetic-asr-secret"
+        asr.aliyun.accessKeyId = "partially-filled"
+        try store.saveASRConfig(asr)
+        let before = try Data(contentsOf: tempDirectory.appendingPathComponent("config.json"))
+        try store.saveOnboardingProgress(.init(lastVisitedStep: .llm))
+        try store.markThinkingParameterUnsupported(for: store.llmConfig, apiKey: store.openAIAPIKey)
+        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        store.updateLocalModelStatus(.downloading)
+        XCTAssertEqual(try Data(contentsOf: tempDirectory.appendingPathComponent("config.json")), before)
+        let settings = try XCTUnwrap(JSONSerialization.jsonObject(with: before) as? [String: Any])
+        XCTAssertEqual(Set(settings.keys), ["general", "llm", "asr", "audio"])
+        let providers = try XCTUnwrap(settings["asr"] as? [String: Any])
+        XCTAssertEqual(Set(providers.keys), ["selectedPlatform", "tencentCloud", "aliyun"])
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.aliyun.accessKeyId, "partially-filled")
+        XCTAssertTrue(restored.omitThinkingParameter)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.validationStatus, .verified)
+        let configText = String(decoding: before, as: UTF8.self)
+        for key in ["modelStatus", "validationStatus", "lastError", "onboarding", "thinkingDisabled", "omitThinkingParameter", "launchAtLogin", "selectedDeviceName", "displayString"] {
+            XCTAssertFalse(configText.contains("\"\(key)\""), key)
+        }
+        let stateText = try String(contentsOf: tempDirectory.appendingPathComponent("state.json"), encoding: .utf8)
+        XCTAssertFalse(stateText.contains("synthetic-llm-secret"))
+        XCTAssertFalse(stateText.contains("synthetic-asr-secret"))
+        XCTAssertTrue(configText.contains("synthetic-llm-secret"))
+        XCTAssertTrue(configText.contains("synthetic-asr-secret"))
+        for name in ["config.json", "state.json"] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: tempDirectory.appendingPathComponent(name).path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        }
+    }
+
+    @MainActor
+    func testTransientDownloadAndValidationStatesDoNotSurviveRestart() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var asr = store.asrConfig
+        asr.volcengine.apiKey = "synthetic"
+        try store.saveASRConfig(asr)
+        let configBefore = try Data(contentsOf: tempDirectory.appendingPathComponent("config.json"))
+        for status in [CloudASRValidationStatus.validating, .failed] {
+            try store.updateCloudValidationState(for: .volcengineSentence, status: .verified)
+            try store.updateCloudValidationState(for: .volcengineSentence, status: status, error: "synthetic error")
+            store.updateLocalModelStatus(.downloading, error: "synthetic download error")
+            let restored = ConfigStore(configDirectory: tempDirectory)
+            XCTAssertEqual(restored.asrConfig.volcengine.validationStatus, .unvalidated)
+            XCTAssertNil(restored.asrConfig.volcengine.lastValidationError)
+            XCTAssertNotEqual(restored.asrConfig.local.modelStatus, .downloading)
+            XCTAssertNil(restored.asrConfig.local.lastError)
+            XCTAssertEqual(try Data(contentsOf: tempDirectory.appendingPathComponent("config.json")), configBefore)
+            let state = try String(contentsOf: tempDirectory.appendingPathComponent("state.json"), encoding: .utf8)
+            XCTAssertFalse(state.contains("synthetic error"))
+            XCTAssertFalse(state.contains("synthetic download error"))
+        }
+    }
+
+    @MainActor
+    func testCapabilityCacheMatchesCurrentLLMIdentity() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        let original = LLMConfig(baseURL: "https://example.com/v1", model: "one")
+        for (config, key) in [(LLMConfig(baseURL: "https://other.example/v1", model: "one"), "key"),
+                              (LLMConfig(baseURL: "https://example.com/v1", model: "two"), "key"),
+                              (original, "other-key")] {
+            try store.saveLLMConfig(original, apiKey: "key")
+            try store.markThinkingParameterUnsupported(for: store.llmConfig, apiKey: store.openAIAPIKey)
+            XCTAssertTrue(store.omitThinkingParameter)
+            try store.saveLLMConfig(config, apiKey: key)
+            XCTAssertFalse(store.omitThinkingParameter)
+            XCTAssertFalse(ConfigStore(configDirectory: tempDirectory).omitThinkingParameter)
+        }
+    }
+
+    @MainActor
+    func testExternalCredentialEditCannotReuseCloudVerification() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var asr = store.asrConfig
+        asr.volcengine.apiKey = "original"
+        try store.saveASRConfig(asr)
+        try store.updateCloudValidationState(for: .volcengineSentence, status: .verified)
+        let url = tempDirectory.appendingPathComponent("config.json")
+        var json = try String(contentsOf: url, encoding: .utf8)
+        json = json.replacingOccurrences(of: "original", with: "different")
+        try Data(json.utf8).write(to: url)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(restored.configLoadFailed)
+        XCTAssertEqual(restored.asrConfig.volcengine.validationStatus, .unvalidated)
+    }
+
+    @MainActor
+    func testCorruptStatePreservesCredentialsAndSettings() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "one"), apiKey: "synthetic")
+        try store.saveWindowContextEnabled(false)
+        let url = tempDirectory.appendingPathComponent("config.json")
+        let before = try Data(contentsOf: url)
+        try Data("{invalid".utf8).write(to: tempDirectory.appendingPathComponent("state.json"))
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(restored.configLoadFailed)
+        XCTAssertEqual(restored.openAIAPIKey, "synthetic")
+        XCTAssertFalse(restored.windowContextEnabled)
+        XCTAssertFalse(restored.omitThinkingParameter)
+        XCTAssertEqual(try Data(contentsOf: url), before)
+    }
+
+    @MainActor
+    func testDeletingConfigResetsExistingOnboardingAndCapabilityState() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "one"), apiKey: "synthetic")
+        try store.markThinkingParameterUnsupported(for: store.llmConfig, apiKey: store.openAIAPIKey)
+        try store.saveOnboardingProgress(.init(lastVisitedStep: .tryIt, hasFinishedPresentation: true, hasConfirmedHotkey: true))
+        try FileManager.default.removeItem(at: tempDirectory.appendingPathComponent("config.json"))
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(restored.configLoadFailed)
+        XCTAssertTrue(restored.requiresInitialSetup)
+        XCTAssertEqual(restored.onboardingProgress, OnboardingProgress())
+        XCTAssertFalse(restored.omitThinkingParameter)
+        XCTAssertTrue(restored.openAIAPIKey.isEmpty)
+    }
+
+    @MainActor
+    func testFailedStateWriteRollsBackChangedHotkey() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        try store.saveGeneralConfig(store.generalConfig, confirmingHotkey: true)
+        let url = tempDirectory.appendingPathComponent("state.json")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        var changed = store.generalConfig
+        changed.hotkey = .special(modifiers: [.init(key: .option, side: .right)])
+        XCTAssertThrowsError(try store.saveGeneralConfig(changed, confirmingHotkey: true))
+        XCTAssertEqual(store.generalConfig.hotkey, .default)
+        XCTAssertTrue(store.onboardingProgress.hasConfirmedHotkey)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.generalConfig.hotkey, .default)
+        XCTAssertFalse(restored.onboardingProgress.hasConfirmedHotkey)
+    }
+
+    @MainActor
+    func testTransientStateStillUpdatesWhenConfigIsNotWritable() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        let url = tempDirectory.appendingPathComponent("config.json")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        store.updateLocalModelStatus(.failed, error: "download failed")
+        try store.updateCloudValidationState(for: .volcengineSentence, status: .validating)
+        try store.saveOnboardingProgress(.init(lastVisitedStep: .llm))
+        XCTAssertEqual(store.asrConfig.local.modelStatus, .failed)
+        XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .validating)
+        XCTAssertEqual(store.onboardingProgress.lastVisitedStep, .llm)
+    }
+    @MainActor
+    func testLateCapabilityResultCannotChangeNewConfiguration() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        let old = LLMConfig(baseURL: "https://example.com/v1", model: "old-model")
+        try store.saveLLMConfig(old, apiKey: "old-key")
+        try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "new-model"), apiKey: "new-key")
+        try store.markThinkingParameterUnsupported(for: old, apiKey: "old-key")
+        XCTAssertFalse(store.omitThinkingParameter)
+        XCTAssertFalse(ConfigStore(configDirectory: tempDirectory).omitThinkingParameter)
+    }
 }

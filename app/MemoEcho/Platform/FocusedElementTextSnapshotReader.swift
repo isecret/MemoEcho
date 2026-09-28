@@ -2,62 +2,75 @@ import ApplicationServices
 import AppKit
 import Foundation
 
+/// Retains the AX reference for identity comparisons only; AX access stays on MainActor.
+struct FocusedElementIdentity: @unchecked Sendable, Equatable {
+    private let element: AXUIElement?
+    private let token: String?
+
+    init(element: AXUIElement) { self.element = element; token = nil }
+    init(token: String) { element = nil; self.token = token }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        if let left = lhs.element, let right = rhs.element { return CFEqual(left, right) }
+        return lhs.element == nil && rhs.element == nil && lhs.token == rhs.token
+    }
+}
+
 struct FocusedElementTextSnapshot: Sendable, Equatable {
     let pid: pid_t
     let bundleID: String?
+    let identity: FocusedElementIdentity
     let value: String
+    let selection: NSRange
+    let isComposing: Bool
+
+    func belongsToSameField(as other: Self) -> Bool {
+        pid == other.pid && bundleID == other.bundleID && identity == other.identity
+    }
 }
 
 struct FocusedElementTextSnapshotReader: Sendable {
-    private let resolver: FocusedElementResolver
-
-    init(resolver: FocusedElementResolver = FocusedElementResolver()) {
-        self.resolver = resolver
-    }
+    private let resolver = FocusedElementResolver()
 
     @MainActor
     func read(targetPID: pid_t?, targetBundleID: String?) -> FocusedElementTextSnapshot? {
-        guard AXIsProcessTrusted() else { return nil }
-        guard let targetPID else { return nil }
-
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
-            return nil
-        }
-
-        guard let resolved = resolver.resolveFocusedElement(
-            targetPID: targetPID,
-            shouldRestoreTargetApplication: false
-        ) else {
-            return nil
-        }
-
-        guard let value = Self.attributeString(
-            resolved.element,
-            attribute: kAXValueAttribute as CFString
-        ),
-        !value.isEmpty else {
-            return nil
-        }
-
+        guard AXIsProcessTrusted(), let targetPID,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
+              let resolved = resolver.resolveFocusedElement(targetPID: targetPID, shouldRestoreTargetApplication: false)
+        else { return nil }
+        let element = resolved.element
+        // Secure fields never enter the learning pipeline.
+        guard string(element, kAXSubroleAttribute) != kAXSecureTextFieldSubrole,
+              isWritable(element, kAXSelectedTextAttribute) || isWritable(element, kAXValueAttribute),
+              let value = string(element, kAXValueAttribute), value.utf16.count <= 100_000,
+              let selection = range(element, kAXSelectedTextRangeAttribute),
+              Range(selection, in: value) != nil else { return nil }
         let bundleID = resolved.bundleID ?? targetBundleID
-        if let targetBundleID, let bundleID, bundleID != targetBundleID {
-            return nil
-        }
-
-        return FocusedElementTextSnapshot(
-            pid: targetPID,
-            bundleID: bundleID,
-            value: value
-        )
+        guard targetBundleID == nil || bundleID == targetBundleID else { return nil }
+        // Some AX implementations expose marked text; absence is not proof of commitment.
+        let marked = range(element, "AXMarkedTextRange")
+        return .init(pid: targetPID, bundleID: bundleID, identity: .init(element: element),
+                     value: value, selection: selection,
+                     isComposing: marked.map { $0.location != NSNotFound && $0.length > 0 } ?? false)
     }
 
-    private static func attributeString(
-        _ element: AXUIElement,
-        attribute: CFString
-    ) -> String? {
-        var valueRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute, &valueRef)
-        guard result == .success else { return nil }
-        return valueRef as? String
+    private func string(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private func isWritable(_ element: AXUIElement, _ attribute: String) -> Bool {
+        var writable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(element, attribute as CFString, &writable) == .success && writable.boolValue
+    }
+
+    private func range(_ element: AXUIElement, _ attribute: String) -> NSRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+        return NSRange(location: range.location, length: range.length)
     }
 }

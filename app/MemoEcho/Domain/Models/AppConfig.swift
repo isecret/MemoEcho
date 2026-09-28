@@ -6,7 +6,6 @@ import Foundation
 struct LLMConfig: Codable, Equatable, Sendable {
     var baseURL: String = ""
     var model: String = ""
-    var thinkingDisabled: Bool = false
 }
 
 // MARK: - ASR 平台配置
@@ -91,6 +90,34 @@ struct ASRConfig: Codable, Equatable, Sendable {
     var xiaomiMiMoTokenPlan: XiaomiMiMoASRConfig = XiaomiMiMoASRConfig()
 
     init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedPlatform, local, tencentCloud, aliyun, volcengine, xunfei, xiaomiMiMo, xiaomiMiMoTokenPlan
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        selectedPlatform = try container.decode(ASRPlatform.self, forKey: .selectedPlatform)
+        local = try container.decodeIfPresent(LocalASRConfig.self, forKey: .local) ?? LocalASRConfig()
+        tencentCloud = try container.decodeIfPresent(TencentASRConfig.self, forKey: .tencentCloud) ?? TencentASRConfig()
+        aliyun = try container.decodeIfPresent(AliyunASRConfig.self, forKey: .aliyun) ?? AliyunASRConfig()
+        volcengine = try container.decodeIfPresent(VolcengineASRConfig.self, forKey: .volcengine) ?? VolcengineASRConfig()
+        xunfei = try container.decodeIfPresent(XunfeiASRConfig.self, forKey: .xunfei) ?? XunfeiASRConfig()
+        xiaomiMiMo = try container.decodeIfPresent(XiaomiMiMoASRConfig.self, forKey: .xiaomiMiMo) ?? XiaomiMiMoASRConfig()
+        xiaomiMiMoTokenPlan = try container.decodeIfPresent(XiaomiMiMoASRConfig.self, forKey: .xiaomiMiMoTokenPlan) ?? XiaomiMiMoASRConfig()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(selectedPlatform, forKey: .selectedPlatform)
+        if let source = local.mirrorSource, !source.isEmpty { try container.encode(local, forKey: .local) }
+        if !tencentCloud.secretId.isEmpty || !tencentCloud.secretKey.isEmpty { try container.encode(tencentCloud, forKey: .tencentCloud) }
+        if !aliyun.accessKeyId.isEmpty || !aliyun.accessKeySecret.isEmpty || !aliyun.appKey.isEmpty { try container.encode(aliyun, forKey: .aliyun) }
+        if !volcengine.apiKey.isEmpty { try container.encode(volcengine, forKey: .volcengine) }
+        if !xunfei.appID.isEmpty || !xunfei.apiKey.isEmpty || !xunfei.apiSecret.isEmpty { try container.encode(xunfei, forKey: .xunfei) }
+        if !xiaomiMiMo.apiKey.isEmpty { try container.encode(xiaomiMiMo, forKey: .xiaomiMiMo) }
+        if !xiaomiMiMoTokenPlan.apiKey.isEmpty { try container.encode(xiaomiMiMoTokenPlan, forKey: .xiaomiMiMoTokenPlan) }
+    }
 
     func isReady(localModelsAvailable: Bool) -> Bool {
         switch selectedPlatform {
@@ -188,6 +215,9 @@ extension CloudASRConfigState {
 
 /// 本地 ASR 配置
 struct LocalASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case mirrorSource }
+
     var modelStatus: LocalModelStatus = .notDownloaded
     var lastError: String?
     var mirrorSource: String?
@@ -211,6 +241,9 @@ struct LocalASRConfig: Codable, Equatable, Sendable {
 
 /// 腾讯云一句话识别配置
 struct TencentASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case secretId, secretKey }
+
     var secretId: String = ""
     var secretKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
@@ -226,6 +259,9 @@ struct TencentASRConfig: Codable, Equatable, Sendable {
 
 /// 阿里云一句话识别配置
 struct AliyunASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case accessKeyId, accessKeySecret, appKey }
+
     var accessKeyId: String = ""
     var accessKeySecret: String = ""
     var appKey: String = ""
@@ -245,6 +281,9 @@ struct AliyunASRConfig: Codable, Equatable, Sendable {
 
 /// 火山引擎文件识别配置
 struct VolcengineASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case apiKey }
+
     var apiKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
     var lastValidationError: String?
@@ -260,6 +299,9 @@ struct VolcengineASRConfig: Codable, Equatable, Sendable {
 
 /// 科大讯飞语音听写配置
 struct XunfeiASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case appID, apiKey, apiSecret }
+
     var appID: String = ""
     var apiKey: String = ""
     var apiSecret: String = ""
@@ -279,6 +321,9 @@ struct XunfeiASRConfig: Codable, Equatable, Sendable {
 
 /// 小米 MiMo ASR 配置
 struct XiaomiMiMoASRConfig: Codable, Equatable, Sendable {
+    // Persist user input only; status and errors belong to the current process.
+    private enum CodingKeys: String, CodingKey { case apiKey }
+
     var apiKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
     var lastValidationError: String?
@@ -326,11 +371,40 @@ extension XiaomiMiMoASRConfig: CloudASRConfigState {
 
 struct AudioInputConfig: Codable, Equatable, Sendable {
     var selectedDeviceID: String?
-    var selectedDeviceName: String?
+
+    private enum Selection: String, Codable { case automatic, systemDefault, device }
+    private enum CodingKeys: String, CodingKey { case selection, deviceID }
+
+    init(selectedDeviceID: String?) { self.selectedDeviceID = selectedDeviceID }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Selection.self, forKey: .selection) {
+        case .automatic: selectedDeviceID = Self.automaticSelectionID
+        case .systemDefault: selectedDeviceID = nil
+        case .device: selectedDeviceID = try container.decode(String.self, forKey: .deviceID)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if usesAutomaticSelection {
+            try container.encode(Selection.automatic, forKey: .selection)
+        } else if let selectedDeviceID {
+            try container.encode(Selection.device, forKey: .selection)
+            try container.encode(selectedDeviceID, forKey: .deviceID)
+        } else {
+            try container.encode(Selection.systemDefault, forKey: .selection)
+        }
+    }
+
+    static let automaticSelectionID = "__memoecho_automatic__"
+    static let automatic = AudioInputConfig(selectedDeviceID: automaticSelectionID)
+
+    var usesAutomaticSelection: Bool { selectedDeviceID == Self.automaticSelectionID }
 
     static let systemDefault = AudioInputConfig(
-        selectedDeviceID: nil,
-        selectedDeviceName: nil
+        selectedDeviceID: nil
     )
 
     var usesSystemDefault: Bool {
@@ -341,24 +415,30 @@ struct AudioInputConfig: Codable, Equatable, Sendable {
 struct AudioInputDevice: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
+    var transport: AudioDeviceTransport = .unknown
+    var isUsable: Bool = true
+}
+
+enum AudioDeviceTransport: Sendable {
+    case builtIn, bluetooth, external, unknown
 }
 
 struct GeneralConfig: Codable, Equatable, Sendable {
     var hotkey: HotkeyCombo = .default
     var interactionSoundEnabled: Bool = true
     var translationTargetLanguage: TranslationTargetLanguage = .english
-    var launchAtLogin: Bool = false
+    var windowContextEnabled: Bool = true
 
     init(
         hotkey: HotkeyCombo = .default,
         interactionSoundEnabled: Bool = true,
         translationTargetLanguage: TranslationTargetLanguage = .english,
-        launchAtLogin: Bool = false
+        windowContextEnabled: Bool = true
     ) {
         self.hotkey = hotkey
         self.interactionSoundEnabled = interactionSoundEnabled
         self.translationTargetLanguage = translationTargetLanguage
-        self.launchAtLogin = launchAtLogin
+        self.windowContextEnabled = windowContextEnabled
     }
 }
 
@@ -564,7 +644,6 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         case keyCode
         case modifiers
         case specialModifiers
-        case displayString
     }
 
     init(from decoder: Decoder) throws {
@@ -572,7 +651,6 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         let decodedKind = try container.decode(HotkeyKind.self, forKey: .kind)
         let decodedSpecialModifiers = try container.decodeIfPresent([HotkeyModifierSpec].self, forKey: .specialModifiers) ?? []
         let decodedModifiers = try container.decode(UInt.self, forKey: .modifiers)
-        let decodedDisplayString = try container.decode(String.self, forKey: .displayString)
 
         kind = decodedKind
         modifiers = decodedModifiers
@@ -582,10 +660,7 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         case .standard:
             let resolvedKeyCode = try container.decode(UInt16.self, forKey: .keyCode)
             keyCode = resolvedKeyCode
-            let keyLabel = Self.standardKeyLabel(
-                from: decodedDisplayString,
-                fallbackKeyCode: resolvedKeyCode
-            )
+            let keyLabel = HotkeyPresentation.keyToken(for: resolvedKeyCode).visualLabel
             displayString = Self.standardDisplayString(
                 modifiers: decodedModifiers,
                 physicalModifiers: decodedSpecialModifiers,
@@ -601,7 +676,6 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(kind, forKey: .kind)
         try container.encode(modifiers, forKey: .modifiers)
-        try container.encode(displayString, forKey: .displayString)
         if !specialModifiers.isEmpty {
             try container.encode(specialModifiers, forKey: .specialModifiers)
         }
@@ -669,51 +743,4 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         }
     }
 
-    private static func standardKeyLabel(from displayString: String?, fallbackKeyCode: UInt16) -> String {
-        guard let displayString else {
-            return "Key \(fallbackKeyCode)"
-        }
-
-        let trimmed = displayString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return "Key \(fallbackKeyCode)"
-        }
-
-        let symbolSeparated = ["⌘", "⌥", "⌃", "⇧", "+"].reduce(trimmed) { partialResult, token in
-            partialResult.replacingOccurrences(of: token, with: " \(token) ")
-        }
-
-        let modifierTokens: Set<String> = [
-            HotkeyModifierKey.command.symbol,
-            HotkeyModifierKey.option.symbol,
-            HotkeyModifierKey.control.symbol,
-            HotkeyModifierKey.shift.symbol,
-            HotkeyModifierKey.command.displayName,
-            HotkeyModifierKey.option.displayName,
-            HotkeyModifierKey.control.displayName,
-            HotkeyModifierKey.shift.displayName,
-            HotkeyModifierKey.command.shortDisplayName,
-            HotkeyModifierKey.option.shortDisplayName,
-            HotkeyModifierKey.control.shortDisplayName,
-            HotkeyModifierKey.shift.shortDisplayName,
-            "Left",
-            "Right",
-            "L",
-            "R"
-        ]
-
-        let keyTokens = symbolSeparated
-            .split(whereSeparator: \.isWhitespace)
-            .map(String.init)
-            .filter { token in
-                token != "+"
-                    && !modifierTokens.contains(token)
-            }
-
-        guard !keyTokens.isEmpty else {
-            return "Key \(fallbackKeyCode)"
-        }
-
-        return keyTokens.joined(separator: " ")
-    }
 }

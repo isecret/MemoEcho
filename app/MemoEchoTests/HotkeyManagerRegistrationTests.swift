@@ -85,6 +85,28 @@ final class HotkeyManagerRegistrationTests: XCTestCase {
         XCTAssertFalse(fixture.store.onboardingProgress.hasConfirmedHotkey)
     }
 
+    func testAppShortcutStateSaveFailureRollsBackListenerAndConfigFile() throws {
+        let fixture = try OnboardingTestFixture()
+        defer { fixture.cleanup() }
+        try configureExistingOptionSpace(fixture.store)
+        try fixture.store.saveGeneralConfig(fixture.store.generalConfig, confirmingHotkey: true)
+        let original = fixture.store.generalConfig.hotkey
+        let manager = HotkeyManager()
+        manager.testInstallHandler = { _ in .success }
+        _ = manager.register(hotkey: original)
+        let configURL = fixture.directory.appendingPathComponent("config.json")
+        let before = try Data(contentsOf: configURL)
+        let stateURL = fixture.directory.appendingPathComponent("state.json")
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
+
+        XCTAssertNotEqual(AppCoordinator.applyHotkey(rightCommand, manager: manager, configStore: fixture.store), .success)
+        XCTAssertEqual(manager.registeredHotkey, original)
+        XCTAssertEqual(fixture.store.generalConfig.hotkey, original)
+        XCTAssertTrue(fixture.store.onboardingProgress.hasConfirmedHotkey)
+        XCTAssertEqual(try Data(contentsOf: configURL), before)
+    }
+
     func testNewRegistrationAndRollbackBothFailLeaveNoListenerAndNoConfirmation() throws {
         let fixture = try OnboardingTestFixture()
         defer { fixture.cleanup() }

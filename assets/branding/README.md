@@ -31,6 +31,10 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift scripts/generate_
 
 预览中的尺寸为导出文件的真实像素；显示器缩放或浏览器缩放可能改变屏幕上的显示尺寸。1× 的月牙与分隔缝会受像素覆盖率影响；2× 保留更多细节。资源验证不等于完成录音、识别、注入链路的运行验收。
 
+## 官网图标导出
+
+运行 `python3 scripts/generate_website_icons.py`，复用现有 App Icon 小尺寸资源和品牌母图，导出 `docs/site-icons/` 下的 ICO、16/32 px favicon、180 px Apple Touch Icon 和 192/512 px 图标。官网预览通过相对路径引用；部署时将该目录与 HTML 一起复制到发布目录。
+
 ## 母图生成提示词
 
 生成方式：内置 `image_gen.imagegen`，非 CLI。分别使用确认后的 App Icon 展示稿和最终带月牙的菜单栏展示稿作为引用图片。

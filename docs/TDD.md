@@ -49,12 +49,12 @@
 
 - 录音标准格式：`PCM/WAV 16k mono`
 - 降噪处理：录音结束后进入 ASR 前执行，输出仍为 ASR 可消费的 16k mono WAV
-- 文本注入主策略：`AX focused element set value`
-- 文本注入回退策略：键盘事件输入
+- 文本注入主策略：临时剪贴板 + 定向粘贴事件 + 同一输入框结果校验
+- 文本注入回退策略：仅在事件未发送时尝试 `AXSelectedText`，写后同样校验
 
 ### 3.4 本地存储
 
-- 全部配置（含密钥）：`~/.memoecho/config.json`（UTF-8 JSON，目录权限 `0700`，文件权限 `0600`）
+- 用户配置（含密钥）：`~/.memoecho/config.json`（UTF-8 JSON，目录权限 `0700`，文件权限 `0600`）
 
 ## 4. 系统架构
 
@@ -92,7 +92,7 @@
 - `LLMProvider`
   负责 OpenAI Chat Completions 调用
 - `TextInjector`
-  负责 AX 注入和键盘事件回退
+  负责目标输入框绑定、剪贴板粘贴、受限 AX 回退与结果确认
 - `WindowContextService`
   负责基于 Accessibility API 捕获当前聚焦输入环境的有限上下文，并执行敏感场景脱敏
 - `PermissionsManager`
@@ -120,6 +120,8 @@
 - 品牌母图保存在 `assets/branding/`。`scripts/generate_app_icon.swift` 导出 `AppIcon.appiconset` 的 10 档 PNG（16–1024 px），以及 `MenuBarIcon.imageset` 的 1×／2× PNG（24×18／48×36 px，图形宽 22 pt、高约 13 pt）。菜单栏资源设为 template，透明背景、月牙与分隔缝都由 alpha 表达，系统负责明暗着色；`MenuBarExtra` 使用固定资源名，不新增状态图标。关于页和权限引导继续使用应用包的 App Icon。导出流程和实际像素预览见 `assets/branding/README.md`。
 - 根据引导进度在首次启动打开独立欢迎页，恢复未完成引导时定位上次步骤
 - 订阅 `SessionCoordinator` 状态用于刷新菜单栏 UI
+- HUD 窗口淡入／淡出使用独立的动画代次，只有新的显示或隐藏动作才替换透明度动画；开始音效、模式切换和录音结束事件不会中断淡入，显示完成时窗口透明度为 1。
+- 交互音效采用随包分发的 `ufo-start.wav` 和 `ufo-end.wav`（44.1 kHz、双声道 PCM16），逐字节采用已确认的 `app/preview-audio/ufo/sonar-studies-v2/a-orbit/` 试听文件。A「柔和双音」Start 约 349→440Hz，End 约 440→349Hz，双音间隔 145ms，RMS 均为 −32dBFS；使用正弦主体、少量二次谐波和轻微声道相位差，无延迟回波或失谐声部。两声均为 18,963 帧（0.43 秒）；以 −60 dBFS、10ms RMS 窗口测得有效时长分别约 0.412 秒、0.410 秒。`FeedbackSoundAssets` 在启动时解码为 Float32 buffer，交由现有 `FeedbackSoundPlayer` 播放，保留音效开关与取消逻辑。资源加载失败只记录错误并静音。`scripts/export_ufo_feedback.py` 校验并复制选定文件，避免重新合成导致试听与应用音色不同；离线校验使用 NumPy、SciPy，不增加运行时依赖。
 - 在应用启动后启动 Sparkle 更新器，并按用户偏好执行自动检查
 - 在普通热键和特殊修饰键热键之间统一分发录音触发动作
 - 开始录音前统一执行 readiness preflight；未就绪时打开或聚焦唯一引导窗口并定位所需步骤，只有就绪且无引导阻塞时才调用 `SessionCoordinator.startRecording()`
@@ -128,7 +130,7 @@
 
 - 引导窗口独立于日常设置页，欢迎页不计数；正式步骤固定为 ASR → LLM → 权限 → 快捷键 → 试用，并显示 `1 / 5` 至 `5 / 5`。
 - `AppCoordinator.makeOnboardingWindow` 统一创建引导窗口，使用 `.unifiedCompact` 原生工具栏及 `centeredItemIdentifiers` 居中展示只读标题“设置 MemoEcho”，隐藏系统默认的左侧标题，保留窗口自身的标题语义。标题项无边框、不可自定义；设置 `titlebarSeparatorStyle = .none`、`titlebarAppearsTransparent = true`，去掉横线并与内容背景衔接。保留 `.titled / .closable / .miniaturizable` 和 760 × 660pt 内容尺寸，不手动操作系统标题栏子视图或修改日常设置窗口。
-- 菜单栏不提供“设置向导…”；`ConfigStore.requiresInitialSetup` 仅对首次创建或带未完成 `onboarding` 字段的草稿为真，未完成时隐藏菜单“设置”。首次启动进欢迎页，草稿重启续接 `lastVisitedStep`，关窗后快捷键重开。整个配置文件损坏时保留原文件、开放设置修复，不启动首次引导。
+- 菜单栏不提供“设置向导…”；`ConfigStore.requiresInitialSetup` 仅对首次创建或 `state.json` 中带未完成引导进度的草稿为真，未完成时隐藏菜单“设置”。首次启动进欢迎页，草稿重启续接 `lastVisitedStep`，关窗后快捷键重开。整个配置文件损坏时保留原文件、开放设置修复，不启动首次引导。
 - `VoiceInputReadiness` 分别提供 `hotkey`、`microphone`、`accessibility`、`asr`、`llm` 状态，并计算 `isReady` 与 `nextRequiredStep`；步骤路由遵循引导顺序。
 - readiness 使用当前系统权限、实际模型文件、当前配置对应的验证结果和快捷键注册结果计算，不能用配置文件加载成功或引导曾完成代替。
 - `OnboardingProgress` 保存 `lastVisitedStep`、`hasFinishedPresentation`、`hasConfirmedHotkey` 和 `hasAttemptedAccessibilityDrag`。`HotkeyCombo.default` 为右侧 Command 单键，供新配置使用；已保存的快捷键按当前格式解码。默认快捷键需显式接受，自定义快捷键成功注册后将配置与确认状态原子写入，保存失败则恢复旧监听。
@@ -139,7 +141,7 @@
 - 麦克风 `notDetermined` 请求授权，`denied` 引导隐私设置，`restricted` 只说明限制；辅助功能未授权时打开系统设置并展示非激活式拖拽引导浮窗，不叠加系统授权弹窗。
 - 设置页与引导页通过 UI 层 `PermissionCopy` 共用权限标题、逐状态文案、请求／系统设置按钮文字及麦克风受限说明；引导卡片直接使用 `PermissionsManager` 的具体状态，不再将所有非就绪状态合并为“未允许”。不改变授权操作、防重复请求或 readiness 判定；引导卡片用途说明继续保持简短。
 - 引导页已就绪的 ASR／LLM 使用 `OnboardingConfigurationSummary` 单行居中展示 `checkmark.circle.fill`、“已就绪”和可选“更改…”入口，不传入或展示模型名、语音渠道及分隔点。图标和状态共用系统绿色；修改按钮保持强调色并打开原配置 sheet，VoiceOver 保留具体的更改操作名称。本地 `SenseVoice` 不传修改操作；状态和按钮保持固有宽度。验证失败的提示与重试入口并排，保留现有下载进度和验证行为。
-- 已完成设置后若就绪状态失效，直接打开相应设置页；“开始使用”只关闭第 5 步，不再改变持久化完成状态，不保留或重放旧录音请求。第 5 步的缺项操作同样跳转设置页，页内不展示红色错误行；欢迎页和第 5 步都不提供“上一步”。
+- 已完成设置后若就绪状态失效，直接打开相应设置页；“开始使用”只关闭第 5 步，不再改变持久化完成状态，不保留或重放旧录音请求。第 5 步的缺项操作同样跳转设置页，页内不展示红色错误行；欢迎页、第 1 步和第 5 步都不提供“上一步”。`OnboardingCoordinator.canGoBack` 统一控制导航按钮与返回操作，仅第 2～4 步允许返回上一配置页，不能从第 1 步返回欢迎页。
 - 试用复用 `SessionCoordinator` 的录音、分段 ASR 与 LLM 链路，使用显式的应用内结果接收器，仅回填当前试用文本框；不调用外部 `TextInjector`，不采集配置页上下文，不启动自动词典学习。接收器绑定本次试用标识；切换步骤或关窗会取消任务并使迟到结果失效，不回退到外部注入或剪贴板。
 - 欢迎页聊天演示由 `TimelineView` 驱动纯视觉阶段：等待 → 候选唤起 → 录音 → Thinking → 填入，9 秒循环，填入后停留约 3 秒。HUD 以 `HUDLayout` 实际尺寸复用录音内容、Thinking 和胶囊背景，不额外缩放，不创建音频设备、浮层窗口、键盘监听或网络请求；离开欢迎页即移除动画，减少动态效果时静态展示填入结果。
 - `OnboardingDemoCopy` 统一维护产品指定的聊天问题、中文口述原文与回复，欢迎页和模型页共用回复，避免文案漂移。模型页标为“润色结果”，以 `AttributedString` 仅为改口后保留的“先把语音入口做起来”添加系统强调色及 14% 强调色背景，不再突出英译中；`highlightedOriginalText` 遍历 `deletedOriginalPhrases`，为改口前内容和口头赘词添加单删除线、系统红色及 8% 红色背景。删除标记不改变完整原文，去除标记片段后的文字须与结果一致；VoiceOver 从同一片段列表说明删除内容与改口后保留的想法。不增加说明行、不对整句着色，欢迎页不加改写或删除标记。示例不执行 LLM 请求，也不声称是当前 Prompt 的实测输出；不更改运行时 Prompt 或翻译模式。
@@ -157,7 +159,7 @@
 - 纯修饰键运行时按完整手势判定：精确按下目标组合后进入候选并显示静态 HUD，但不创建录音 session、不采集音频、不播放录音音效；全部释放且期间未出现普通键、系统功能键或额外修饰键时才确认触发开始/结束动作
 - 若候选期间参与 `Right Command + M` 等其他组合，本次候选进入取消态；修饰键释放后关闭候选 HUD，不改变 `SessionCoordinator` 状态。已有录音不会被该组合键误结束
 - `HotkeyManager.replace(with:)` 先尝试新监听，成功后由设置页持久化；失败则恢复原监听且不改配置
-- 设置页展示使用 `HotkeyPresentation` 键帽 token 与无障碍描述，不把 `displayString` 当作 UI 唯一数据源；`displayString` 用于 JSON 持久化及标准按键名称恢复
+- 设置页展示使用 `HotkeyPresentation` 键帽 token 与无障碍描述，不把 `displayString` 当作 UI 唯一数据源；快捷键展示文本从键码和修饰键生成，不写入 JSON
 - MacBook `Fn`／🌐 键通过 `flagsChanged` 的 `.function` 位（0x800000）判定按住状态；录制控件通过物理键码 `kVK_Function`（63）过滤 `keyDown`，避免把 `Fn` 当普通键提交
 - 纯 `Fn` 及含 `Fn` 的组合走特殊修饰键／物理按键路径；Carbon 路径不涉及 `Fn`
 - 设置页录制控件直接采集按键事件，支持：
@@ -166,7 +168,7 @@
   - `Control + Option`
   - `Fn` 单键及 `Fn` 与修饰键的组合
   - 其他左右侧修饰键组合
-- 快捷键配置模型使用带 `kind` 的当前 JSON 结构：普通组合键包含 `keyCode`、`modifiers`、`displayString`；纯修饰键包含 `specialModifiers`。
+- 快捷键配置模型使用带 `kind` 的当前 JSON 结构：普通组合键包含 `keyCode`、`modifiers`；纯修饰键包含 `specialModifiers`。
 - 特殊修饰键匹配要求物理按键组合精确一致；存在额外修饰键时不触发（该语义同样适用于 `Fn`，按住 `Fn` 再按 F1–F12 等功能键不会误触发纯 `Fn` 快捷键）
 
 ### 5.2 SessionCoordinator
@@ -184,9 +186,22 @@
 - 负责回退逻辑
 - 在内存中维护最近一次注入失败文本，成功注入后清空
 - 取消 session 时，需要取消录音和未完成 ASR 任务
-- 在录音开始后异步捕获一次窗口上下文；捕获失败、超时或无权限时静默降级，不阻塞主链路
-- 在成功、失败或取消后清空窗口上下文快照
+- 在录音开始后异步分两阶段捕获窗口上下文：基础 200ms、扩展 500ms；录音与 ASR 不等待采集，进入 AI 请求前等待有界采集完成。失败、超时或无权限时降级
+- 成功或取消后清空窗口上下文；可恢复失败将原上下文移交内存 checkpoint，最长保留 10 分钟。
 - 负责输出会话耗时诊断日志，包含分段级诊断
+
+### 5.2.1 SessionRecoveryCheckpoint / SessionRecoveryProcessor
+
+- `SessionRecoveryCheckpoint` 是 MainActor 内存对象，记录待识别 sealed segments、有序成功转写、润色结果、最终文本、原模式/语言/ASR 平台、输入框身份和原上下文；不遵循 Codable、不持久化密钥或音频。
+- `stage` 从尚未完成的数据推导为 recognition / polish / translation / output；`SessionRecoveryProcessor` 用于首次 ASR 完成后的处理和所有阶段恢复。每段 ASR 成功后移除对应音频；润色成功后释放原转写；翻译只消费已有润色结果。
+- 录音期 ASR 失败时，取消待执行的停止延迟，停止录音、finalize 尾段并 finish stream；当前消费者排空剩余分段，合并失败段后再清理 segmenter。保留成功前缀，禁止部分转写进入 LLM。整个原始录音副本不用于恢复，进入后处理或失败时释放。
+- `SessionCoordinator` 只保留一个可恢复失败。`expiresAt` 在首次失败时设为当前时间 + 600 秒，失败重试不续期；到期任务、丢弃与取消恢复清空 payload，并取消在途任务。新可恢复失败替换旧记录；日常输出成功清空旧记录。试用接收器不参与跨会话恢复。
+- `retryRecovery()` 同步占用处理状态并递增 sessionGeneration，再创建异步任务。每次 await 返回检查代次、取消、discarded 和 expiresAt，旧响应不能回写。重试不经过录音开始入口；恢复期间全局快捷键不能启动另一段录音。
+- 每次重试重新构建 Provider，读取当前 LLM 配置以及原 ASR 平台的当前凭据；不重新捕获窗口上下文，每次 polish / translate 请求前读取当前开关，关闭时不发送原快照，开启时按内置敏感规则过滤。目标语言和模式仍取原任务。模型配置内部 thinking 回退还需配置身份与会话代次一致。
+- `TextInjector.onOutputAttempt` 在粘贴发送后或 AX 写入尝试前标记副作用；一旦标记，即使未确认成功也不提供重试写入。未发送且目标仍存在时只重试输出，不重跑 ASR/LLM。
+- HUD 的 recoveryStarted 仅显示处理态，不触发录音音效。失败动作由协调器当前恢复状态决定；翻译错误有独立短文案。带动作 HUD 可点击并保留 5 秒，菜单栏保留入口直至清除/过期。只有用户点击才复制最终文本。
+- 回到 idle 的延迟任务必须同时检查取消和 sessionGeneration，避免上一次错误计时器覆盖快速完成的恢复状态。
+- 转写上限 8000、分段串行、超时公式、LLM 成功后才能注入等主链路约束继续生效。超过长度、没有有效音频或用户取消的录音不创建可恢复记录。
 
 ### 5.3 AudioRecorder
 
@@ -201,7 +216,9 @@
 ### 5.3.1 AudioDeviceManager
 
 - 枚举当前可用麦克风设备
-- 管理 `audio.selectedDeviceID` / `audio.selectedDeviceName` 配置保存
+- 保存 `audio.selection`（automatic / systemDefault / device），指定设备时保存 `deviceID`；新配置默认自动选择。设备名称从设备列表读取，内部选择标识不写入 JSON。
+- 通过 CoreAudio 枚举设备 UID、输入/输出、transport、静音及输入音量；自动选择只在蓝牙输出与蓝牙默认输入并存时，优先选开盖且可用的内置输入。设备事件通知刷新缓存，开始录音前重新解析，不在录音中探测或切换输入。
+- Start 延迟按实际录音输入与默认输出的 CoreAudio 设备 ID 判定：同设备 1200ms，否则 AirPods 输出 300ms，否则 0ms。End 先发声，100ms 后关闭采集；以会话代次和取消任务避免重复停止及旧回调影响新录音。保留 AVAudioEngine 配置变更后的按需重连，移除输出稳定轮询、提示音重播、静音保活。
 - 菜单栏通过子菜单直接选择麦克风，当前选择用勾选展示
 - 设备切换仅影响下一次录音，不中断当前 active session
 - 已选设备不可用时直接切换到系统默认输入
@@ -300,29 +317,35 @@
 
 - 使用固定 Prompt 生成 Chat Completions 请求
 - 默认优先发送 `thinking: { "type": "disabled" }` 关闭长思考
-- 若当前 LLM 配置已记录 `thinkingDisabled = true`，则直接发送普通请求
-- 若上游明确返回 `thinking` 字段不支持，则回退一次普通请求，并将该结果写入 `~/.memoecho/config.json`
+- 若 state.json 的当前配置指纹命中不支持 thinking 参数的能力缓存，则直接发送普通请求
+- 若上游明确返回 `thinking` 字段不支持，则回退一次普通请求，并将当前配置的 SHA-256 指纹写入 `~/.memoecho/state.json` 的 `llmWithoutThinkingParameter`
 - 返回保守型结构化处理后的最终文本
 - 解析结构化 JSON 结果；格式错误时直接报错
 - 不支持独立 `message` 模式；短消息口述、回复口述、转发口述统一保持 `plain_text`
 - 当 `WindowContextService` 成功返回快照时，将其作为弱参考附加到 Prompt：
-  - 只允许用于消歧、模式判断和编辑意图识别
+  - 只允许用于消歧、专名拼写和输出形式判断；选区本身不代表改写/扩写意图
   - 不得直接复制未说出的窗口内容
   - 若窗口上下文与 ASR 冲突，以 ASR 为准
-  - 首版主链路 `polish / translate` 只向 LLM 发送元信息级上下文：应用名、bundle id、窗口标题、输入面类型、角色元数据与 placeholder
-  - 不向主链路 LLM 发送 `selectedText`、`surroundingTextBefore`、`surroundingTextAfter` 或 `nearbyLabels`，避免把输入框已有正文误拼回结果
+  - `polish / translate` 接收经内置敏感规则过滤、裁剪的窗口元信息、可见正文、选区、光标前后文字、标签、网页地址和编辑能力
+  - 通过 JSON 编码传递上下文并声明所有字段为不可信外部数据；忽略其中改变规则、角色、泄露信息或执行操作的要求
+  - HTTP 错误不包含原始服务响应正文，避免服务回显上下文；仅保留状态码和 thinking 不支持的受控信号
 - 不处理 UI 和回退逻辑
 - Prompt 可接收个人词典术语参考，但不开放用户自定义 Prompt
 
 ### 5.6.2 WindowContextService
 
-- 基于与 `TextInjector` 共享的聚焦元素解析路径，读取当前 focused element、window title、placeholder、selected text 与光标附近有限文本。
-- 默认上下文载荷为：应用名、bundle id、窗口标题、输入面类型、角色元数据、placeholder、selected text、光标前后各最多 80 字、附近标签最多 5 项。
-- `selectedText` 最多 200 字；所有文本在发送前都会裁剪和去空。
-- 其中 `selectedText`、`surroundingTextBefore`、`surroundingTextAfter` 与 `nearbyLabels` 仅保留在内存快照中供本地判定链路使用，不直接发送给主链路 `polish / translate` LLM。
-- 敏感场景严格脱敏：密码框、系统认证/安全输入、密码管理器、终端类应用只保留元数据，不发送 placeholder、selected text、surrounding text 或 nearby labels。
-- 窗口上下文仅保存在内存中的 active session 内，不写入配置、日志、HUD、菜单栏或失败恢复入口。
-- 诊断日志只记录事件码，如 `window_context_captured`、`window_context_redacted`、`window_context_unavailable`、`window_context_capture_failed`、`window_context_capture_timeout`，不记录原始内容。
+- 两阶段异步采集：基础信息预算 200ms，扩展正文预算 500ms。基础结果先发布，扩展失败/超时保留基础快照；超时不等待不响应取消的 AX 调用结束。
+- `NativeWindowContextReader` 在独立串行队列读取 AX，原生阶段预算分别为 180ms / 450ms，单次 AX 消息最多 50ms。主线程只校验前台应用元信息，不做正文遍历。
+- 绑定录音开始时的 PID、bundle ID、AX 输入框身份；采集前后及两阶段之间校验输入框与窗口身份，不混入切换后的内容，不激活其他应用。
+- 默认载荷包括应用名（120 字）、bundle ID（180 字）、窗口标题（160 字）、输入面/控件类型、placeholder（120 字）、附近标签（最多 5 × 120 字）、编辑能力与 Markdown 能力。未知能力保留未知，不猜测支持。
+- 扩展正文上限：当前窗口可见文字 10000 字；selectedText、光标前后文字各 1000 字，前文取靠近光标的末尾。AX 选区使用 UTF-16 单位，拒绝越界及拆分代理对的范围。聚焦输入框值读取后仅用于提取附近文字；若超过 100000 UTF-16 单位则弃用，不保留整段正文。
+- 可见文字遍历限当前窗口、180 个节点、10 层；跳过隐藏、窗口外及敏感子树。静态文本须在窗口内，编辑控件须通过 AXVisibleCharacterRange + AXStringForRange 读取，不把整个滚动文档当作可见内容。不截图、不访问其他窗口/标签页；AX 不支持时允许缺失。
+- 网页地址仅从聚焦元素祖先 WebArea / 当前窗口获取；只接受 HTTP(S)，移除用户名、密码、查询参数和片段，最多 2048 字。地址不可得时仅省略网址，不影响其他可用字段。
+- 通用设置提供“参考窗口上下文”开关；`ConfigStore.windowContextEnabled` 默认 true，保存成功后才更新运行状态，未设置该字段时采用开启默认值。仅保存布尔开关，不提供应用/域名排除列表。关闭时不启动采集，采集回调及 checkpoint 创建也检查当前开关。
+- 密码框、系统认证、安全/密钥输入、密码管理器和终端场景移除正文、标题、placeholder、标签、选区和网址，只保留应用及控件类型等基础信息。每次发送前再次应用内置敏感规则，包括失败恢复快照。
+- `fieldStatus` 区分 available / unavailable / redacted / truncated / timeout，并记录总采集耗时。日志仅输出事件码、状态码与耗时，Debug/Release 都不输出上下文原文。
+- 上下文只保存在 active session 或失败恢复 checkpoint 的内存中；后者从首次失败起最长保留 10 分钟。重试沿用原快照并重新应用内置敏感规则，不采集设置页。LLMProvider 在润色（含 thinking 回退）和翻译每次构建请求时调用当前开关读取器，关闭时剔除整个快照，不发送正文或元信息；已在途请求无法撤回。
+- 参考依据：本地 Typeless 2.8.0 客户端静态分析可确认基础/扩展上下文、会话一致性检查、可见文字 10000 / 附近文字 1000 参数以及应用/网址排除。无法据此确认其服务端如何使用每个字段；MemoEcho 的超时降级、具体 AX 读取和 Prompt 约束由本项目实现与验证。
 
 ### 5.6.1 LLMModelProvider
 
@@ -330,7 +353,7 @@
 - 基于当前 `Base URL` 调用 OpenAI 兼容 `/models` endpoint，使用当前 `API Key` 认证。
 - 成功时解析 `data[].id` 作为候选模型，并在 UI 中供用户选择。
 - 当服务不支持 `/models`、响应异常、网络失败或返回空列表时，不影响手动输入 Model，也不改变 LLM 运行时配置完整性判断。
-- 最终持久化配置仍只有 `Base URL`、`API Key`、`Model` 与内部兼容性字段 `thinkingDisabled`。
+- LLM 用户配置仅持久化 `baseURL`、`apiKey`、`model`；参数支持情况属于应用状态。
 
 ### 5.6.2 LLMModelListService
 
@@ -344,23 +367,21 @@
 
 ### 5.7 TextInjector
 
-- 默认通过剪贴板写入 + 粘贴快捷键将文本注入当前焦点应用
-- 若粘贴路径明确失败或可判断为未生效，再回退到焦点元素 `AX` 写值
-- 不再把键盘事件逐字符输入作为常规第二优先级
-- 返回统一注入结果和错误
+- 在 MainActor 上串行管理输出，目标绑定录音开始时的 PID、bundle ID 和 AX 元素身份。
+- 默认通过临时剪贴板 + 定向粘贴事件输出；只有事件尚未发送时才允许 `AXSelectedText` 回退。
+- 异步等待确切替换结果，返回实际写入前快照供词典学习使用；无法确认时返回 `textInjectionFailure` 并保留手动复制入口。
+- 剪贴板使用 changeCount 归属检查，细节见 §11。
 
-### 5.8 ConfigStore
+### 5.8 ConfigStore / AppStateStore
 
-- 统一使用 `~/.memoecho/config.json` 读写全部配置（含密钥）
-- 启动时直接从配置文件加载到内存
-- 若配置文件不存在，写入当前格式的默认配置
-- 若配置文件损坏，保留原文件并在设置页提示修复，不视为已完成准备
-- 保存时执行轻量校验，整文件原子写回
-- LLM 配置包含模型能力缓存字段 `thinkingDisabled`
-- 当 `Base URL`、`API Key`、`Model` 任一保存值发生变化时，自动重置 `thinkingDisabled = false`
-- 允许保存全空或半填的 LLM 配置；运行时仅在三项都完整时视为可用
-- 自动更新检查由 Sparkle 偏好管理，不写入 `config.json`
-- 引导展示进度与动态 readiness 分离，不再通过 `!configLoadFailed` 推断首次准备完成
+- `ConfigStore` 只向 config.json 写入用户设置、连接参数和鉴权信息；`AppStateStore` 向 state.json 保存引导进度、已验证的云端配置指纹及 LLM 接口能力指纹。均整文件原子写入，目录 0700、文件 0600。
+- ASR 的 Codable 明确排除状态和错误字段；未填写的平台省略，半填凭据保留。下载与验证过程只更新内存，不重写用户配置。
+- 指纹使用 SHA-256，不把鉴权信息原文复制进状态文件。配置身份变化后不会命中原身份记录；失败或重新验证时移除该平台的成功记录。
+- 快捷键确认绑定序列化快捷键的指纹；先保存设置，再保存确认状态，后一步失败时回滚设置；进程在两次写入间中断时也不会误认新快捷键已确认。
+- 若 config 不存在，重置 state 并生成当前格式默认配置；config 损坏或格式不匹配时保留原文件供修复，不迁移历史格式。state 损坏不影响用户设置和密钥加载，其内容可重新建立。
+- 本地模型启动时检查实际文件，不恢复 downloading / failed 快照。LLM 是否省略 thinking 参数通过 `omitThinkingParameter` 查询能力缓存。
+- 登录启动由 SMAppService 管理，设置页面读取系统状态，修改失败显示错误；不在启动或保存其他设置时重新注册登录项。
+- 自动更新检查由 Sparkle 偏好管理，不写入 config.json。
 
 ### 5.9 AppUpdateService
 
@@ -368,8 +389,8 @@
 - 更新元数据来自 `https://raw.githubusercontent.com/isecret/MemoEcho/main/updates/appcast.xml`
 - 更新包来自 GitHub Release 中的已签名 `.zip` 资产，应用内直接下载并安装
 - 自动检查开关仅放在关于窗口，不在菜单栏增加入口
-- 本地构建使用 `app/project.yml` 中的版本号，MemoEcho 首个版本为 `1.0.0`
-- 发布工作流基于当前 `vX.Y.Z` tag 同步 `CFBundleShortVersionString` 与 `CFBundleVersion`
+- 本地构建使用 `app/project.yml` 中的版本号，当前显示版本为 `1.0.0-beta.1`，构建号为 `1.0.0b1`
+- 发布工作流支持 `vX.Y.Z` 与 `vX.Y.Z-beta.N`（N 为 1–255）；正式版两种版本号均为 `X.Y.Z`，beta 的 `CFBundleShortVersionString` 为 `X.Y.Z-beta.N`、`CFBundleVersion` 为 `X.Y.ZbN`，GitHub Release 标记为预发布
 
 ### 5.10 PersonalDictionaryStore
 
@@ -377,22 +398,24 @@
 - 新增、更新、删除在写入文件失败时回滚内存中的词条列表，避免界面与文件不一致。
 - 词条包含 `id`、`term`、`source`，以及可选的 `pronunciationHint`、`category`。
 - `source` 取值为 `manual` 或 `auto_learned`，用于区分手动维护和自动学习来源。
-- 个人词典导入、导出均使用 JSON 文件；导入时跳过重复术语，不覆盖现有词条。
+- 个人词典导入、导出使用 UTF-8 单列 CSV，无表头、每行一个词。导出全部词条且只包含词文本；含逗号/双引号时使用 CSV 引号转义。导入全部归为手动添加：已有自动词转为手动，已有手动词和文件内重复词跳过，去重忽略大小写及 Unicode 规范形式。空行跳过，多列、未闭合引号、跨行词和非法编码整体报错，不部分写入。
 - 为 LLM Prompt 提供术语参考。
 - 自动学习入口只保存最终词条，不保存注入前后全文或 diff 原文。
 
 ### 5.11 PostInjectionDictionaryLearner
 
-- 在文本注入成功后、且当前处理模式为 `polish` 时启动。
-- 最长观察 30 秒，每 500ms 轮询一次当前聚焦输入框文本；不切回目标应用，不打断用户当前操作。
-- 仅当文本变化可归约为单一连续替换时，才提取替换后的 `newSpan` 作为候选词条。
-- 候选词条需满足：长度 2 到 24、无换行、非纯数字、非纯符号、非明显句末整句片段。
-- 学习成功后立即写入个人词典，并触发 HUD 轻提示；翻译模式不参与自动学习。
-- 任一阶段若焦点切换、读取失败、新 session 开始、会话取消或错误发生，立即停止观察。
+- 仅 polish 的外部文本注入启动学习；注入前记录 AX 元素身份（CFEqual）、UTF-16 选区和正文，注入后最多等待 1 秒验证确切替换结果。无可靠快照时跳过学习。
+- 仅观察本次插入范围。范围外的前后锚点必须保持不变；同应用内换输入框也终止。密码/安全输入和不可编辑区域不观察。
+- 最长观察 30 秒，每 500ms 检查；同一正文、光标连续稳定 1.5 秒且无非空选区/已知 AXMarkedTextRange 时才评估。AX 不提供组合态时，使用稳定窗口保守退化，不能保证识别所有输入法组合状态。
+- 比较原始插入文本与最终修改，允许删除后重输形成一次纠正；清空、超出局部修改预算或范围外编辑终止。一次会话最多评估 3 个不同最终版本，不阻塞主链路。
+- 只向学习 LLM 发送差异及前后各最多 24 字的局部片段，不发送其他输入框正文；要求结构化返回完整 term 和其在修订片段中的字符起点。程序验证 term 原样存在、覆盖新差异、未跨词边界，允许 2～48 字符的中英文术语。
+- 模型结果返回后重新验证取消、会话 generation、元素身份、正文和光标；确认仍有效才入库。未知/不稳定/格式错误结果不学习。不记录局部正文日志。
+- 存储事务保证学习、删除失败时内存回滚。撤销学习使用普通删除，删除后仍可重新学习；不维护禁止状态或排除名单。
+- HUD 沿用新词提示；菜单栏提供最近一次撤销，词典页提供编辑和删除入口。候选积累、相关词召回和 ASR 热词接入留到 P2。
 
 ### 5.12 DiagnosticsLogger
 
-- 使用 `os.Logger(subsystem: "com.isecret.memoecho", category: "Session")` 输出应用日志。
+- 使用 `os.Logger(subsystem: "me.wangmao.memoecho", category: "Session")` 输出应用日志。
 - 记录 `session_id`、各阶段耗时、文本长度、结果来源、错误分类和目标 app bundle id。
 - 记录结构化处理诊断字段：`mode`、`correction_applied`。
 - Debug 构建可输出 ASR 原文与 LLM 输出；Release 构建仅输出脱敏摘要。
@@ -491,14 +514,14 @@ Segment 级诊断字段（每段独立记录）：
 
 ### 8.1 普通配置
 
-- `openai_base_url`
-- `openai_model`
-- `global_hotkey`（`specialModifiers` 可含 `function` 修饰键编码）
-- `OnboardingProgress`（JSON 字段 `onboarding`）：上次步骤、展示完成、快捷键确认和辅助功能拖拽标记，不持久化系统权限或本地文件就绪快照
+- `llm.baseURL`
+- `llm.model`
+- `general.hotkey`（`specialModifiers` 可含 `function` 修饰键编码）
+- `OnboardingProgress`（state.json 字段 `onboarding`）：上次步骤、展示完成、快捷键确认和辅助功能拖拽标记，不持久化系统权限或本地文件就绪快照
 
 ### 8.2 敏感配置
 
-- `openai_api_key`
+- `llm.apiKey`
 - `asr.tencentCloud.secretId`
 - `asr.tencentCloud.secretKey`
 - `asr.aliyun.accessKeyId`
@@ -514,47 +537,33 @@ Segment 级诊断字段（每段独立记录）：
 ### 8.3 ASR 配置
 
 - `asr.selectedPlatform`：当前选中的 ASR 平台（`localSenseVoice` / `tencentCloudSentence` / `aliyunSentence` / `volcengineSentence` / `xunfeiSentence` / `xiaomiMiMoASR` / `xiaomiMiMoTokenPlanASR`）
-- `asr.local.modelStatus`：本地模型状态（notDownloaded / downloading / ready / failed）
-- `asr.local.lastError`：最近一次下载失败的错误信息
 - `asr.local.mirrorSource`：自定义镜像源 URL
 - `asr.tencentCloud.secretId`：腾讯云 SecretId
 - `asr.tencentCloud.secretKey`：腾讯云 SecretKey
-- `asr.tencentCloud.validationStatus`：腾讯云配置验证状态（unvalidated / validating / verified / failed）
-- `asr.tencentCloud.lastValidationError`：腾讯云最近一次验证失败摘要
 - `asr.aliyun.accessKeyId`：阿里云 AccessKey ID
 - `asr.aliyun.accessKeySecret`：阿里云 AccessKey Secret
 - `asr.aliyun.appKey`：阿里云 AppKey
-- `asr.aliyun.validationStatus`：阿里云配置验证状态（unvalidated / validating / verified / failed）
-- `asr.aliyun.lastValidationError`：阿里云最近一次验证失败摘要
 - `asr.volcengine.apiKey`：火山引擎 API Key
-- `asr.volcengine.validationStatus`：火山引擎配置验证状态（unvalidated / validating / verified / failed）
-- `asr.volcengine.lastValidationError`：火山引擎最近一次验证失败摘要
 - `asr.xunfei.appID`：科大讯飞 AppID
 - `asr.xunfei.apiKey`：科大讯飞 API Key
 - `asr.xunfei.apiSecret`：科大讯飞 API Secret
-- `asr.xunfei.validationStatus`：科大讯飞配置验证状态（unvalidated / validating / verified / failed）
-- `asr.xunfei.lastValidationError`：科大讯飞最近一次验证失败摘要
 - `asr.xiaomiMiMo.apiKey`：小米 MiMo API Key
-- `asr.xiaomiMiMo.validationStatus`：小米 MiMo 配置验证状态（unvalidated / validating / verified / failed）
-- `asr.xiaomiMiMo.lastValidationError`：小米 MiMo 最近一次验证失败摘要
 - `asr.xiaomiMiMoTokenPlan.apiKey`：小米 MiMo Token Plan API Key
-- `asr.xiaomiMiMoTokenPlan.validationStatus`：小米 MiMo Token Plan 配置验证状态（unvalidated / validating / verified / failed）
-- `asr.xiaomiMiMoTokenPlan.lastValidationError`：小米 MiMo Token Plan 最近一次验证失败摘要
 
 ### 8.4 个人词典配置
 
 - 存储位置：`~/.memoecho/dictionary.json`
 - 字段：`term`、`pronunciationHint`、`category`
 - 设置页首版仅维护 `term`；新增词条的 `pronunciationHint`、`category` 保存为 `nil`
-- 设置页使用原生可选择列表浏览词条；词典工作区固定 `440pt` 并在设置内容区居中，不使用两列表单行
-- 页头只保留标题和搜索；说明位于操作栏下方，与工作区左边缘对齐
-- 列表高度 `280pt`，使用 SwiftUI `List(selection:)` 与系统 inset 样式承载浏览和选择；关闭交替行背景，分割线与选中态由系统绘制
-- 列表容器使用 `6pt` 连续圆角外框；首次点击词条后列表取得焦点，以显示系统强调色选中态
+- 设置页使用自适应宽度标签浏览词条；词典工作区固定 `440pt` 并在设置内容区居中，不使用两列表单行
+- 页头提供分类筛选和搜索；说明位于操作栏下方，与工作区左边缘对齐
+- 列表高度 `280pt`，使用 `ScrollView` 与 `DictionaryTagLayout` 承载标签排列和滚动；选中态由标签绘制
+- 列表容器不绘制外框或独立底色，不添加水平内边距；首列词条边框与上方分类筛选、下方操作栏和说明的左边缘对齐；点击词条后列表取得焦点
 - 底部 `＋ / － / ···` 使用单个三段式 `NSSegmentedControl`
 - 新增和编辑通过同一 Sheet 完成，只有校验通过后才调用 Store 写入，不创建 placeholder 词条
 - 底部操作栏提供添加、删除和更多菜单；未选中时删除不可用；删除后选中相邻词条
-- 设置页提供词条计数和本地搜索（大小写不敏感的包含匹配）；搜索只影响当前显示结果，不改变持久化顺序
-- 导入、导出入口收纳在底部更多菜单中；导入格式与 `dictionary.json` 一致；导入时按 `term` 去重并跳过重复词条，不覆盖现有词条
+- 设置页提供“全部 / 自动添加 / 手动添加”原生分段选择器，使用常规尺寸及固有宽度，与列表和底部操作栏左边缘对齐，与搜索框均为 24pt 高；配合大小写不敏感的本地搜索；计数与删除后的相邻选择基于当前显示结果，筛选/搜索不改变持久化顺序。切换筛选清除不可见选中项，新增/编辑结果不在当前分类时切到对应分类
+- 导入、导出入口收纳在底部更多菜单中，使用 CSV，规则见 5.10。导入成功切到“手动添加”并清空搜索；导出始终导出全部词条。内部 dictionary.json 保留来源等元信息，不作为交换格式
 - 添加/编辑校验错误显示在 Sheet 内；导入导出成功在底栏短暂显示且不改变高度，失败用 alert
 - 不存储历史输入文本或 ASR/LLM 响应正文
 
@@ -780,29 +789,36 @@ Segment 级诊断字段（每段独立记录）：
 
 ## 11. 文本注入设计
 
-### 11.1 主策略
+### 11.1 目标与主路径
 
-- 获取当前焦点元素
-- 尝试通过 `AX` 直接写入值
+- 录音开始时只保留 PID、bundle ID、AX 元素身份，不保留该时刻全文；引导试用仍使用独立接收器。
+- 输出时激活原应用，必须成功且前台 PID 一致。指定 PID 的 `FocusedElementResolver` 失败后不得回退到系统当前焦点。
+- 校验当前元素与录音开始时的元素身份一致；读取当时正文和 UTF-16 选区，计算局部替换后的预期全文，不覆盖整个字段。密码框、禁用字段、可检测的 IME 组字状态禁止写入。
+- 写入剪贴板后异步等待 30ms；再核对同一字段、正文、选区及剪贴板 changeCount。粘贴事件通过 `postToPid` 定向到目标进程，发送前再次检查目标。
+- 每 50ms 读取一次结果，最多 20 次；同一字段全文等于预期且不同于原文才返回成功。字段或应用切换、会话过期、取消使本次确认永久失效。
+- 原输入框不可读时仍允许一次粘贴，但不宣称已确认成功；原文与预期相同、应用改写换行或格式、超时等情况统一保守提示“无法确认文本是否写入，请先检查原输入框”。
+- 成功回执携带真正写入前的快照，词典学习直接使用该快照；不再另行读取可能不一致的基准。
 
-### 11.2 回退策略
+### 11.2 回退边界
 
-- 当焦点元素不支持写值或 `AX` 写值失败时
-- 回退为键盘事件逐字符输入或粘贴式输入事件
+- 仅剪贴板写入失败或粘贴事件未发送时，才允许在同一字段和选区执行 `AXSelectedText`；同样必须验证实际正文变化。
+- 一旦粘贴已发送，不能根据暂时未变化的 AXValue 推断失败再补写。所有不确定结果均保留文本，供用户检查后手动复制。
+- 不使用逐字键盘模拟，不将整段全文作为 AXValue 回写。
 
-### 11.3 失败分类
+### 11.3 剪贴板与取消
 
-- `accessibilityPermissionDenied`
-- `noFocusedElement`
-- `unsupportedFocusedElement`
-- `keyboardEventInjectionFailed`
+- 共享 native driver 对注入互斥，覆盖异步等待和恢复阶段；重入操作失败，不覆盖前一操作的剪贴板。
+- 修改前完整快照全部 item/type 数据；读取失败或期间 changeCount 变化则停止，不清空原内容。
+- 临时写入后记录 changeCount；恢复前必须仍归本操作所有，用户或其他应用的新复制优先。多 item 一次 `writeObjects` 恢复，恢复只能执行一次。
+- 成功确认后即可恢复；发送后发生焦点变化或取消，仍等待剩余确认窗口再清理，避免立刻撤走目标应用尚未消费的剪贴板。事件发送前取消则直接清理。
+- macOS 不提供跨进程剪贴板 compare-and-swap，也没有粘贴消费回执。changeCount 是尽力保护；超过 1 秒才处理事件的应用、同进程内极短焦点竞争仍需手工验收，不能保证系统级原子性。
 
-### 11.4 约束
+### 11.4 错误与验证
 
-- 首版不自动使用系统剪贴板作为兜底
-- 注入失败时文本保留在内存中，菜单栏显示截断预览，用户点击可复制到剪贴板
-- 该失败文本仅在当前运行期有效，不落盘
-- 下一次成功注入后自动清空
+- 权限错误使用 `accessibilityPermissionDenied`；目标不可用、焦点变化、写入失败和无法确认使用现有 `textInjectionFailure(detail:)`。
+- 失败或无法确认的文本由恢复 checkpoint 管理，在当前运行期内最长保留 10 分钟，菜单栏供用户主动复制；日常输入确认成功后清空。不写正文日志，不落盘，不自动重试。
+- 单元测试覆盖延迟粘贴、焦点/选区变化、读不到正文、AX 假成功、UTF-16 替换、重复操作、取消及新复制优先；使用独立命名 NSPasteboard 验证多 item/type 恢复，不触碰用户通用剪贴板。
+- 手工验收待完成：浏览器输入框、备忘录、聊天应用、Terminal/iTerm、IME 组字、识别途中切换字段，以及处理期间主动复制。重点检查定向事件兼容性、AX 正文可读性和失败文本取回。
 
 ## 12. 权限设计
 
@@ -968,3 +984,46 @@ Segment 级诊断字段（每段独立记录）：
 - LLM 配置不完整或请求失败时不会注入任何文本
 - 注入失败时文本不会丢失
 - 配置、权限在重启后行为正确
+
+
+### 录音采集健康监测与故障检查点（2026-09-25）
+
+- AudioRecorder 监听当前 AVCaptureSession 的 runtimeError / wasInterrupted，以及当前输入设备的 wasDisconnected。每次采集绑定 captureID，清理时注销观察者并失效旧回调；取消与异步 startRunning 在同一采集队列串行收尾。
+- AudioCaptureHealth 使用系统单调时钟。每 500ms 检查缓冲到达时间及该窗口最大原始 RMS：3 秒无缓冲视为流停滞；连续约 4 秒 RMS ≤ 0.001（约 -60dBFS）仅提示无明显信号，不自动结束，不做增益放大。恢复电平后清除提示。
+- RecordingRecoveryBuffer 以分段 index 保存 voiced sealed segment。ASR 成功且 session generation 一致时以转写替换原始分段；设备异常时先失效 generation、取消处理任务、停止采集并 finalize，再快照有序成功文本和未完成音频。快照立刻进入现有 SessionRecoveryCheckpoint，不等待失败的网络调用返回，不接受其迟到结果。
+- 恢复标题在用户第一次继续前为“继续处理已录内容”，后续失败按实际阶段重试。无有效内容不创建空检查点。无新增音频持久化或采集自动重启。
+- 麦克风输入电平使用 SwiftUI 绘制 15 根圆角短柱（7 × 15 pt、间距 6 pt）；未点亮为浅灰，点亮为系统前景色，适配深浅外观。原生 NSLevelIndicator 的宽矩形默认外观不符合该视觉要求。
+- MicrophoneLevelController 使用 AudioRecorder(retainsAudio: false)，只计算实时电平，不累积 PCM、不生成 WAV、不调用 Provider。设置窗口可见且语音页没有正式任务时启动；离页、关窗、最小化及正式录音启动前停止，恢复显示时重新启动。AppCoordinator 显式跟踪窗口开关，确保复用窗口时电平恢复。
+
+### 设置窗口尺寸与页面切换（2026-09-25）
+
+- `SettingsWindowLayout` 统一管理设置窗口高度；设置用 `NSHostingController.sizingOptions = []`，避免 SwiftUI 自动 min/max/intrinsic sizing 与手动窗口尺寸更新竞争。
+- `SettingsWindowContent` 测量表单自然高度，再用撑满窗口的容器将表单固定在顶部。窗口尚未调整到新页面高度时，不再把较矮的内容垂直居中。
+- 高度测量携带 `SettingsTab`，即使两页高度相同也会重新通知；过期页面结果与旧排队任务不得修改当前窗口。切换后等待新页面的测量，窗口顶边保持不变，直接更新尺寸，不执行可重入的窗口缩放动画。
+- `SettingsWindowLayoutTests` 覆盖临时过高窗口中的顶部对齐、等高页面切换、迟到测量/旧任务、连续切换与异步内容增减。回退顶部对齐会复现 120 pt 额外顶部空白。
+- `SettingsPagesLayoutTests` 使用真实设置表单、临时配置/词典和模拟权限/服务，覆盖五页 25 种页面切换组合、通用页 Fn 提示展开/收起、8 种权限组合及授权引导错误出现/消失、词典空列表/长列表/长词条，以及通用/词典/权限页关窗重开。与窗口布局测试合计 9 项通过，未发现其他顶部留白或窗口高度残留。
+
+### 词典标签布局（2026-09-28）
+
+- 词典内容区使用 `ScrollView` + `DictionaryTagLayout`，按词条实际宽度排列，空间不足时自动换行，标签间距与行间距均为 8 pt。保留 440 × 280 pt 滚动区域，标签增删和筛选不改变设置窗口高度。
+- 标签右侧独立删除按钮直接删除对应词条，不依赖当前选中项；单击词文本选中、双击及右键编辑，保留 Return 编辑、Delete 删除和左右键按词条顺序移动。自动学习来源继续用小蓝点表示。
+- 标签宽度随词条内容变化，最大 180 pt（含删除按钮），同时不超过内容区宽度；长词单行尾部省略，右侧删除按钮保留固定宽度；悬停查看完整词条。新增/编辑后的目标定位、筛选、搜索和 CSV 导入导出沿用现有逻辑。
+
+- 标签文本区通过 AppKit 鼠标事件在按下时立即选中，第二次点击松开时打开编辑，避免单击等待双击判定；删除按钮独立处理。`DictionaryTagInteractionTests` 覆盖即时选择、双击编辑及删除互不干扰。
+
+### 配置与应用状态拆分（2026-09-28）
+
+- config.json 顶层仅保留 general、llm、asr、audio。鉴权信息继续留在 config，不使用 Keychain，不新增历史兼容、迁移或旧字段别名。
+- state.json 的 onboarding 保留首次引导续接；confirmedHotkeyFingerprint 防止两次写入中断后误确认。verifiedCloudConfigurations 按平台保存成功配置的指纹；llmWithoutThinkingParameter 保存当前确认不支持 thinking 参数的 LLM 配置指纹。
+- general.windowContextEnabled 为必填布尔字段，默认 true；登录启动、设备名称和快捷键展示文本不写入 config。音频选择以 selection 和可选 deviceID 表达。
+
+### 辅助功能授权浮窗布局（2026-09-28）
+
+- 辅助功能授权浮窗尺寸收紧为 216 × 72 pt；保留 60 pt 拖拽图标，图标容器左侧及上下留白 6 pt，图文间距 6 pt，文案右侧留白约 18 pt；关闭按钮距右上角 4 pt，不独占整列留白，保留 20 pt 独立点击区域，与文字点击区分离。
+
+### 词典滚动边缘（2026-09-28）
+
+- 渐隐视口边缘与上方筛选、下方操作栏的外侧间距均为 16 pt；内容首尾另留 12 pt 渐隐空间，操作栏与说明仍为 7 pt。
+- 280 pt 高的滚动区上下各使用 12 pt 透明渐隐遮罩；内容上下各留 12 pt 空间，滚到首尾时完整显示首末行，只有越过视口边缘的词条渐隐。遮罩仅作用于词条内容层，并随内容偏移补偿以固定在视口边缘；原生滚动条和空列表提示不参与渐隐，不增加水平缩进。
+
+- 词典左右键导航根据词条在视口内的位置按需滚动：位于上下 12 pt 渐隐带之外时保持滚动位置；进入渐隐带或视口外时，仅滚动到最近的清晰边缘。新增/编辑后的定位仍使用居中展示。

@@ -1,12 +1,10 @@
 import Foundation
-import os
 
 @MainActor
 protocol PostInjectionDictionaryLearning: Sendable {
     func observe(
-        targetPID: pid_t?,
-        targetBundleID: String?,
-        windowContext: WindowContextSnapshot?,
+        beforeInjection: FocusedElementTextSnapshot,
+        insertedText: String,
         store: PersonalDictionaryStore,
         shouldContinue: @escaping @MainActor @Sendable () -> Bool,
         onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void
@@ -20,16 +18,17 @@ struct LearnedTermReplacement: Equatable, Sendable {
     let surroundingTextAfter: String
 }
 
-struct ProperNounLearningCandidate: Equatable, Sendable {
+/// Only a bounded excerpt from the text inserted by this session reaches the model.
+struct ProperNounLearningCandidate: Equatable, Sendable, Encodable {
+    let originalText: String
+    let updatedText: String
     let originalSpan: String
     let replacedSpan: String
-    let selectedText: String?
-    let surroundingTextBefore: String?
-    let surroundingTextAfter: String?
+    let changeStart: Int // Character offset in updatedText, not UTF-16.
 }
 
-enum ProperNounLearningDecision: String, Decodable, Sendable {
-    case accept
+enum ProperNounLearningDecision: Equatable, Sendable {
+    case accept(term: String, start: Int)
     case reject
 }
 
@@ -51,17 +50,11 @@ protocol ProperNounLearningEvaluating: Sendable {
 
 struct LLMProperNounTermEvaluator: ProperNounLearningEvaluating, Sendable {
     typealias ProviderFactory = @MainActor @Sendable () -> LLMProvider?
-
     private let providerFactory: ProviderFactory
-
-    init(providerFactory: @escaping ProviderFactory) {
-        self.providerFactory = providerFactory
-    }
+    init(providerFactory: @escaping ProviderFactory) { self.providerFactory = providerFactory }
 
     func evaluate(_ candidate: ProperNounLearningCandidate) async throws -> ProperNounLearningDecision {
-        guard let provider = providerFactory() else {
-            throw ProperNounLearningEvaluationError.unavailableProvider
-        }
+        guard let provider = providerFactory() else { throw ProperNounLearningEvaluationError.unavailableProvider }
         return try await provider.classifyProperNounLearningCandidate(candidate)
     }
 }
@@ -70,307 +63,176 @@ struct LLMProperNounTermEvaluator: ProperNounLearningEvaluating, Sendable {
 struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable {
     static let observationDuration: Duration = .seconds(30)
     static let pollInterval: Duration = .milliseconds(500)
-    static let maxLearnedTermLength = 24
-    private static let maxContextGlyphCount = 80
-    private static let logger = Logger(
-        subsystem: "com.isecret.memoecho",
-        category: "DictionaryLearning"
-    )
+    static let stabilizationDuration: Duration = .milliseconds(1500)
+    nonisolated static let maxLearnedTermLength = 48
 
     typealias SnapshotProvider = @MainActor @Sendable (pid_t?, String?) -> FocusedElementTextSnapshot?
     typealias Sleep = @Sendable (Duration) async -> Void
+    typealias Now = @MainActor @Sendable () -> Duration
 
     private let snapshotProvider: SnapshotProvider
     private let sleep: Sleep
+    private let now: Now
     private let termEvaluator: any ProperNounLearningEvaluating
 
     init(
-        snapshotProvider: @escaping SnapshotProvider = { targetPID, targetBundleID in
-            FocusedElementTextSnapshotReader().read(
-                targetPID: targetPID,
-                targetBundleID: targetBundleID
-            )
+        snapshotProvider: @escaping SnapshotProvider = { pid, bundle in
+            FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundle)
         },
         termEvaluator: any ProperNounLearningEvaluating,
-        sleep: @escaping Sleep = { duration in
-            try? await Task.sleep(for: duration)
-        }
+        sleep: @escaping Sleep = { try? await Task.sleep(for: $0) },
+        now: @escaping Now = { .seconds(ProcessInfo.processInfo.systemUptime) }
     ) {
         self.snapshotProvider = snapshotProvider
         self.termEvaluator = termEvaluator
         self.sleep = sleep
+        self.now = now
     }
 
     func observe(
-        targetPID: pid_t?,
-        targetBundleID: String?,
-        windowContext: WindowContextSnapshot?,
+        beforeInjection: FocusedElementTextSnapshot,
+        insertedText: String,
         store: PersonalDictionaryStore,
         shouldContinue: @escaping @MainActor @Sendable () -> Bool,
         onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void
     ) async {
-        guard shouldContinue() else { return }
-        guard let baseline = snapshotProvider(targetPID, targetBundleID)?.value else { return }
+        guard !beforeInjection.isComposing, !insertedText.isEmpty,
+              let selection = Range(beforeInjection.selection, in: beforeInjection.value) else { return }
+        let prefix = String(beforeInjection.value[..<selection.lowerBound])
+        let suffix = String(beforeInjection.value[selection.upperBound...])
+        let expected = prefix + insertedText + suffix
+        func current() -> FocusedElementTextSnapshot? {
+            guard shouldContinue(), !Task.isCancelled,
+                  let snapshot = snapshotProvider(beforeInjection.pid, beforeInjection.bundleID),
+                  snapshot.belongsToSameField(as: beforeInjection) else { return nil }
+            return snapshot
+        }
 
-        let deadline = ContinuousClock.now + Self.observationDuration
-        var currentBaseline = baseline
-
-        while shouldContinue(), !Task.isCancelled, ContinuousClock.now < deadline {
+        // A posted paste event is not proof that the original field received the text.
+        let verificationDeadline = now() + .seconds(1)
+        var baseline: FocusedElementTextSnapshot?
+        while now() <= verificationDeadline {
+            guard let snapshot = current() else { return }
+            if snapshot.value == expected, !snapshot.isComposing,
+               snapshot.selection == NSRange(location: prefix.utf16.count + insertedText.utf16.count, length: 0) {
+                baseline = snapshot
+                break
+            }
+            // Only the pre-insertion state may be retried. Other edits are ambiguous.
+            guard snapshot.value == beforeInjection.value else { return }
             await sleep(Self.pollInterval)
-            guard shouldContinue(), !Task.isCancelled else { return }
-            guard let snapshot = snapshotProvider(targetPID, targetBundleID) else { return }
+        }
+        guard var previous = baseline else { return }
+        let deadline = now() + Self.observationDuration
+        var stableSince = now()
+        var evaluatedVersions = Set<String>()
 
-            let latestValue = snapshot.value
-            guard latestValue != currentBaseline else { continue }
+        while now() < deadline {
+            await sleep(Self.pollInterval)
+            guard now() < deadline, let snapshot = current() else { return }
+            guard snapshot.value.hasPrefix(prefix), snapshot.value.hasSuffix(suffix),
+                  snapshot.value.count >= prefix.count + suffix.count else { return }
+            let edited = String(snapshot.value.dropFirst(prefix.count).dropLast(suffix.count))
+            guard !edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            // Limit the edit envelope without treating delete-then-retype as a final correction.
+            if let change = Self.extractReplacement(from: insertedText, to: edited),
+               change.oldSpan.count > 64 || change.newSpan.count > 64 { return }
+            if abs(edited.count - insertedText.count) > 64 { return }
 
-            if let replacement = Self.extractReplacement(from: currentBaseline, to: latestValue),
-               let learnedTerm = Self.learnableTerm(from: replacement.newSpan) {
-                let candidate = ProperNounLearningCandidate(
-                    originalSpan: replacement.oldSpan,
-                    replacedSpan: learnedTerm,
-                    selectedText: Self.normalizedOptional(windowContext?.selectedText),
-                    surroundingTextBefore: Self.trimTrailingContext(replacement.surroundingTextBefore),
-                    surroundingTextAfter: Self.trimLeadingContext(replacement.surroundingTextAfter)
-                )
-                Self.logCandidate(candidate, replacement: replacement)
+            if snapshot != previous || snapshot.isComposing || snapshot.selection.length != 0 {
+                previous = snapshot
+                stableSince = now()
+                continue
+            }
+            guard now() - stableSince >= Self.stabilizationDuration,
+                  edited != insertedText, !evaluatedVersions.contains(edited) else { continue }
+            guard evaluatedVersions.count < 3 else { return }
+            evaluatedVersions.insert(edited)
+            guard let candidate = Self.makeCandidate(from: insertedText, to: edited) else { continue }
 
-                do {
-                    let decision = try await termEvaluator.evaluate(candidate)
-                    Self.logDecision(decision, term: learnedTerm)
-                    switch decision {
-                    case .accept:
-                        if (try? store.addLearnedTermIfNeeded(learnedTerm)) == true {
-                            onDecision(.learned(learnedTerm))
-                        }
-                    case .reject:
-                        onDecision(.rejected(learnedTerm))
+            let validity = ObservationValidity()
+            let monitor = Task { @MainActor in
+                while !Task.isCancelled {
+                    await sleep(Self.pollInterval)
+                    guard !Task.isCancelled else { return }
+                    guard now() < deadline, let latest = current(), latest == snapshot else {
+                        validity.isValid = false
+                        return
                     }
-                } catch {
-                    Self.logFailure(error, term: learnedTerm, candidate: candidate)
-                    onDecision(.failed(learnedTerm, reason: Self.failureReason(from: error)))
                 }
-            } else if let replacement = Self.extractReplacement(from: currentBaseline, to: latestValue) {
-                Self.logFilteredReplacement(replacement)
             }
-
-            currentBaseline = latestValue
-        }
-    }
-
-    static func extractReplacement(from original: String, to updated: String) -> LearnedTermReplacement? {
-        guard original != updated else { return nil }
-
-        let originalGlyphs = Array(original)
-        let updatedGlyphs = Array(updated)
-        let sharedPrefix = commonPrefixLength(originalGlyphs, updatedGlyphs)
-        let sharedSuffix = commonSuffixLength(
-            originalGlyphs,
-            updatedGlyphs,
-            prefixLength: sharedPrefix
-        )
-
-        let originalEnd = originalGlyphs.count - sharedSuffix
-        let updatedEnd = updatedGlyphs.count - sharedSuffix
-
-        guard sharedPrefix < originalEnd, sharedPrefix < updatedEnd else {
-            return nil
-        }
-
-        let oldSpan = String(originalGlyphs[sharedPrefix..<originalEnd])
-        let newSpan = String(updatedGlyphs[sharedPrefix..<updatedEnd])
-        guard !oldSpan.isEmpty, !newSpan.isEmpty else { return nil }
-
-        let before = String(updatedGlyphs[..<sharedPrefix])
-        let after = String(updatedGlyphs[updatedEnd...])
-
-        return LearnedTermReplacement(
-            oldSpan: oldSpan,
-            newSpan: newSpan,
-            surroundingTextBefore: before,
-            surroundingTextAfter: after
-        )
-    }
-
-    static func learnableTerm(from replacement: String) -> String? {
-        let normalized = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
-
-        let glyphs = Array(normalized)
-        guard glyphs.count >= 2, glyphs.count <= maxLearnedTermLength else {
-            return nil
-        }
-
-        guard !normalized.contains(where: \.isNewline) else { return nil }
-        guard !normalized.allSatisfy({ $0.isNumber }) else { return nil }
-        guard !normalized.allSatisfy(Self.isPunctuationLike) else { return nil }
-        guard normalized.allSatisfy(Self.isChineseCharacter) else { return nil }
-
-        let sentenceEndingCharacters = CharacterSet(charactersIn: "。！？!?；;")
-        if let scalar = normalized.unicodeScalars.last,
-           sentenceEndingCharacters.contains(scalar) {
-            return nil
-        }
-
-        return normalized
-    }
-
-    private static func commonPrefixLength(_ lhs: [Character], _ rhs: [Character]) -> Int {
-        var index = 0
-        while index < lhs.count, index < rhs.count, lhs[index] == rhs[index] {
-            index += 1
-        }
-        return index
-    }
-
-    private static func commonSuffixLength(
-        _ lhs: [Character],
-        _ rhs: [Character],
-        prefixLength: Int
-    ) -> Int {
-        var suffixLength = 0
-
-        while suffixLength < lhs.count - prefixLength,
-              suffixLength < rhs.count - prefixLength,
-              lhs[lhs.count - 1 - suffixLength] == rhs[rhs.count - 1 - suffixLength] {
-            suffixLength += 1
-        }
-
-        return suffixLength
-    }
-
-    private static func isPunctuationLike(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.punctuationCharacters.contains(scalar)
-                || CharacterSet.symbols.contains(scalar)
-                || CharacterSet.whitespacesAndNewlines.contains(scalar)
-        }
-    }
-
-    private static func isChineseCharacter(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { scalar in
-            switch scalar.value {
-            case 0x3400...0x4DBF,   // CJK Unified Ideographs Extension A
-                 0x4E00...0x9FFF,   // CJK Unified Ideographs
-                 0xF900...0xFAFF,   // CJK Compatibility Ideographs
-                 0x20000...0x2A6DF, // CJK Unified Ideographs Extension B
-                 0x2A700...0x2B73F, // CJK Unified Ideographs Extension C
-                 0x2B740...0x2B81F, // CJK Unified Ideographs Extension D
-                 0x2B820...0x2CEAF, // CJK Unified Ideographs Extension E/F
-                 0x2CEB0...0x2EBEF, // CJK Unified Ideographs Extension F/I
-                 0x30000...0x3134F: // CJK Unified Ideographs Extension G/H
-                return true
-            default:
-                return false
+            defer { monitor.cancel() }
+            do {
+                let decision = try await termEvaluator.evaluate(candidate)
+                // No store mutation or feedback from cancelled, expired, edited or refocused requests.
+                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else { return }
+                switch decision {
+                case .accept(let term, let start):
+                    guard Self.validatedTerm(term, start: start, candidate: candidate) != nil else {
+                        onDecision(.rejected(candidate.replacedSpan))
+                        continue
+                    }
+                    if try store.addLearnedTermIfNeeded(term) { onDecision(.learned(term)) }
+                case .reject:
+                    onDecision(.rejected(candidate.replacedSpan))
+                }
+            } catch {
+                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else { return }
+                onDecision(.failed(candidate.replacedSpan, reason: "learning_failed"))
             }
         }
     }
 
-    private static func normalizedOptional(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
+    private final class ObservationValidity { var isValid = true }
+
+    nonisolated static func extractReplacement(from original: String, to updated: String) -> LearnedTermReplacement? {
+        let old = Array(original), new = Array(updated)
+        var prefix = 0, suffix = 0
+        while prefix < min(old.count, new.count), old[prefix] == new[prefix] { prefix += 1 }
+        while suffix < min(old.count, new.count) - prefix,
+              old[old.count - suffix - 1] == new[new.count - suffix - 1] { suffix += 1 }
+        let oldEnd = old.count - suffix, newEnd = new.count - suffix
+        guard prefix < oldEnd, prefix < newEnd else { return nil }
+        return .init(oldSpan: String(old[prefix..<oldEnd]), newSpan: String(new[prefix..<newEnd]),
+                     surroundingTextBefore: String(new[..<prefix]), surroundingTextAfter: String(new[newEnd...]))
+    }
+
+    nonisolated static func makeCandidate(from original: String, to updated: String) -> ProperNounLearningCandidate? {
+        guard let change = extractReplacement(from: original, to: updated),
+              change.oldSpan.count <= 64, change.newSpan.count <= 64 else { return nil }
+        let before = String(change.surroundingTextBefore.suffix(24))
+        let after = String(change.surroundingTextAfter.prefix(24))
+        return .init(originalText: before + change.oldSpan + after,
+                     updatedText: before + change.newSpan + after,
+                     originalSpan: change.oldSpan, replacedSpan: change.newSpan, changeStart: before.count)
+    }
+
+    nonisolated static func learnableTerm(from text: String) -> String? {
+        guard text == text.trimmingCharacters(in: .whitespacesAndNewlines),
+              (2...maxLearnedTermLength).contains(text.count),
+              text.unicodeScalars.contains(where: CharacterSet.letters.contains),
+              text.unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0)
+                  || CharacterSet.nonBaseCharacters.contains($0)
+                  || CharacterSet.decimalDigits.contains($0)
+                  || " +#.-_&'".unicodeScalars.contains($0) }),
+              !text.hasSuffix(".") else { return nil }
+        return text
+    }
+
+    nonisolated static func validatedTerm(_ term: String, start: Int, candidate: ProperNounLearningCandidate) -> String? {
+        let text = Array(candidate.updatedText), glyphs = Array(term)
+        guard learnableTerm(from: term) != nil, start >= 0, start <= text.count,
+              glyphs.count <= text.count - start else { return nil }
+        let end = start + glyphs.count
+        guard start <= candidate.changeStart,
+              end >= candidate.changeStart + candidate.replacedSpan.count,
+              Array(text[start..<end]) == glyphs else { return nil }
+        // Reject extraction of a fragment inside an English identifier (e.g. "Echo" in "MemoEcho").
+        func identifier(_ c: Character) -> Bool {
+            c.isASCII && (c.isLetter || c.isNumber || c == "_")
         }
-        return trimmed
-    }
-
-    private static func trimTrailingContext(_ text: String) -> String? {
-        let normalized = normalizedOptional(text)
-        guard let normalized else { return nil }
-        let glyphs = Array(normalized)
-        if glyphs.count <= maxContextGlyphCount {
-            return normalized
-        }
-        return String(glyphs.suffix(maxContextGlyphCount))
-    }
-
-    private static func trimLeadingContext(_ text: String) -> String? {
-        let normalized = normalizedOptional(text)
-        guard let normalized else { return nil }
-        let glyphs = Array(normalized)
-        if glyphs.count <= maxContextGlyphCount {
-            return normalized
-        }
-        return String(glyphs.prefix(maxContextGlyphCount))
-    }
-
-    private static func failureReason(from error: Error) -> String {
-        switch error {
-        case ProperNounLearningEvaluationError.unavailableProvider:
-            return "llm_unavailable"
-        case ProperNounLearningEvaluationError.invalidResponse:
-            return "invalid_response"
-        case let error as MemoEchoError:
-            return error.diagnosticClassification
-        default:
-            return String(describing: error)
-        }
-    }
-
-    private static func logCandidate(
-        _ candidate: ProperNounLearningCandidate,
-        replacement: LearnedTermReplacement
-    ) {
-        #if DEBUG
-        logger.debug(
-            """
-            candidate \
-            | old="\(replacement.oldSpan, privacy: .public)" \
-            | new="\(replacement.newSpan, privacy: .public)" \
-            | before="\(candidate.surroundingTextBefore ?? "", privacy: .public)" \
-            | after="\(candidate.surroundingTextAfter ?? "", privacy: .public)" \
-            | selected="\(candidate.selectedText ?? "", privacy: .public)"
-            """
-        )
-        #else
-        _ = candidate
-        _ = replacement
-        #endif
-    }
-
-    private static func logDecision(_ decision: ProperNounLearningDecision, term: String) {
-        #if DEBUG
-        logger.debug(
-            "decision | term=\"\(term, privacy: .public)\" | result=\(decision.rawValue, privacy: .public)"
-        )
-        #else
-        _ = decision
-        _ = term
-        #endif
-    }
-
-    private static func logFailure(
-        _ error: Error,
-        term: String,
-        candidate: ProperNounLearningCandidate
-    ) {
-        let reason = failureReason(from: error)
-        #if DEBUG
-        logger.error(
-            """
-            failure \
-            | term="\(term, privacy: .public)" \
-            | reason=\(reason, privacy: .public) \
-            | original="\(candidate.originalSpan, privacy: .public)" \
-            | replaced="\(candidate.replacedSpan, privacy: .public)"
-            """
-        )
-        #else
-        _ = candidate
-        logger.error("failure | chars=\(term.count) | reason=\(reason, privacy: .public)")
-        #endif
-    }
-
-    private static func logFilteredReplacement(_ replacement: LearnedTermReplacement) {
-        #if DEBUG
-        logger.debug(
-            """
-            filtered \
-            | old="\(replacement.oldSpan, privacy: .public)" \
-            | new="\(replacement.newSpan, privacy: .public)"
-            """
-        )
-        #else
-        _ = replacement
-        #endif
+        if start > 0, identifier(text[start - 1]), identifier(glyphs[0]) { return nil }
+        if end < text.count, identifier(text[end]), identifier(glyphs[glyphs.count - 1]) { return nil }
+        return term
     }
 }

@@ -10,7 +10,6 @@ struct GeneralSettingsView: View {
     let updateService: AppUpdateService
     var onHotkeyCommit: ((HotkeyCombo) -> String?)?
     var onHotkeyRecordingChanged: ((Bool) -> Void)?
-    var onInteractionSoundChanged: ((Bool) -> Void)?
 
     @State private var hotkey: HotkeyCombo = .default
     @State private var interactionSoundEnabled = true
@@ -19,6 +18,8 @@ struct GeneralSettingsView: View {
     @State private var isLoaded = false
     @State private var recordingPhase: HotkeyRecordingPhase = .idle
     @State private var hotkeyError: String?
+    @State private var contextSaveError: String?
+    @State private var launchAtLoginError: String?
 
     private var hotkeyIncludesFunction: Bool {
         hotkey.specialModifiers.contains { $0.key == .function }
@@ -76,6 +77,31 @@ struct GeneralSettingsView: View {
             }
 
             SettingsPaneSection {
+                SettingsFormRow(title: "参考窗口上下文") {
+                    Toggle("参考窗口上下文", isOn: Binding(
+                        get: { configStore.windowContextEnabled },
+                        set: { enabled in
+                            do {
+                                try configStore.saveWindowContextEnabled(enabled)
+                                contextSaveError = nil
+                            } catch {
+                                contextSaveError = "保存失败，请重试"
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                    .accessibilityLabel("参考窗口上下文")
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("将当前窗口内容发给 AI，帮助理解你说的话。")
+                    if let contextSaveError {
+                        Text(contextSaveError).foregroundStyle(.red)
+                    }
+                }
+            }
+
+            SettingsPaneSection {
                 SettingsFormRow(title: "翻译目标语言") {
                     HStack(spacing: 0) {
                         Picker("", selection: $translationTargetLanguage) {
@@ -96,11 +122,16 @@ struct GeneralSettingsView: View {
 
             SettingsPaneSection {
                 SettingsFormRow(title: "开机自启动") {
-                    Toggle("在登录时启动", isOn: $launchAtLogin)
+                    Toggle("在登录时启动", isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
                         .labelsHidden()
                 }
             } footer: {
-                Text("登录 macOS 后自动启动。")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("登录 macOS 后自动启动。")
+                    if let launchAtLoginError {
+                        Text(launchAtLoginError).foregroundStyle(.red)
+                    }
+                }
             }
 
             SettingsPaneSection {
@@ -132,7 +163,10 @@ struct GeneralSettingsView: View {
         }
         .onChange(of: interactionSoundEnabled) { immediateSaveInteractionSound() }
         .onChange(of: translationTargetLanguage) { immediateSaveGeneralConfig() }
-        .onChange(of: launchAtLogin) { immediateSaveGeneralConfig() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            launchAtLogin = LaunchAtLoginManager.isEnabled
+            if launchAtLogin { launchAtLoginError = nil }
+        }
     }
 
     private var hotkeyFooterText: String {
@@ -173,30 +207,37 @@ struct GeneralSettingsView: View {
         hotkey = configStore.generalConfig.hotkey
         interactionSoundEnabled = configStore.generalConfig.interactionSoundEnabled
         translationTargetLanguage = configStore.generalConfig.translationTargetLanguage
-        launchAtLogin = configStore.generalConfig.launchAtLogin
+        launchAtLogin = LaunchAtLoginManager.isEnabled
     }
 
     private func immediateSaveInteractionSound() {
         guard isLoaded else { return }
         immediateSaveGeneralConfig()
-        onInteractionSoundChanged?(interactionSoundEnabled)
     }
 
     private func immediateSaveGeneralConfig() {
         guard isLoaded else { return }
-        // Apply launch-at-login change first so system state matches user preference
-        try? LaunchAtLoginManager.setEnabled(launchAtLogin)
-
         let config = GeneralConfig(
             hotkey: hotkey,
             interactionSoundEnabled: interactionSoundEnabled,
             translationTargetLanguage: translationTargetLanguage,
-            launchAtLogin: launchAtLogin
+            windowContextEnabled: configStore.windowContextEnabled
         )
         try? configStore.saveGeneralConfig(config)
     }
 
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LaunchAtLoginManager.setEnabled(enabled)
+            launchAtLogin = LaunchAtLoginManager.isEnabled
+            launchAtLoginError = enabled && !launchAtLogin ? "请在系统设置中确认登录项。" : nil
+        } catch {
+            launchAtLogin = LaunchAtLoginManager.isEnabled
+            launchAtLoginError = "登录项设置失败，请重试。"
+        }
+    }
+
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 }

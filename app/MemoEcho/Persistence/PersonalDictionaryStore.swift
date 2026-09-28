@@ -10,6 +10,12 @@ import Foundation
 final class PersonalDictionaryStore {
 
     private(set) var entries: [DictionaryEntry] = []
+    private(set) var latestLearnedEntryID: String?
+
+    var latestLearnedEntry: DictionaryEntry? {
+        entries.first { $0.id == latestLearnedEntryID && $0.source == .autoLearned }
+    }
+
     private let directoryURL: URL
     private let dictionaryURL: URL
 
@@ -44,13 +50,14 @@ final class PersonalDictionaryStore {
     @discardableResult
     func addLearnedTermIfNeeded(_ term: String) throws -> Bool {
         let normalized = normalizedTerm(term)
-        guard !normalized.isEmpty else { return false }
-
-        let alreadyExists = entries.contains { normalizedTerm($0.term) == normalized }
-        guard !alreadyExists else { return false }
-
-        entries.append(DictionaryEntry(term: normalized, source: .autoLearned))
-        try save()
+        guard !normalized.isEmpty,
+              !entries.contains(where: { normalizedTermKey($0.term) == normalizedTermKey(normalized) }) else { return false }
+        let previous = entries
+        let entry = DictionaryEntry(term: normalized, source: .autoLearned)
+        entries.append(entry)
+        do { try save() }
+        catch { entries = previous; throw error }
+        latestLearnedEntryID = entry.id
         return true
     }
 
@@ -59,6 +66,7 @@ final class PersonalDictionaryStore {
         entries.removeAll { $0.id == id }
         do {
             try save()
+            if latestLearnedEntryID == id { latestLearnedEntryID = nil }
         } catch {
             entries = previousEntries
             throw error
@@ -68,7 +76,9 @@ final class PersonalDictionaryStore {
     func updateEntry(_ entry: DictionaryEntry) throws {
         guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
         let previousEntries = entries
-        entries[index] = entry
+        var updated = entry
+        updated.source = .manual
+        entries[index] = updated
         do {
             try save()
         } catch {
@@ -79,34 +89,28 @@ final class PersonalDictionaryStore {
 
     @discardableResult
     func importEntries(from fileURL: URL) throws -> DictionaryImportSummary {
-        let importedEntries = try Self.decodeEntries(from: fileURL)
+        let terms = try DictionaryCSV.decode(String(contentsOf: fileURL, encoding: .utf8))
         let previousEntries = entries
-        let existingTerms = Set(entries.map { normalizedTermKey($0.term) })
-        var knownTerms = existingTerms
-        var knownIDs = Set(entries.map(\.id))
         var mergedEntries = entries
-        var addedCount = 0
+        var indices = Dictionary(entries.enumerated().map { (normalizedTermKey($0.element.term), $0.offset) },
+                                 uniquingKeysWith: { first, _ in first })
+        var importedCount = 0
         var skippedDuplicateCount = 0
 
-        for importedEntry in importedEntries {
-            let termKey = normalizedTermKey(importedEntry.term)
-            guard !termKey.isEmpty else { continue }
-
-            if knownTerms.contains(termKey) {
-                skippedDuplicateCount += 1
+        for term in terms {
+            let termKey = normalizedTermKey(term)
+            if let index = indices[termKey] {
+                if mergedEntries[index].source == .autoLearned {
+                    mergedEntries[index].source = .manual
+                    importedCount += 1
+                } else {
+                    skippedDuplicateCount += 1
+                }
                 continue
             }
-
-            var entry = importedEntry
-            entry.term = termKey
-            if knownIDs.contains(entry.id) {
-                entry.id = UUID().uuidString
-            }
-
-            mergedEntries.append(entry)
-            knownTerms.insert(termKey)
-            knownIDs.insert(entry.id)
-            addedCount += 1
+            indices[termKey] = mergedEntries.count
+            mergedEntries.append(DictionaryEntry(term: term, source: .manual))
+            importedCount += 1
         }
 
         entries = mergedEntries
@@ -118,15 +122,14 @@ final class PersonalDictionaryStore {
         }
 
         return DictionaryImportSummary(
-            importedCount: addedCount,
+            importedCount: importedCount,
             skippedDuplicateCount: skippedDuplicateCount
         )
     }
 
     func exportEntries(to fileURL: URL) throws {
-        let encoder = Self.makeEncoder()
-        let data = try encoder.encode(entries)
-        try data.write(to: fileURL, options: .atomic)
+        let csv = try DictionaryCSV.encode(entries.map(\.term))
+        try csv.write(to: fileURL, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Hotwords 生成
@@ -199,7 +202,7 @@ final class PersonalDictionaryStore {
     }
 
     private func normalizedTermKey(_ term: String) -> String {
-        normalizedTerm(term)
+        normalizedTerm(term).precomposedStringWithCanonicalMapping.lowercased()
     }
 
     private func normalizedTerm(_ term: String) -> String {
@@ -251,4 +254,54 @@ struct DictionaryEntry: Codable, Identifiable, Equatable, Sendable {
 struct TermReference: Sendable, Equatable {
     let term: String
     let pronunciationHint: String?
+}
+
+/// UTF-8, one column, no header. A term occupies exactly one physical line.
+private enum DictionaryCSV {
+    enum FormatError: Error { case invalidRow(Int) }
+
+    static func decode(_ text: String) throws -> [String] {
+        var text = text
+        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        return try lines.enumerated().compactMap { index, line in
+            let row = line.trimmingCharacters(in: .whitespaces)
+            guard !row.isEmpty else { return nil }
+            let term: String
+            if row.first == "\"" {
+                guard row.count >= 2, row.last == "\"" else { throw FormatError.invalidRow(index + 1) }
+                let content = Array(row.dropFirst().dropLast())
+                var decoded = ""
+                var position = 0
+                while position < content.count {
+                    let character = content[position]
+                    if character == "\"" {
+                        guard position + 1 < content.count, content[position + 1] == "\"" else {
+                            throw FormatError.invalidRow(index + 1)
+                        }
+                        position += 1
+                    }
+                    decoded.append(character)
+                    position += 1
+                }
+                term = decoded.trimmingCharacters(in: .whitespaces)
+            } else {
+                guard !row.contains(","), !row.contains("\"") else { throw FormatError.invalidRow(index + 1) }
+                term = row
+            }
+            return term.isEmpty ? nil : term
+        }
+    }
+
+    static func encode(_ terms: [String]) throws -> String {
+        let rows = try terms.enumerated().map { index, term in
+            guard !term.contains("\n"), !term.contains("\r") else { throw FormatError.invalidRow(index + 1) }
+            if term.contains(",") || term.contains("\"") {
+                return "\"" + term.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            }
+            return term
+        }
+        return rows.isEmpty ? "" : rows.joined(separator: "\n") + "\n"
+    }
 }

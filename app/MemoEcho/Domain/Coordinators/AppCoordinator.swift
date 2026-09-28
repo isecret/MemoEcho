@@ -62,18 +62,20 @@ final class AppCoordinator {
     let cloudASRValidationService: CloudASRValidationService
     let readinessService: VoiceInputReadinessService
     let onboardingCoordinator: OnboardingCoordinator
+    let microphoneLevelController = MicrophoneLevelController()
     let updateService: AppUpdateService
 
     var selectedSettingsTab: SettingsTab = .general {
         didSet {
-            scheduleSettingsWindowResize(to: selectedSettingsTab, animated: true)
+            if selectedSettingsTab != .asr { microphoneLevelController.stop() }
+            settingsWindowLayout.select(selectedSettingsTab)
         }
     }
 
+    private(set) var isSettingsWindowVisible = false
     private var settingsWindowController: NSWindowController?
     private var settingsToolbarCoordinator: SettingsToolbarCoordinator?
-    private var settingsContentSizes: [SettingsTab: NSSize] = [:]
-    private var pendingSettingsResize: DispatchWorkItem?
+    private let settingsWindowLayout = SettingsWindowLayout()
     private var specialHotkeyInteraction = SpecialHotkeyInteraction()
     private let microphoneFocusRestorer = MicrophoneAuthorizationFocusRestorer()
     private let recordingStartGate = RecordingStartGate()
@@ -111,8 +113,10 @@ final class AppCoordinator {
         hotkeyManager = HotkeyManager()
         llmModelListService = LLMModelListService()
         modelDownloadManager = ModelDownloadManager(configStore: store)
-        llmValidationService = LLMValidationService(onThinkingUnsupported: { [weak store] in
-            try? store?.markThinkingDisabledForCurrentLLM()
+        llmValidationService = LLMValidationService(onThinkingUnsupported: { [weak store] input in
+            try? store?.markThinkingParameterUnsupported(
+                for: LLMConfig(baseURL: input.baseURL, model: input.model), apiKey: input.apiKey
+            )
         })
         cloudASRValidationService = CloudASRValidationService(configStore: store)
         readinessService = VoiceInputReadinessService(
@@ -132,7 +136,27 @@ final class AppCoordinator {
         let hud = HUDFeedbackController()
         hudFeedbackController = hud
         sessionCoordinator.onFeedbackEvent = { [weak self] event in
-            self?.hudFeedbackController.handleEvent(event)
+            if let self {
+                if case .recordingStarted = event { self.microphoneLevelController.stop() }
+                if case .processingFailed = event {
+                    let session = self.sessionCoordinator
+                    let title = session.recoveryNeedsSettings ? "检查设置"
+                        : (session.canRetryRecovery ? session.recoveryActionTitle
+                           : (session.lastInjectionFailureText != nil ? "复制结果" : nil))
+                    self.hudFeedbackController.recoveryActionTitle = title
+                    self.hudFeedbackController.onRecoveryAction = { [weak self] in
+                        guard let self else { return }
+                        if self.sessionCoordinator.recoveryNeedsSettings { self.openFailedSessionSettings() }
+                        else if self.sessionCoordinator.canRetryRecovery { self.retryFailedSession() }
+                        else if self.sessionCoordinator.lastInjectionFailureText != nil {
+                            if self.copyLastFailureTextToClipboard() {
+                                self.hudFeedbackController.showCopyConfirmation()
+                            }
+                        }
+                    }
+                } else { self.hudFeedbackController.clearRecoveryAction() }
+                self.hudFeedbackController.handleEvent(event)
+            }
             if case .processingFailed = event { self?.invalidateFailedConfiguration() }
             if let self, self.sessionCoordinator.isOnboardingTrial {
                 self.onboardingCoordinator.handleTrialFeedback(event, error: self.sessionCoordinator.currentError)
@@ -197,16 +221,7 @@ final class AppCoordinator {
     func handleAppLaunch() {
         setupHotkey()
         updateService.start()
-        updateInteractionSoundKeepAlive()
-        if configStore.asrConfig.local.modelStatus == .downloading {
-            try? configStore.updateLocalModelStatus(.failed, error: "下载已中断，请重试")
-        }
         readinessService.refresh()
-
-        // Ensure system login item state matches config
-        if configStore.generalConfig.launchAtLogin {
-            try? LaunchAtLoginManager.setEnabled(true)
-        }
 
         guard configStore.requiresInitialSetup else { return }
         Task { @MainActor in
@@ -266,21 +281,13 @@ final class AppCoordinator {
     /// 旧会话请求失败不能使设置页刚保存的新配置失效；内部 thinking 回退不改变连接身份。
     private var currentValidationIdentity: (llm: String, asr: String) {
         let llm = LLMValidationInput(baseURL: configStore.llmConfig.baseURL, apiKey: configStore.openAIAPIKey,
-                                     model: configStore.llmConfig.model, thinkingDisabled: false)
+                                     model: configStore.llmConfig.model, omitThinkingParameter: false)
         let asr = CloudASRValidationInput(platform: configStore.asrConfig.selectedPlatform, asrConfig: configStore.asrConfig)
         return (llm.fingerprint, asr.fingerprint)
     }
 
-    func setInteractionSoundKeepAliveEnabled(_ enabled: Bool) {
-        hudFeedbackController.setInteractionSoundKeepAliveEnabled(enabled)
-    }
-
     func setHotkeyCaptureSuspended(_ suspended: Bool) {
         hotkeyManager.setSuspended(suspended)
-    }
-
-    private func updateInteractionSoundKeepAlive() {
-        setInteractionSoundKeepAliveEnabled(configStore.generalConfig.interactionSoundEnabled)
     }
 
     /// 通过 AppKit 托管单例设置窗口，避免依赖 SwiftUI 默认 selector
@@ -288,10 +295,11 @@ final class AppCoordinator {
         guard configStore.canOpenSettings else { return }
         if let tab { selectedSettingsTab = tab }
         if settingsWindowController == nil {
-            let hostingController = NSHostingController(rootView: SettingsView(appCoordinator: self))
+            let hostingController = SettingsWindowLayout.makeHostingController(rootView: SettingsView(appCoordinator: self))
             let window = NSWindow(contentViewController: hostingController)
+            window.identifier = NSUserInterfaceItemIdentifier("memoecho.settings")
             window.title = selectedSettingsTab.title
-            window.setContentSize(settingsContentSize(for: selectedSettingsTab))
+            window.setContentSize(settingsWindowLayout.contentSize)
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.titleVisibility = .visible
             window.toolbarStyle = .preference
@@ -300,12 +308,27 @@ final class AppCoordinator {
             window.center()
             window.initialFirstResponder = window.contentView
             settingsWindowController = NSWindowController(window: window)
+            settingsWindowLayout.attach(window)
+            for name in [NSWindow.willCloseNotification, NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification] {
+                lifecycleObservers.append(NotificationCenter.default.addObserver(
+                    forName: name, object: window, queue: .main
+                ) { [weak self] notification in
+                    let isVisible = notification.name == NSWindow.didDeminiaturizeNotification
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.isSettingsWindowVisible = isVisible
+                        if !self.isSettingsWindowVisible { self.microphoneLevelController.stop() }
+                    }
+                })
+            }
         }
 
         settingsWindowController?.window?.toolbar?.selectedItemIdentifier = .settingsTab(selectedSettingsTab)
 
         settingsWindowController?.showWindow(nil)
         settingsWindowController?.window?.makeKeyAndOrderFront(nil)
+        isSettingsWindowVisible = true
         if let window = settingsWindowController?.window {
             DispatchQueue.main.async {
                 window.makeFirstResponder(window.contentView)
@@ -325,30 +348,40 @@ final class AppCoordinator {
     }
 
     func updateSettingsContentSize(_ size: CGSize, for tab: SettingsTab) {
-        guard size.width > 0, size.height > 0 else { return }
+        settingsWindowLayout.measure(.init(tab: tab, size: size))
+    }
 
-        let contentSize = NSSize(
-            width: ceil(size.width),
-            height: ceil(size.height) + 1
-        )
-        let previousSize = settingsContentSizes[tab]
-        guard previousSize == nil
-            || abs((previousSize?.width ?? 0) - contentSize.width) > 0.5
-            || abs((previousSize?.height ?? 0) - contentSize.height) > 0.5
-        else {
-            return
+    func retryFailedSession() {
+        guard sessionCoordinator.canRetryRecovery else { return }
+        let identity = currentValidationIdentity
+        let platform = sessionCoordinator.recovery?.asrPlatform ?? configStore.asrConfig.selectedPlatform
+        let asrIdentity = CloudASRValidationInput(platform: platform, asrConfig: configStore.asrConfig).fingerprint
+        recordingValidationIdentity = (identity.llm, asrIdentity)
+        sessionCoordinator.retryRecovery()
+    }
+
+    func openFailedSessionSettings() {
+        let tab: SettingsTab
+        switch sessionCoordinator.currentError {
+        case .accessibilityPermissionDenied, .microphonePermissionDenied: tab = .permissions
+        case .asrModelMissing, .asrBinaryNotFound, .asrRuntimeMissing, .asrPlatformNotReady,
+             .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure: tab = .asr
+        default:
+            switch sessionCoordinator.recovery?.stage {
+            case .recognition: tab = .asr
+            case .output: tab = .permissions
+            default: tab = .ai
+            }
         }
-
-        settingsContentSizes[tab] = contentSize
-        guard tab == selectedSettingsTab else { return }
-        scheduleSettingsWindowResize(to: tab, animated: settingsWindowController?.window?.isVisible == true)
+        openSettingsWindow(tab: tab)
     }
 
     /// 将最近一次注入失败文本复制到系统剪贴板
-    func copyLastFailureTextToClipboard() {
-        guard let text = sessionCoordinator.lastInjectionFailureText else { return }
+    @discardableResult
+    func copyLastFailureTextToClipboard() -> Bool {
+        guard let text = sessionCoordinator.lastInjectionFailureText else { return false }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        return NSPasteboard.general.setString(text, forType: .string)
     }
 
     // MARK: - 快捷键
@@ -379,12 +412,16 @@ final class AppCoordinator {
             hotkey: hotkey,
             interactionSoundEnabled: configStore.generalConfig.interactionSoundEnabled,
             translationTargetLanguage: configStore.generalConfig.translationTargetLanguage,
-            launchAtLogin: configStore.generalConfig.launchAtLogin
+            windowContextEnabled: configStore.windowContextEnabled
         )
         do {
             try configStore.saveGeneralConfig(config, confirmingHotkey: true)
         } catch {
-            let rollback = manager.replace(with: previousHotkey)
+            let savedHotkey = configStore.generalConfig.hotkey
+            let rollback = manager.replace(with: savedHotkey)
+            if savedHotkey != previousHotkey {
+                return .failure("快捷键状态保存失败，请重新确认快捷键。")
+            }
             return .failure(rollback == .success
                 ? "保存快捷键失败，已恢复原快捷键。"
                 : "保存快捷键失败，原快捷键也未能恢复，请重新设置。")
@@ -520,37 +557,7 @@ final class AppCoordinator {
         return toolbar
     }
 
-    private func scheduleSettingsWindowResize(to tab: SettingsTab, animated: Bool) {
-        pendingSettingsResize?.cancel()
 
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.resizeSettingsWindow(to: tab, animated: animated)
-        }
-        pendingSettingsResize = workItem
-        DispatchQueue.main.async(execute: workItem)
-    }
-
-    private func resizeSettingsWindow(to tab: SettingsTab, animated: Bool) {
-        guard let window = settingsWindowController?.window else { return }
-
-        let currentFrame = window.frame
-        window.title = tab.title
-
-        let contentRect = NSRect(origin: .zero, size: settingsContentSize(for: tab))
-        let frameSize = window.frameRect(forContentRect: contentRect).size
-        let newFrame = NSRect(
-            x: currentFrame.minX,
-            y: currentFrame.maxY - frameSize.height,
-            width: frameSize.width,
-            height: frameSize.height
-        )
-
-        window.setFrame(newFrame, display: true, animate: animated)
-    }
-
-    private func settingsContentSize(for tab: SettingsTab) -> NSSize {
-        settingsContentSizes[tab] ?? tab.defaultContentSize
-    }
 }
 
 @MainActor

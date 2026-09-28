@@ -3,6 +3,7 @@ import Foundation
 struct AppVersion: Comparable, Sendable {
     let rawValue: String
     private let numericComponents: [Int]
+    private let betaNumber: Int?
 
     init?(_ rawValue: String) {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -11,7 +12,18 @@ struct AppVersion: Comparable, Sendable {
         let normalized = trimmed.hasPrefix("v") || trimmed.hasPrefix("V")
             ? String(trimmed.dropFirst())
             : trimmed
-        let pieces = normalized.split(separator: ".", omittingEmptySubsequences: false)
+        let versionParts = normalized.components(separatedBy: "-beta.")
+        guard versionParts.count <= 2 else { return nil }
+        if versionParts.count == 2 {
+            let suffix = versionParts[1]
+            guard suffix.first != "0",
+                  suffix.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let number = Int(suffix), (1...255).contains(number) else { return nil }
+            betaNumber = number
+        } else {
+            betaNumber = nil
+        }
+        let pieces = versionParts[0].split(separator: ".", omittingEmptySubsequences: false)
         guard !pieces.isEmpty else { return nil }
 
         var parsedComponents: [Int] = []
@@ -46,7 +58,16 @@ struct AppVersion: Comparable, Sendable {
             }
         }
 
-        return 0
+        switch (lhs.betaNumber, rhs.betaNumber) {
+        case let (left?, right?):
+            return left == right ? 0 : (left < right ? -1 : 1)
+        case (_?, nil):
+            return -1
+        case (nil, _?):
+            return 1
+        case (nil, nil):
+            return 0
+        }
     }
 
     static func current(in bundle: Bundle = .main) -> AppVersion? {

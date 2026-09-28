@@ -114,7 +114,7 @@ final class AccessibilityAuthorizationGuideController {
 }
 
 struct AccessibilityGuideView: View {
-    static let size = NSSize(width: 300, height: 82)
+    static let size = NSSize(width: 216, height: 72)
 
     let appURL: URL
     let onClose: () -> Void
@@ -124,23 +124,28 @@ struct AccessibilityGuideView: View {
         ZStack(alignment: .topTrailing) {
             WindowDragSurface()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(spacing: 14) {
+            HStack(spacing: 6) {
                 DraggableApplicationView(appURL: appURL, onDragEnded: onDragEnded)
-                    .frame(width: 46, height: 46)
+                    .frame(width: 60, height: 60)
                     .accessibilityLabel("拖动 MemoEcho 应用")
                 Text("拖入并启用辅助功能")
                     .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
                     .overlay(WindowDragSurface())
             }
-            .padding(.leading, 16)
-            .padding(.trailing, 38)
+            .padding(.leading, 6)
+            .padding(.trailing, 18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             Button(action: onClose) {
-                Image(systemName: "xmark").foregroundStyle(.secondary)
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("关闭授权引导")
-            .padding(12)
+            .padding(4)
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))

@@ -13,7 +13,7 @@ final class LLMValidationServiceTests: XCTestCase {
         var input = makeInput()
         service.validate(input)
         await waitUntil { service.status == .ready }
-        input.thinkingDisabled = true
+        input.omitThinkingParameter = true
         XCTAssertEqual(service.status(for: input), .ready)
         service.validate(input)
         let count = await counter.currentValue()
@@ -86,7 +86,7 @@ final class LLMValidationServiceTests: XCTestCase {
                 baseURL: "",
                 apiKey: "key",
                 model: "gpt-4o-mini",
-                thinkingDisabled: false
+                omitThinkingParameter: false
             )
         )
 
@@ -147,7 +147,7 @@ final class LLMValidationServiceTests: XCTestCase {
     func testThinkingUnsupportedCallbackCanBeTriggered() async {
         let counter = Counter()
         let service = LLMValidationService(
-            onThinkingUnsupported: {
+            onThinkingUnsupported: { _ in
                 Task {
                     await counter.increment()
                 }
@@ -175,7 +175,7 @@ final class LLMValidationServiceTests: XCTestCase {
             baseURL: "https://example.com/v1",
             apiKey: "test-key",
             model: model,
-            thinkingDisabled: false
+            omitThinkingParameter: false
         )
     }
 

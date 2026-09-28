@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum SettingsTab: String, CaseIterable, Identifiable {
+enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     case general
     case asr
     case ai
@@ -59,54 +59,49 @@ struct SettingsView: View {
     @Bindable var appCoordinator: AppCoordinator
 
     var body: some View {
-        SettingsPaneContainer {
-            if appCoordinator.configStore.configLoadFailed {
-                Label("配置文件无法读取。请检查 ~/.memoecho/config.json；保存设置会重建文件。",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+        let tab = appCoordinator.selectedSettingsTab
+        SettingsWindowContent(tab: tab, onMeasure: { measurement in
+            appCoordinator.updateSettingsContentSize(measurement.size, for: measurement.tab)
+        }) {
+            SettingsPaneContainer {
+                if appCoordinator.configStore.configLoadFailed {
+                    Label("配置文件无法读取。请检查 ~/.memoecho/config.json；保存设置会重建文件。",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                switch tab {
+                case .general:
+                    GeneralSettingsView(
+                        configStore: appCoordinator.configStore,
+                        updateService: appCoordinator.updateService,
+                        onHotkeyCommit: { combo in
+                            appCoordinator.applyHotkey(combo).errorMessage
+                        },
+                        onHotkeyRecordingChanged: { isRecording in
+                            appCoordinator.setHotkeyCaptureSuspended(isRecording)
+                        }
+                    )
+                case .asr:
+                    ASRSettingsView(
+                        configStore: appCoordinator.configStore,
+                        downloadManager: appCoordinator.modelDownloadManager,
+                        validationService: appCoordinator.cloudASRValidationService,
+                        microphoneControls: MicrophoneLevelView(appCoordinator: appCoordinator)
+                    )
+                case .dictionary:
+                    PersonalDictionarySettingsView(dictionaryStore: appCoordinator.dictionaryStore)
+                case .ai:
+                    LLMSettingsView(
+                        configStore: appCoordinator.configStore,
+                        modelListService: appCoordinator.llmModelListService,
+                        validationService: appCoordinator.llmValidationService
+                    )
+                case .permissions:
+                    PermissionsSettingsView(permissionsManager: appCoordinator.permissionsManager)
+                }
             }
-            switch appCoordinator.selectedSettingsTab {
-            case .general:
-                GeneralSettingsView(
-                    configStore: appCoordinator.configStore,
-                    updateService: appCoordinator.updateService,
-                    onHotkeyCommit: { combo in
-                        appCoordinator.applyHotkey(combo).errorMessage
-                    },
-                    onHotkeyRecordingChanged: { isRecording in
-                        appCoordinator.setHotkeyCaptureSuspended(isRecording)
-                    },
-                    onInteractionSoundChanged: { enabled in
-                        appCoordinator.setInteractionSoundKeepAliveEnabled(enabled)
-                    }
-                )
-            case .asr:
-                ASRSettingsView(
-                    configStore: appCoordinator.configStore,
-                    downloadManager: appCoordinator.modelDownloadManager,
-                    validationService: appCoordinator.cloudASRValidationService
-                )
-            case .dictionary:
-                PersonalDictionarySettingsView(dictionaryStore: appCoordinator.dictionaryStore)
-            case .ai:
-                LLMSettingsView(
-                    configStore: appCoordinator.configStore,
-                    modelListService: appCoordinator.llmModelListService,
-                    validationService: appCoordinator.llmValidationService
-                )
-            case .permissions:
-                PermissionsSettingsView(permissionsManager: appCoordinator.permissionsManager)
-            }
-        }
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(key: SettingsContentSizePreferenceKey.self, value: proxy.size)
-            }
-        )
-        .onPreferenceChange(SettingsContentSizePreferenceKey.self) { size in
-            appCoordinator.updateSettingsContentSize(size, for: appCoordinator.selectedSettingsTab)
         }
     }
 }
@@ -117,6 +112,7 @@ enum SettingsFormLayout {
     static let windowContentWidth: CGFloat = contentWidth + horizontalPadding * 2
     static let labelWidth: CGFloat = 116
     static let rowSpacing: CGFloat = 12
+    static let rowVerticalSpacing: CGFloat = 7
     static let rowMinHeight: CGFloat = 26
     static let controlWidth: CGFloat = 360
     static let footerWidth: CGFloat = controlWidth
@@ -161,7 +157,7 @@ struct SettingsPaneSection<Content: View, Footer: View>: View {
     @ViewBuilder let footer: () -> Footer
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: SettingsFormLayout.rowVerticalSpacing) {
             content()
 
             footer()
@@ -312,12 +308,39 @@ private func configureAppKitField(_ textField: NSTextField, width: CGFloat, iden
     }
 }
 
-private struct SettingsContentSizePreferenceKey: PreferenceKey {
-    static let defaultValue: CGSize = .zero
+struct SettingsPageMeasurement: Equatable, Sendable {
+    let tab: SettingsTab
+    let size: CGSize
+}
 
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-        let nextValue = nextValue()
-        guard nextValue != .zero else { return }
-        value = nextValue
+/// Measure the form at its natural height; let the surrounding host fill the window.
+/// Keeping the form at the top also covers the interval before the next resize.
+struct SettingsWindowContent<Content: View>: View {
+    let tab: SettingsTab
+    let onMeasure: (SettingsPageMeasurement) -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: SettingsContentSizePreferenceKey.self,
+                        value: SettingsPageMeasurement(tab: tab, size: proxy.size)
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .onPreferenceChange(SettingsContentSizePreferenceKey.self) { measurement in
+                if let measurement { onMeasure(measurement) }
+            }
+    }
+}
+
+private struct SettingsContentSizePreferenceKey: PreferenceKey {
+    static let defaultValue: SettingsPageMeasurement? = nil
+
+    static func reduce(value: inout SettingsPageMeasurement?, nextValue: () -> SettingsPageMeasurement?) {
+        if let next = nextValue() { value = next }
     }
 }

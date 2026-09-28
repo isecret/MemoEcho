@@ -73,7 +73,7 @@ STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/memoecho-dmg.XXXXXX")"
 RW_DMG_BASE="$(mktemp -u "${TMPDIR:-/tmp}/memoecho-rw.XXXXXX")"
 RW_DMG_PATH="${RW_DMG_BASE}.dmg"
 BACKGROUND_DIR="$STAGING_DIR/.background"
-BACKGROUND_PATH="$BACKGROUND_DIR/installer-background.png"
+BACKGROUND_PATH="$BACKGROUND_DIR/installer-background.tiff"
 APP_NAME="$(basename "$APP_PATH")"
 MOUNT_POINT="/Volumes/$VOLUME_NAME"
 OUTPUT_BASE="${OUTPUT_PATH%.dmg}"
@@ -92,7 +92,7 @@ cleanup
 
 mkdir -p "$BACKGROUND_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/$APP_NAME"
-ln -s /Applications "$STAGING_DIR/Applications"
+ln -s /Applications "$STAGING_DIR/应用程序"
 "$SCRIPT_DIR/render-dmg-background.swift" "$BACKGROUND_PATH"
 
 rm -f "$OUTPUT_PATH"
@@ -135,9 +135,9 @@ tell application "Finder"
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 116
         set text size of theViewOptions to 16
-        set background picture of theViewOptions to file ".background:installer-background.png"
+        set background picture of theViewOptions to file ".background:installer-background.tiff"
         set position of item "$APP_NAME" of container window to {170, 210}
-        set position of item "Applications" of container window to {470, 210}
+        set position of item "应用程序" of container window to {470, 210}
         close
         open
         delay 1

@@ -3,14 +3,6 @@ import XCTest
 
 final class PersonalDictionaryStoreTests: XCTestCase {
 
-    @MainActor
-    func testImportRequiresCurrentDictionaryEntryFormat() throws {
-        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
-        let importURL = tempDirectory.appendingPathComponent("old-format.json")
-        try Data(#"[{"id":"entry-1","term":"词条"}]"#.utf8).write(to: importURL)
-        XCTAssertThrowsError(try store.importEntries(from: importURL))
-        XCTAssertTrue(store.entries.isEmpty)
-    }
     private var tempDirectory: URL!
     private var dictionaryFileURL: URL!
 
@@ -93,70 +85,70 @@ final class PersonalDictionaryStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testImportEntriesMergesJSONFileAndSkipsDuplicateTerms() throws {
-        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
-        try store.addEntry(DictionaryEntry(id: "existing-id", term: "MemoEcho"))
-
-        let importURL = tempDirectory.appendingPathComponent("import.json")
-        let importJSON = """
-        [
-          {
-            "id": "duplicate-id",
-            "term": "MemoEcho",
-            "source": "manual"
-          },
-          {
-            "id": "existing-id",
-            "term": "FunASR",
-            "pronunciationHint": "fun a s r",
-            "category": "ASR",
-            "source": "manual"
-          }
-        ]
-        """
-        try importJSON.write(to: importURL, atomically: true, encoding: .utf8)
-
-        let summary = try store.importEntries(from: importURL)
-
-        XCTAssertEqual(summary, DictionaryImportSummary(importedCount: 1, skippedDuplicateCount: 1))
-        XCTAssertEqual(store.entries.map(\.term), ["MemoEcho", "FunASR"])
-        XCTAssertEqual(store.entries[1].pronunciationHint, "fun a s r")
-        XCTAssertEqual(store.entries[1].category, "ASR")
-        XCTAssertNotEqual(store.entries[1].id, "existing-id")
-
-        let reloaded = PersonalDictionaryStore(directoryURL: tempDirectory)
-        XCTAssertEqual(reloaded.entries.map(\.term), ["MemoEcho", "FunASR"])
-    }
-
-    @MainActor
-    func testImportInvalidJSONThrowsAndKeepsExistingEntries() throws {
+    func testCSVImportNormalizesDuplicatesAndMakesAllImportedWordsManual() throws {
         let store = PersonalDictionaryStore(directoryURL: tempDirectory)
         try store.addEntry(DictionaryEntry(term: "MemoEcho"))
-
-        let importURL = tempDirectory.appendingPathComponent("invalid.json")
-        try "{ invalid".write(to: importURL, atomically: true, encoding: .utf8)
-
-        XCTAssertThrowsError(try store.importEntries(from: importURL))
-        XCTAssertEqual(store.entries.map(\.term), ["MemoEcho"])
+        _ = try store.addLearnedTermIfNeeded("SenseVoice")
+        let originalID = store.entries[1].id
+        let file = tempDirectory.appendingPathComponent("terms.csv")
+        try "\u{FEFF}memoecho\r\nSENSEVOICE\r\n FunASR \r\nfunasr\r\n\r\n\"ACME, Inc.\"\r\n\"Say \"\"Hi\"\"\"\r\n".write(to: file, atomically: true, encoding: .utf8)
+        let summary = try store.importEntries(from: file)
+        XCTAssertEqual(summary, DictionaryImportSummary(importedCount: 4, skippedDuplicateCount: 2))
+        XCTAssertEqual(store.entries.map(\.term), ["MemoEcho", "SenseVoice", "FunASR", "ACME, Inc.", "Say \"Hi\""])
+        XCTAssertTrue(store.entries.allSatisfy { $0.source == .manual })
+        XCTAssertEqual(store.entries[1].id, originalID)
+        XCTAssertEqual(PersonalDictionaryStore(directoryURL: tempDirectory).entries, store.entries)
     }
 
     @MainActor
-    func testExportEntriesWritesDictionaryJSONFile() throws {
+    func testMalformedCSVRejectsEntireImportWithoutChangingExistingEntries() throws {
         let store = PersonalDictionaryStore(directoryURL: tempDirectory)
-        try store.addEntry(DictionaryEntry(id: "entry-1", term: "MemoEcho"))
-        try store.addEntry(DictionaryEntry(id: "entry-2", term: "FunASR", pronunciationHint: "fun a s r", category: "ASR"))
+        try store.addEntry(DictionaryEntry(term: "MemoEcho"))
+        let file = tempDirectory.appendingPathComponent("invalid.csv")
+        for malformed in ["Valid\nwrong,column\n", "Valid\n\"unclosed", "\"a\",\"b\"", "\"line\nbreak\"", "unescaped\"quote"] {
+            try malformed.write(to: file, atomically: true, encoding: .utf8)
+            XCTAssertThrowsError(try store.importEntries(from: file))
+            XCTAssertEqual(store.entries.map(\.term), ["MemoEcho"])
+        }
+    }
 
-        let exportURL = tempDirectory.appendingPathComponent("export.json")
-        try store.exportEntries(to: exportURL)
+    @MainActor
+    func testCSVExportContainsOnlyTermsAndRoundTripsAsManualWords() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        try store.addEntry(DictionaryEntry(term: "MemoEcho", pronunciationHint: "memo", category: "Product"))
+        _ = try store.addLearnedTermIfNeeded("ACME, Inc.")
+        _ = try store.addLearnedTermIfNeeded("Say \"Hi\"")
+        let file = tempDirectory.appendingPathComponent("export.csv")
+        try store.exportEntries(to: file)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "MemoEcho\n\"ACME, Inc.\"\n\"Say \"\"Hi\"\"\"\n")
+        let imported = PersonalDictionaryStore(directoryURL: tempDirectory.appendingPathComponent("other"))
+        XCTAssertEqual(try imported.importEntries(from: file).importedCount, 3)
+        XCTAssertEqual(imported.entries.map(\.term), store.entries.map(\.term))
+        XCTAssertTrue(imported.entries.allSatisfy { $0.source == .manual && $0.pronunciationHint == nil && $0.category == nil })
+    }
 
-        let exportedEntries = try JSONDecoder().decode([DictionaryEntry].self, from: Data(contentsOf: exportURL))
-        XCTAssertEqual(
-            exportedEntries,
-            [
-                DictionaryEntry(id: "entry-1", term: "MemoEcho"),
-                DictionaryEntry(id: "entry-2", term: "FunASR", pronunciationHint: "fun a s r", category: "ASR")
-            ]
-        )
+    @MainActor
+    func testCSVImportRollsBackNewAndConvertedTermsOnSaveFailure() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        _ = try store.addLearnedTermIfNeeded("MemoEcho")
+        let original = store.entries
+        try FileManager.default.removeItem(at: dictionaryFileURL)
+        try FileManager.default.createDirectory(at: dictionaryFileURL, withIntermediateDirectories: true)
+        let file = tempDirectory.appendingPathComponent("import.csv")
+        try "MemoEcho\nNew Word\n".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try store.importEntries(from: file))
+        XCTAssertEqual(store.entries, original)
+    }
+
+    @MainActor
+    func testEmptyCSVHasNoHeaderOrWords() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        let file = tempDirectory.appendingPathComponent("empty.csv")
+        try store.exportEntries(to: file)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "")
+        XCTAssertEqual(try store.importEntries(from: file).importedCount, 0)
+        try "\u{FEFF}\r\n  \n\"\"\n".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try store.importEntries(from: file).importedCount, 0)
     }
 
     @MainActor
@@ -185,4 +177,47 @@ final class PersonalDictionaryStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.addEntry(DictionaryEntry(term: "MemoEcho")))
         XCTAssertTrue(store.entries.isEmpty)
     }
+    @MainActor
+    func testDeleteLearnedTermPersistsAndAllowsLearningAgain() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        XCTAssertTrue(try store.addLearnedTermIfNeeded("MemoEcho"))
+        let entry = try XCTUnwrap(store.latestLearnedEntry)
+        try store.removeEntry(id: entry.id)
+        XCTAssertNil(store.latestLearnedEntry)
+        XCTAssertTrue(store.termsForPrompt().isEmpty)
+        XCTAssertEqual(store.hotwordsForLocalASR(), "")
+        let reloaded = PersonalDictionaryStore(directoryURL: tempDirectory)
+        XCTAssertTrue(reloaded.entries.isEmpty)
+        XCTAssertTrue(try reloaded.addLearnedTermIfNeeded("MemoEcho"))
+        XCTAssertEqual(reloaded.termsForPrompt().map(\.term), ["MemoEcho"])
+    }
+
+    @MainActor
+    func testAutoLearnAndDeleteRollBackOnWriteFailure() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        XCTAssertTrue(try store.addLearnedTermIfNeeded("MemoEcho"))
+        let previous = store.entries
+        let id = try XCTUnwrap(store.latestLearnedEntryID)
+        try FileManager.default.removeItem(at: dictionaryFileURL)
+        try FileManager.default.createDirectory(at: dictionaryFileURL, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try store.addLearnedTermIfNeeded("SwiftUI"))
+        XCTAssertEqual(store.entries, previous)
+        XCTAssertEqual(store.latestLearnedEntryID, id)
+        XCTAssertThrowsError(try store.removeEntry(id: id))
+        XCTAssertEqual(store.entries, previous)
+        XCTAssertNotNil(store.latestLearnedEntry)
+    }
+
+    @MainActor
+    func testDeletedLearnedTermCanBeImported() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        _ = try store.addLearnedTermIfNeeded("MemoEcho")
+        try store.removeEntry(id: XCTUnwrap(store.latestLearnedEntryID))
+        let file = tempDirectory.appendingPathComponent("import.csv")
+        let data = Data("MEMOECHO\n".utf8)
+        try data.write(to: file)
+        XCTAssertEqual(try store.importEntries(from: file).importedCount, 1)
+        XCTAssertEqual(store.termsForPrompt().map(\.term), ["MEMOECHO"])
+    }
+
 }

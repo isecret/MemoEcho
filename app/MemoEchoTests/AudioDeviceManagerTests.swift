@@ -2,6 +2,46 @@ import XCTest
 @testable import MemoEcho
 
 final class AudioDeviceManagerTests: XCTestCase {
+    private let inputs = [
+        AudioInputDevice(id: "internal", name: "Mac microphone", transport: .builtIn),
+        AudioInputDevice(id: "headset", name: "Headset", transport: .bluetooth),
+        AudioInputDevice(id: "usb", name: "USB microphone", transport: .external),
+    ]
+
+    func testAutomaticSelectionAvoidsBluetoothInputWhenBuiltInIsAvailable() {
+        XCTAssertEqual(resolve(.automatic), "internal")
+        XCTAssertEqual(resolve(.systemDefault), "headset", "System default must keep its documented meaning")
+        XCTAssertEqual(resolve(.init(selectedDeviceID: "headset")), "headset")
+    }
+
+    func testAutomaticSelectionRespectsClamshellAvailabilityAndExternalMicrophones() {
+        XCTAssertEqual(resolve(.automatic, lidClosed: true), "headset")
+        var muted = inputs
+        muted[0].isUsable = false
+        XCTAssertEqual(resolve(.automatic, devices: muted), "headset")
+        XCTAssertEqual(resolve(.automatic, devices: Array(inputs.dropFirst())), "headset")
+        XCTAssertEqual(resolve(.automatic, defaultID: "usb"), "usb")
+        XCTAssertEqual(resolve(.automatic, output: .builtIn), "headset")
+        XCTAssertNil(resolve(.automatic, devices: [], defaultID: nil))
+        XCTAssertEqual(resolve(.init(selectedDeviceID: "disconnected")), "headset")
+    }
+
+    func testTypelessStartDelayUsesSameDeviceThenAirPodsThenImmediatePlayback() {
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: 3, outputID: 3, outputName: "Headset"), 1_200)
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: 3, outputID: 3, outputName: "AirPods Pro"), 1_200)
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: 1, outputID: 3, outputName: "AIRPODS Pro"), 300)
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: 1, outputID: 2, outputName: "Speakers"), 0)
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: nil, outputID: nil, outputName: nil), 0)
+        XCTAssertEqual(AudioDeviceManager.startSoundDelayMilliseconds(inputID: 0, outputID: 0, outputName: nil), 0)
+    }
+
+    private func resolve(_ config: AudioInputConfig, devices: [AudioInputDevice]? = nil,
+                         defaultID: String? = "headset", output: AudioDeviceTransport = .bluetooth,
+                         lidClosed: Bool = false) -> String? {
+        AudioDeviceManager.resolveInputID(config: config, devices: devices ?? inputs,
+                                          defaultInputID: defaultID, outputTransport: output, lidClosed: lidClosed)
+    }
+
     func testSystemDefaultAggregateDevicePrefixesAreHidden() {
         XCTAssertTrue(AudioDeviceManager.isSystemDefaultAggregateDeviceID(
             "CADefaultDeviceAggregate-1",

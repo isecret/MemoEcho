@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     let appCoordinator: AppCoordinator
     @Environment(\.openWindow) private var openWindow
+    @State private var learningUndoError: String?
 
     private var state: SessionState {
         appCoordinator.sessionCoordinator.state
@@ -21,6 +22,10 @@ struct MenuBarView: View {
             Divider()
         }
 
+        if let warning = appCoordinator.sessionCoordinator.recordingWarning {
+            Label(warning, systemImage: "mic.slash")
+            Divider()
+        }
         if let failureText = lastInjectionFailureText {
             let preview = failureText.count > 20
                 ? String(failureText.prefix(20)) + "…"
@@ -32,12 +37,40 @@ struct MenuBarView: View {
             Divider()
         }
 
+        if let recovery = appCoordinator.sessionCoordinator.recovery {
+            if recovery.canRetry {
+                Button(appCoordinator.sessionCoordinator.recoveryActionTitle ?? recovery.stage.retryTitle) { appCoordinator.retryFailedSession() }
+                    .disabled(!appCoordinator.sessionCoordinator.canRetryRecovery)
+            }
+            if recovery.outputAttempted {
+                Text("请先检查原输入框，避免重复粘贴")
+            }
+            Button("检查设置") { appCoordinator.openFailedSessionSettings() }
+                .disabled(state.isProcessing)
+            Button("丢弃上次结果") { appCoordinator.sessionCoordinator.discardRecovery() }
+                .disabled(state.isProcessing && !appCoordinator.sessionCoordinator.isRecovering)
+            Text("仅临时保留 10 分钟，退出后清除")
+                .font(.caption)
+            Divider()
+        }
+
         if state.isCancellable {
             Button("取消当前任务") {
                 appCoordinator.sessionCoordinator.cancel()
             }
             Divider()
         }
+
+        if let entry = appCoordinator.dictionaryStore.latestLearnedEntry {
+            Button("撤销学习「\(entry.term)」") {
+                do {
+                    try appCoordinator.dictionaryStore.removeEntry(id: entry.id)
+                    learningUndoError = nil
+                } catch { learningUndoError = "撤销失败，请在词典设置中重试" }
+            }
+            Divider()
+        }
+        if let learningUndoError { Text(learningUndoError) }
 
         microphonePicker
 
@@ -74,6 +107,8 @@ struct MenuBarView: View {
                         appCoordinator.audioDeviceManager.selectMenuItem(id: id)
                     }
                 )) {
+                    Text("自动选择（推荐）")
+                        .tag(AudioInputConfig.automaticSelectionID)
                     Text(appCoordinator.audioDeviceManager.systemDefaultMenuItemTitle)
                         .tag(AudioDeviceManager.systemDefaultSelectionID)
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import MemoEcho
 
@@ -28,8 +29,8 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             generation: 0,
             mode: .translate,
             sessionID: "session-test",
-            targetPID: 42,
-            targetBundleID: "com.example.app"
+            beforeInjection: .init(pid: 42, bundleID: "com.example.app", identity: .init(token: "input"), value: "", selection: NSRange(location: 0, length: 0), isComposing: false),
+            insertedText: "联系普林"
         )
 
         try? await Task.sleep(for: .milliseconds(50))
@@ -53,8 +54,8 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             generation: 0,
             mode: .polish,
             sessionID: "session-test",
-            targetPID: 42,
-            targetBundleID: "com.example.app"
+            beforeInjection: .init(pid: 42, bundleID: "com.example.app", identity: .init(token: "input"), value: "", selection: NSRange(location: 0, length: 0), isComposing: false),
+            insertedText: "联系普林"
         )
 
         try? await Task.sleep(for: .milliseconds(50))
@@ -132,9 +133,98 @@ final class SessionCoordinatorLearningTests: XCTestCase {
         }
     }
 
+    func testEndCuePrecedesCaptureStopAndDuplicateFinishIsIgnored() async {
+        let recorder = FakeAudioRecorder()
+        let coordinator = makeAudioCoordinator(recorder)
+        var stoppedEvents = 0
+        coordinator.onFeedbackEvent = { if case .recordingStopped = $0 { stoppedEvents += 1 } }
+        coordinator.startRecording(output: .onboardingTrial { _ in true })
+        await waitForRecorder(recorder, starts: 1)
+        coordinator.finishRecording()
+        coordinator.finishRecording()
+        XCTAssertEqual(stoppedEvents, 1)
+        XCTAssertEqual(recorder.stopCount, 0, "End must be emitted while capture remains open")
+        try? await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(recorder.stopCount, 0)
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(recorder.stopCount, 1)
+    }
+
+    func testCancelDuringEndDelayCannotStopNextRecording() async {
+        let recorder = FakeAudioRecorder()
+        let coordinator = makeAudioCoordinator(recorder)
+        coordinator.startRecording(output: .onboardingTrial { _ in true })
+        await waitForRecorder(recorder, starts: 1)
+        coordinator.finishRecording()
+        coordinator.cancel()
+        XCTAssertEqual(recorder.stopCount, 1)
+        coordinator.startRecording(output: .onboardingTrial { _ in true })
+        await waitForRecorder(recorder, starts: 2)
+        try? await Task.sleep(for: .milliseconds(160))
+        XCTAssertEqual(recorder.stopCount, 1)
+        XCTAssertEqual(coordinator.state, .recording)
+        coordinator.cancel()
+    }
+
+    func testShortCaptureClosesImmediatelyWithoutEndCue() async {
+        let recorder = FakeAudioRecorder()
+        recorder.durationMs = 499
+        let coordinator = makeAudioCoordinator(recorder)
+        var stoppedEvents = 0
+        coordinator.onFeedbackEvent = { if case .recordingStopped = $0 { stoppedEvents += 1 } }
+        coordinator.startRecording(output: .onboardingTrial { _ in true })
+        await waitForRecorder(recorder, starts: 1)
+        coordinator.finishRecording()
+        XCTAssertEqual(stoppedEvents, 0)
+        XCTAssertEqual(recorder.stopCount, 1)
+        XCTAssertEqual(coordinator.state, .idle)
+    }
+
+    private func makeAudioCoordinator(_ recorder: FakeAudioRecorder) -> SessionCoordinator {
+        makeCoordinator(dictionaryStore: nil, learner: MockPostInjectionLearner(),
+                        audioRecorder: recorder, ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
+                        configureConfigStore: { store in
+            var config = ASRConfig()
+            config.selectedPlatform = .tencentCloudSentence
+            config.tencentCloud.secretId = "test-id"
+            config.tencentCloud.secretKey = "test-key"
+            try! store.saveASRConfig(config)
+            try! store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        })
+    }
+
+    private func waitForRecorder(_ recorder: FakeAudioRecorder, starts: Int) async {
+        for _ in 0..<100 {
+            if recorder.startCount == starts { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Recorder did not start")
+    }
+
+    @MainActor
+    private final class FakeAudioRecorder: AudioRecording {
+    var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
+        var durationMs = 800
+        var startCount = 0
+        var stopCount = 0
+        var running = false
+        var currentDurationMs: Int { running ? durationMs : 0 }
+        func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws {
+            startCount += 1
+            running = true
+        }
+        func currentLevel() -> Float { 0 }
+        func stopRecording() -> AudioRecordingResult {
+            stopCount += 1
+            running = false
+            return .init(data: Data(), durationMs: durationMs)
+        }
+    }
+
     private func makeCoordinator(
         dictionaryStore: PersonalDictionaryStore?,
         learner: any PostInjectionDictionaryLearning,
+        audioRecorder: any AudioRecording = AudioRecorder(),
         ensureMicrophoneAuthorized: @escaping @MainActor @Sendable () throws -> Void = {
             try PermissionsManager().ensureMicrophoneAuthorized()
         },
@@ -150,6 +240,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             permissionsManager: PermissionsManager(),
             configStore: configStore,
             audioDeviceManager: audioDeviceManager,
+            audioRecorder: audioRecorder,
             dictionaryStore: dictionaryStore,
             postInjectionLearner: learner,
             ensureMicrophoneAuthorized: ensureMicrophoneAuthorized,
@@ -162,9 +253,8 @@ final class SessionCoordinatorLearningTests: XCTestCase {
         var learnedTerm: String?
 
         func observe(
-            targetPID: pid_t?,
-            targetBundleID: String?,
-            windowContext: WindowContextSnapshot?,
+            beforeInjection: FocusedElementTextSnapshot,
+            insertedText: String,
             store: PersonalDictionaryStore,
             shouldContinue: @escaping @MainActor @Sendable () -> Bool,
             onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void

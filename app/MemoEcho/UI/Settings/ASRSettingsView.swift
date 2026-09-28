@@ -96,6 +96,7 @@ struct ASRSettingsView: View {
     let configStore: ConfigStore
     let downloadManager: ModelDownloadManager
     let validationService: CloudASRValidationService
+    var microphoneControls: MicrophoneLevelView? = nil
 
     @State private var selectedPlatform: ASRPlatform = .localSenseVoice
 
@@ -122,6 +123,7 @@ struct ASRSettingsView: View {
 
     var body: some View {
         SettingsPaneSection {
+            if let microphoneControls { microphoneControls }
             SettingsFormRow(title: "语音引擎") {
                 HStack(spacing: 4) {
                     Picker("语音引擎", selection: $selectedPlatform) {

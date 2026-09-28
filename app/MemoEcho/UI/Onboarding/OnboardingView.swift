@@ -478,7 +478,7 @@ struct OnboardingView: View {
                     .accessibilityLabel("第 \(number) 步，共 5 步")
             }
             Spacer()
-            if coordinator.step != .welcome && coordinator.step != .tryIt {
+            if coordinator.canGoBack {
                 Button("上一步", action: coordinator.goBack)
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)

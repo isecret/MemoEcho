@@ -10,9 +10,9 @@ final class WindowContextServiceTests: XCTestCase {
             elementRole: " AXTextField ",
             elementSubrole: "  ",
             placeholder: "  说点什么  ",
-            selectedText: String(repeating: "选", count: 240),
-            surroundingTextBefore: String(repeating: "前", count: 100),
-            surroundingTextAfter: String(repeating: "后", count: 120),
+            selectedText: String(repeating: "选", count: 1240),
+            surroundingTextBefore: String(repeating: "前", count: 1100),
+            surroundingTextAfter: String(repeating: "后", count: 1120),
             nearbyLabels: ["  回复  ", "", "回复", " 评论 ", " 发送 ", "额外标签"]
         )
 
@@ -23,9 +23,9 @@ final class WindowContextServiceTests: XCTestCase {
         XCTAssertEqual(result.snapshot?.bundleID, "com.tencent.xinWeChat")
         XCTAssertEqual(result.snapshot?.windowTitle, "聊天窗口")
         XCTAssertEqual(result.snapshot?.surfaceKind, .chatComposer)
-        XCTAssertEqual(result.snapshot?.selectedText?.count, 200)
-        XCTAssertEqual(result.snapshot?.surroundingTextBefore?.count, 80)
-        XCTAssertEqual(result.snapshot?.surroundingTextAfter?.count, 80)
+        XCTAssertEqual(result.snapshot?.selectedText?.count, 1000)
+        XCTAssertEqual(result.snapshot?.surroundingTextBefore?.count, 1000)
+        XCTAssertEqual(result.snapshot?.surroundingTextAfter?.count, 1000)
         XCTAssertEqual(result.snapshot?.nearbyLabels, ["回复", "评论", "发送", "额外标签"])
     }
 
@@ -76,7 +76,7 @@ final class WindowContextServiceTests: XCTestCase {
     }
 
     func testCaptureContextResultMarksRedactedEvent() async {
-        let service = WindowContextService { _, _ in
+        let service = WindowContextService { _, _, _, _ in
             WindowContextCandidate(
                 appName: "Terminal",
                 bundleID: "com.apple.Terminal",

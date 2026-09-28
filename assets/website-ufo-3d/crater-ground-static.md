@@ -1,0 +1,9 @@
+# 静态陨石坑地面
+
+文件：`crater-ground-static.png`。通过内置 imagegen 生成，作为独立 HTML 的静态地面背景；不参与位移、形变或亮度动画。
+
+生成提示词：
+
+```text
+Use case: photorealistic-natural. Asset type: static background ground plate for a black-and-white UFO landing-page hero, 1536x1024 landscape 3:2. Render an exquisitely photorealistic dry Mars-like impact-crater landscape at night in neutral grayscale. Composition is critical: upper 68 percent of the image is pure flat near-black #030303 EMPTY sky, without anything at all. Low irregular horizon at y=72 percent. Terrain occupies only the bottom 28 percent, viewed from a camera hovering low above the surface, with a wide lens looking toward the horizon. Continuous compact fine-grained dusty regolith, naturally weathered shallow craters, eroded broken low rims, believable irregular geological relief, sharp clean photographic surface detail. A broad shallow crater approximately centered at x=72 percent y=85 percent, about 22 percent of image width; a few smaller craters recede into the distance, subtle foreground ridges. Natural topographic variation, not volcanoes, not steep circular walls, not heaps of rocks. Illumination: a soft off-screen overhead white light illuminates ground around x=65 percent y=87 percent; dim raking light reveals dry powder and rim shadow. Left third terrain mostly disappears into dark black for typography. Near foreground bottom edge naturally fades into black. Real photographic cinematic planetary surface, fine restrained contrast, no glossy materials, no water, no ripples, no fluid, no motion blur, no depth-of-field blur, no artificial 3D game look, no oversharpening. NO spacecraft, NO light beam, NO smoke, NO dust in air, NO stars, NO atmosphere haze, NO text, NO logos. This image will sit UNDER the existing animated flying saucer and smoke. Do not paint any airborne elements.
+```

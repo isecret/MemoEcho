@@ -34,8 +34,8 @@ final class SenseVoiceRuntimeManager: @unchecked Sendable {
         }
     }
 
-    private let logger = Logger(subsystem: "com.isecret.memoecho", category: "SenseVoice")
-    private let queue = DispatchQueue(label: "com.isecret.memoecho.sensevoice", qos: .userInitiated)
+    private let logger = Logger(subsystem: "me.wangmao.memoecho", category: "SenseVoice")
+    private let queue = DispatchQueue(label: "me.wangmao.memoecho.sensevoice", qos: .userInitiated)
     private let lock = NSLock()
 
     private var recognizer: OpaquePointer?

@@ -57,7 +57,7 @@ final class VoiceInputReadinessService {
             baseURL: configStore.llmConfig.baseURL,
             apiKey: configStore.openAIAPIKey,
             model: configStore.llmConfig.model,
-            thinkingDisabled: configStore.llmConfig.thinkingDisabled
+            omitThinkingParameter: configStore.omitThinkingParameter
         )
     }
 

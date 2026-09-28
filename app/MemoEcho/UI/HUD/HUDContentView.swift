@@ -88,6 +88,7 @@ struct HUDContentView: View {
     private var recordingCapsule: some View {
         HUDRecordingContent(
             barHeights: controller.barHeights,
+            signalMissing: controller.recordingSignalMissing,
             controlsOpacity: layers.recordingControlsOpacity,
             waveformOpacity: layers.recordingWaveOpacity,
             onCancel: onCancel,
@@ -134,6 +135,11 @@ struct HUDContentView: View {
         .padding(.vertical, HUDLayout.compactVerticalPadding)
         .padding(.leading, isNotice ? HUDLayout.noticeLeadingPadding : HUDLayout.regularHorizontalPadding)
         .padding(.trailing, isNotice ? HUDLayout.noticeTrailingPadding : HUDLayout.regularHorizontalPadding)
+        .contentShape(Capsule())
+        .onTapGesture { controller.performRecoveryAction() }
+        .accessibilityAction(named: Text(controller.recoveryActionTitle ?? "恢复")) {
+            controller.performRecoveryAction()
+        }
     }
 
     // MARK: - Common Background
@@ -291,9 +297,9 @@ struct HUDContentView: View {
     private func resultPayload(for state: HUDState) -> (icon: String, text: String) {
         switch state {
         case .notice(let text):
-            return ("dictionary", text)
+            return (text == "已复制" ? "check" : "dictionary", text)
         case .failure(let reason):
-            return ("warn", reason.shortLabel)
+            return ("warn", controller.recoveryActionTitle.map { reason.shortLabel + " · " + $0 } ?? reason.shortLabel)
         default:
             return ("check", "")
         }
@@ -303,6 +309,8 @@ struct HUDContentView: View {
         switch state {
         case .notice(let text):
             HUDLayout.noticeWidth(for: text)
+        case .failure where controller.recoveryActionTitle != nil:
+            HUDLayout.recoveryWidth(for: resultPayload(for: state).text)
         default:
             HUDLayout.resultWidth
         }
@@ -385,6 +393,7 @@ private struct HUDThinkingContent: View {
 
 private struct HUDRecordingContent: View {
     let barHeights: [CGFloat]
+    var signalMissing = false
     var controlsOpacity: Double = 1
     var waveformOpacity: Double = 1
     var onCancel: () -> Void = {}
@@ -395,11 +404,17 @@ private struct HUDRecordingContent: View {
             hudButton(icon: "x", isConfirm: false, action: onCancel)
                 .opacity(controlsOpacity)
                 .offset(x: controlsOpacity == 0 ? HUDLayout.hiddenControlOffset : -HUDLayout.visibleControlOffset)
-            HStack(spacing: HUDLayout.waveformSpacing) {
-                ForEach(barHeights.indices, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 999)
-                        .fill(Color(nsColor: HUDLayout.waveformColor))
-                        .frame(width: HUDLayout.waveformBarWidth, height: barHeights[i])
+            ZStack {
+                if signalMissing {
+                    Text("没收到声音").font(.system(size: 10)).foregroundStyle(.white)
+                } else {
+                    HStack(spacing: HUDLayout.waveformSpacing) {
+                        ForEach(barHeights.indices, id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 999)
+                                .fill(Color(nsColor: HUDLayout.waveformColor))
+                                .frame(width: HUDLayout.waveformBarWidth, height: barHeights[i])
+                        }
+                    }
                 }
             }
             .frame(width: HUDLayout.waveformWidth, height: HUDLayout.capsuleHeight - HUDLayout.scaled(6))

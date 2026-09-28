@@ -48,7 +48,7 @@ struct LLMSettingsView: View {
                 }
             }
         } footer: {
-            Text("支持 OpenAI 兼容接口。润色或翻译时，可能发送输入框附近的少量文字；密码框等敏感场景只发送窗口元数据。")
+            Text("支持 OpenAI 兼容接口，用于整理和翻译语音识别结果。")
         }
         .onAppear {
             loadDraft()
@@ -103,7 +103,7 @@ struct LLMSettingsView: View {
 
     private var draftFingerprint: String {
         var input = currentValidationInput()
-        input.thinkingDisabled = false
+        input.omitThinkingParameter = false
         return input.fingerprint
     }
 
@@ -112,7 +112,7 @@ struct LLMSettingsView: View {
             baseURL: baseURL,
             apiKey: apiKey,
             model: model,
-            thinkingDisabled: configStore.llmConfig.thinkingDisabled
+            omitThinkingParameter: configStore.omitThinkingParameter
         )
     }
 

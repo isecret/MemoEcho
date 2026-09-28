@@ -1,354 +1,240 @@
 import Foundation
 
-/// 配置中心：全部配置统一存储到 ~/.memoecho/config.json
+/// User preferences and credentials live in config.json; durable app state lives in state.json.
 @MainActor
 @Observable
 final class ConfigStore {
-    // MARK: - 公开配置
-
     private(set) var llmConfig = LLMConfig()
     private(set) var generalConfig = GeneralConfig()
     private(set) var asrConfig = ASRConfig()
-    private(set) var audioInputConfig = AudioInputConfig.systemDefault
-    private(set) var onboardingProgress = OnboardingProgress()
+    private(set) var audioInputConfig = AudioInputConfig.automatic
+    private(set) var openAIAPIKey = ""
+    private(set) var configLoadFailed = false
+    private let stateStore: AppStateStore
+    private let configFileURL: URL
 
-    // MARK: - 密钥（启动时从配置文件直接加载到内存）
-
-    private(set) var openAIAPIKey: String = ""
-
-    /// 配置文件加载是否失败（损坏等情况），用于区分 fresh install 与 corrupt config
-    private(set) var configLoadFailed: Bool = false
-
-    // MARK: - 首次配置判断
-
-    /// 用户已完成引导展示；运行条件由 VoiceInputReadiness 独立判断。
-    var hasCompletedInitialSetup: Bool {
-        onboardingProgress.hasFinishedPresentation && !configLoadFailed
+    var windowContextEnabled: Bool { generalConfig.windowContextEnabled }
+    var onboardingProgress: OnboardingProgress {
+        var progress = stateStore.value.onboarding
+        progress.hasConfirmedHotkey = progress.hasConfirmedHotkey
+            && stateStore.value.confirmedHotkeyFingerprint == hotkeyFingerprint
+        return progress
     }
-
-    /// A corrupt existing file belongs in Settings for repair, not in first-run setup.
-    var requiresInitialSetup: Bool {
-        !onboardingProgress.hasFinishedPresentation && !configLoadFailed
+    var omitThinkingParameter: Bool {
+        stateStore.value.llmWithoutThinkingParameter == llmFingerprint
     }
-
+    var hasCompletedInitialSetup: Bool { onboardingProgress.hasFinishedPresentation && !configLoadFailed }
+    var requiresInitialSetup: Bool { !onboardingProgress.hasFinishedPresentation && !configLoadFailed }
     var canOpenSettings: Bool { !requiresInitialSetup }
-
     var isLLMConfigured: Bool {
         !llmConfig.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !llmConfig.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-
-    /// 当前选中的 ASR 平台是否可用
-    var isASRReady: Bool {
-        asrConfig.isReady(localModelsAvailable: Self.localModelsAvailable())
-    }
-
-    /// ASR 平台不可用的原因描述
-    var asrNotReadyReason: String? {
-        asrConfig.notReadyReason(localModelsAvailable: Self.localModelsAvailable())
-    }
-
-    // MARK: - 配置文件路径
-
-    private let configDirectory: URL
-    private let configFileURL: URL
-
-    // MARK: - 配置文件模型
+    var isASRReady: Bool { asrConfig.isReady(localModelsAvailable: Self.localModelsAvailable()) }
+    var asrNotReadyReason: String? { asrConfig.notReadyReason(localModelsAvailable: Self.localModelsAvailable()) }
 
     private struct ConfigFile: Codable {
-        var llm: LLMFileConfig = LLMFileConfig()
-        var general: GeneralFileConfig = GeneralFileConfig()
-        var asr: ASRConfig = ASRConfig()
-        var audio: AudioInputConfig = .systemDefault
-        var onboarding: OnboardingProgress = OnboardingProgress()
-
-        init(
-            llm: LLMFileConfig = LLMFileConfig(),
-            general: GeneralFileConfig = GeneralFileConfig(),
-            asr: ASRConfig = ASRConfig(),
-            audio: AudioInputConfig = .systemDefault,
-            onboarding: OnboardingProgress = OnboardingProgress()
-        ) {
-            self.llm = llm
-            self.general = general
-            self.asr = asr
-            self.audio = audio
-            self.onboarding = onboarding
-        }
+        var llm = LLMFileConfig()
+        var general = GeneralConfig()
+        var asr = ASRConfig()
+        var audio = AudioInputConfig.automatic
 
         struct LLMFileConfig: Codable {
-            var baseURL: String = ""
-            var model: String = ""
-            var apiKey: String = ""
-            var thinkingDisabled: Bool = false
-        }
-
-        struct GeneralFileConfig: Codable {
-            var hotkey: HotkeyCombo = .default
-            var interactionSoundEnabled: Bool = true
-            var translationTargetLanguage: TranslationTargetLanguage = .english
-            var launchAtLogin: Bool = false
-
-            init(
-                hotkey: HotkeyCombo = .default,
-                interactionSoundEnabled: Bool = true,
-                translationTargetLanguage: TranslationTargetLanguage = .english,
-                launchAtLogin: Bool = false
-            ) {
-                self.hotkey = hotkey
-                self.interactionSoundEnabled = interactionSoundEnabled
-                self.translationTargetLanguage = translationTargetLanguage
-                self.launchAtLogin = launchAtLogin
-            }
-
-            var publicConfig: GeneralConfig {
-                GeneralConfig(
-                    hotkey: hotkey,
-                    interactionSoundEnabled: interactionSoundEnabled,
-                    translationTargetLanguage: translationTargetLanguage,
-                    launchAtLogin: launchAtLogin
-                )
-            }
+            var baseURL = ""
+            var model = ""
+            var apiKey = ""
         }
     }
 
-    // MARK: - 初始化
-
     init(configDirectory: URL? = nil) {
-        self.configDirectory = configDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        let directory = configDirectory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".memoecho", isDirectory: true)
-        self.configFileURL = self.configDirectory.appendingPathComponent("config.json")
+        configFileURL = directory.appendingPathComponent("config.json")
+        stateStore = AppStateStore(directory: directory)
         loadAll()
     }
 
-    // MARK: - 加载
-
     func loadAll() {
-        let fileURL = configFileURL
-
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            // 配置文件已存在，尝试加载
+        stateStore.reload()
+        if FileManager.default.fileExists(atPath: configFileURL.path) {
             do {
-                let data = try Data(contentsOf: fileURL)
-                let configFile = try JSONDecoder().decode(ConfigFile.self, from: data)
-                applyConfigFile(configFile)
+                let file = try JSONDecoder().decode(ConfigFile.self, from: Data(contentsOf: configFileURL))
+                applyConfigFile(file)
                 configLoadFailed = false
             } catch {
-                // 保留损坏文件，交由设置页显式修复；不要自动进入首次向导。
-                applyConfigFile(ConfigFile(onboarding: OnboardingProgress(
-                    lastVisitedStep: .tryIt, hasFinishedPresentation: true, hasConfirmedHotkey: true
-                )))
+                // Preserve the file for repair; never silently convert an old or damaged schema.
+                applyConfigFile(ConfigFile())
                 configLoadFailed = true
             }
         } else {
-            let initial = ConfigFile()
-            applyConfigFile(initial)
-            configLoadFailed = false
-            try? writeConfigFile(initial)
+            applyConfigFile(ConfigFile())
+            do {
+                // Deleting config is an explicit fresh setup, even if state.json still exists.
+                try stateStore.reset()
+                try writeConfigFile(buildConfigFile())
+            } catch {
+                configLoadFailed = true
+            }
         }
-
         if !configLoadFailed { refreshLocalModelStatusFromDisk() }
     }
 
-    // MARK: - LLM 配置保存
-
     func saveLLMConfig(_ config: LLMConfig, apiKey: String) throws {
-        let trimmedURL = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedModel = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if !trimmedURL.isEmpty, URL(string: trimmedURL) == nil {
-            throw ConfigValidationError.invalidURL(trimmedURL)
-        }
-
-        var normalConfig = config
-        normalConfig.baseURL = trimmedURL
-        normalConfig.model = trimmedModel
-        normalConfig.thinkingDisabled = shouldResetThinkingDisabled(
-            baseURL: trimmedURL,
-            model: trimmedModel,
-            apiKey: trimmedKey
-        ) ? false : llmConfig.thinkingDisabled
-
-        var configFile = buildConfigFile()
-        configFile.llm = ConfigFile.LLMFileConfig(
-            baseURL: trimmedURL,
-            model: trimmedModel,
-            apiKey: trimmedKey,
-            thinkingDisabled: normalConfig.thinkingDisabled
-        )
-        try writeConfigFile(configFile)
-
-        llmConfig = normalConfig
-        openAIAPIKey = trimmedKey
+        let url = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !url.isEmpty, URL(string: url) == nil { throw ConfigValidationError.invalidURL(url) }
+        var file = buildConfigFile()
+        file.llm = .init(baseURL: url, model: model, apiKey: key)
+        try writeConfigFile(file)
+        llmConfig = .init(baseURL: url, model: model)
+        openAIAPIKey = key
     }
 
-    func markThinkingDisabledForCurrentLLM() throws {
-        guard !llmConfig.thinkingDisabled else { return }
-
-        llmConfig.thinkingDisabled = true
-        var configFile = buildConfigFile()
-        configFile.llm.thinkingDisabled = true
-        try writeConfigFile(configFile)
+    func markThinkingParameterUnsupported(for config: LLMConfig, apiKey: String) throws {
+        guard config == llmConfig, apiKey == openAIAPIKey, !omitThinkingParameter else { return }
+        var state = stateStore.value
+        state.llmWithoutThinkingParameter = llmFingerprint
+        try stateStore.save(state)
     }
 
-    // MARK: - 通用配置保存
+    func saveWindowContextEnabled(_ enabled: Bool) throws {
+        var general = generalConfig
+        general.windowContextEnabled = enabled
+        try saveGeneralConfig(general)
+    }
 
     func saveGeneralConfig(_ config: GeneralConfig, confirmingHotkey: Bool = false) throws {
-        var configFile = buildConfigFile()
-        configFile.general = ConfigFile.GeneralFileConfig(
-            hotkey: config.hotkey,
-            interactionSoundEnabled: config.interactionSoundEnabled,
-            translationTargetLanguage: config.translationTargetLanguage,
-            launchAtLogin: config.launchAtLogin
-        )
-        if confirmingHotkey {
-            configFile.onboarding.hasConfirmedHotkey = true
-        }
-        try writeConfigFile(configFile)
-
+        let previous = buildConfigFile()
+        var file = previous
+        file.general = config
+        try writeConfigFile(file)
         generalConfig = config
-        onboardingProgress = configFile.onboarding
+        if confirmingHotkey {
+            var progress = onboardingProgress
+            progress.hasConfirmedHotkey = true
+            do {
+                try saveOnboardingProgress(progress)
+            } catch {
+                // Keep the saved hotkey and the registered hotkey consistent when state cannot be written.
+                let stateError = error
+                do {
+                    try writeConfigFile(previous)
+                    generalConfig = previous.general
+                } catch {
+                    configLoadFailed = true
+                    throw error
+                }
+                throw stateError
+            }
+        }
     }
-
-    // MARK: - ASR 配置保存
-
-    func saveASRConfig(_ config: ASRConfig) throws {
-        var normalizedConfig = config
-        invalidateCloudValidationStateIfNeeded(from: asrConfig, to: &normalizedConfig)
-
-        var configFile = buildConfigFile()
-        configFile.asr = normalizedConfig
-        try writeConfigFile(configFile)
-
-        asrConfig = normalizedConfig
-    }
-
-    // MARK: - 音频输入配置保存
 
     func saveOnboardingProgress(_ progress: OnboardingProgress) throws {
-        let normalized = OnboardingProgress(
-            lastVisitedStep: progress.lastVisitedStep,
-            hasFinishedPresentation: progress.hasFinishedPresentation,
-            hasConfirmedHotkey: progress.hasConfirmedHotkey,
-            hasAttemptedAccessibilityDrag: progress.hasAttemptedAccessibilityDrag
-        )
-        var configFile = buildConfigFile()
-        configFile.onboarding = normalized
-        try writeConfigFile(configFile)
-        onboardingProgress = normalized
-        configLoadFailed = false
+        var state = stateStore.value
+        state.onboarding = progress
+        state.confirmedHotkeyFingerprint = progress.hasConfirmedHotkey ? hotkeyFingerprint : nil
+        try stateStore.save(state)
+    }
+
+    func saveASRConfig(_ config: ASRConfig) throws {
+        var normalized = config
+        invalidateCloudValidationStateIfNeeded(from: asrConfig, to: &normalized)
+        var file = buildConfigFile()
+        file.asr = normalized
+        try writeConfigFile(file)
+        asrConfig = normalized
     }
 
     func saveAudioInputConfig(_ config: AudioInputConfig) throws {
-        var configFile = buildConfigFile()
-        configFile.audio = config
-        try writeConfigFile(configFile)
-
+        var file = buildConfigFile()
+        file.audio = config
+        try writeConfigFile(file)
         audioInputConfig = config
     }
 
-    func updateLocalModelStatus(_ status: LocalModelStatus, error: String? = nil) throws {
+    func updateLocalModelStatus(_ status: LocalModelStatus, error: String? = nil) {
         asrConfig.local.modelStatus = status
         asrConfig.local.lastError = error
-        var configFile = buildConfigFile()
-        configFile.asr = asrConfig
-        try writeConfigFile(configFile)
     }
 
-    func updateCloudValidationState(
-        for platform: ASRPlatform,
-        status: CloudASRValidationStatus,
-        error: String? = nil
-    ) throws {
-        var updatedConfig = asrConfig
-
-        switch platform {
-        case .localSenseVoice:
-            return
-        case .tencentCloudSentence:
-            updatedConfig.tencentCloud.validationStatus = status
-            updatedConfig.tencentCloud.lastValidationError = error
-        case .aliyunSentence:
-            updatedConfig.aliyun.validationStatus = status
-            updatedConfig.aliyun.lastValidationError = error
-        case .volcengineSentence:
-            updatedConfig.volcengine.validationStatus = status
-            updatedConfig.volcengine.lastValidationError = error
-        case .xunfeiSentence:
-            updatedConfig.xunfei.validationStatus = status
-            updatedConfig.xunfei.lastValidationError = error
-        case .xiaomiMiMoASR:
-            updatedConfig.xiaomiMiMo.validationStatus = status
-            updatedConfig.xiaomiMiMo.lastValidationError = error
-        case .xiaomiMiMoTokenPlanASR:
-            updatedConfig.xiaomiMiMoTokenPlan.validationStatus = status
-            updatedConfig.xiaomiMiMoTokenPlan.lastValidationError = error
+    func updateCloudValidationState(for platform: ASRPlatform, status: CloudASRValidationStatus,
+                                    error: String? = nil) throws {
+        guard platform != .localSenseVoice else { return }
+        setCloudRuntimeState(for: platform, status: status, error: error)
+        var state = stateStore.value
+        // In-flight work and errors stay in memory. A failed/restarted validation invalidates success.
+        if status == .verified {
+            state.verifiedCloudConfigurations[platform.rawValue] = cloudFingerprint(for: platform)
+        } else {
+            state.verifiedCloudConfigurations.removeValue(forKey: platform.rawValue)
         }
+        if state != stateStore.value { try stateStore.save(state) }
+    }
 
-        var configFile = buildConfigFile()
-        configFile.asr = updatedConfig
-        try writeConfigFile(configFile)
-        asrConfig = updatedConfig
+    private func setCloudRuntimeState(for platform: ASRPlatform, status: CloudASRValidationStatus, error: String? = nil) {
+        switch platform {
+        case .localSenseVoice: break
+        case .tencentCloudSentence:
+            asrConfig.tencentCloud.validationStatus = status
+            asrConfig.tencentCloud.lastValidationError = error
+        case .aliyunSentence:
+            asrConfig.aliyun.validationStatus = status
+            asrConfig.aliyun.lastValidationError = error
+        case .volcengineSentence:
+            asrConfig.volcengine.validationStatus = status
+            asrConfig.volcengine.lastValidationError = error
+        case .xunfeiSentence:
+            asrConfig.xunfei.validationStatus = status
+            asrConfig.xunfei.lastValidationError = error
+        case .xiaomiMiMoASR:
+            asrConfig.xiaomiMiMo.validationStatus = status
+            asrConfig.xiaomiMiMo.lastValidationError = error
+        case .xiaomiMiMoTokenPlanASR:
+            asrConfig.xiaomiMiMoTokenPlan.validationStatus = status
+            asrConfig.xiaomiMiMoTokenPlan.lastValidationError = error
+        }
     }
 
     func refreshLocalModelStatusFromDisk() {
-        guard !configLoadFailed else { return }
-        guard asrConfig.local.modelStatus != .downloading else { return }
-
-        let hasLocalModels = Self.localModelsAvailable()
-        let currentStatus = asrConfig.local.modelStatus
-
-        if hasLocalModels, currentStatus != .ready {
-            try? updateLocalModelStatus(.ready)
-        } else if !hasLocalModels, currentStatus == .ready {
-            try? updateLocalModelStatus(.notDownloaded)
+        guard !configLoadFailed, asrConfig.local.modelStatus != .downloading else { return }
+        if Self.localModelsAvailable() {
+            updateLocalModelStatus(.ready)
+        } else if asrConfig.local.modelStatus == .ready {
+            updateLocalModelStatus(.notDownloaded)
         }
     }
 
-    // MARK: - 内部方法
-
-    /// 将 ConfigFile 映射到公开属性
-    private func applyConfigFile(_ configFile: ConfigFile) {
-        llmConfig = LLMConfig(
-            baseURL: configFile.llm.baseURL,
-            model: configFile.llm.model,
-            thinkingDisabled: configFile.llm.thinkingDisabled
-        )
-        openAIAPIKey = configFile.llm.apiKey
-
-        generalConfig = configFile.general.publicConfig
-        asrConfig = normalizedInterruptedCloudValidationStates(in: configFile.asr)
-        audioInputConfig = configFile.audio
-        onboardingProgress = configFile.onboarding
+    private func applyConfigFile(_ file: ConfigFile) {
+        llmConfig = .init(baseURL: file.llm.baseURL, model: file.llm.model)
+        openAIAPIKey = file.llm.apiKey
+        generalConfig = file.general
+        asrConfig = file.asr
+        audioInputConfig = file.audio
+        for platform in ASRPlatform.allCases where platform != .localSenseVoice {
+            if stateStore.value.verifiedCloudConfigurations[platform.rawValue] == cloudFingerprint(for: platform) {
+                setCloudRuntimeState(for: platform, status: .verified)
+            }
+        }
     }
 
-    /// 从当前内存状态构建 ConfigFile
     private func buildConfigFile() -> ConfigFile {
-        ConfigFile(
-            llm: ConfigFile.LLMFileConfig(
-                baseURL: llmConfig.baseURL,
-                model: llmConfig.model,
-                apiKey: openAIAPIKey,
-                thinkingDisabled: llmConfig.thinkingDisabled
-            ),
-            general: ConfigFile.GeneralFileConfig(
-                hotkey: generalConfig.hotkey,
-                interactionSoundEnabled: generalConfig.interactionSoundEnabled,
-                translationTargetLanguage: generalConfig.translationTargetLanguage,
-                launchAtLogin: generalConfig.launchAtLogin
-            ),
-            asr: asrConfig,
-            audio: audioInputConfig,
-            onboarding: onboardingProgress
-        )
+        ConfigFile(llm: .init(baseURL: llmConfig.baseURL, model: llmConfig.model, apiKey: openAIAPIKey),
+                   general: generalConfig, asr: asrConfig, audio: audioInputConfig)
     }
 
-    private func shouldResetThinkingDisabled(baseURL: String, model: String, apiKey: String) -> Bool {
-        llmConfig.baseURL != baseURL
-            || llmConfig.model != model
-            || openAIAPIKey != apiKey
+    private var llmFingerprint: String {
+        let identity = [llmConfig.baseURL, llmConfig.model, openAIAPIKey]
+        return AppStateStore.fingerprint(String(decoding: try! JSONEncoder().encode(identity), as: UTF8.self))
+    }
+    private var hotkeyFingerprint: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return AppStateStore.fingerprint(String(decoding: try! encoder.encode(generalConfig.hotkey), as: UTF8.self))
+    }
+    private func cloudFingerprint(for platform: ASRPlatform) -> String {
+        AppStateStore.fingerprint(CloudASRValidationInput(platform: platform, asrConfig: asrConfig).fingerprint)
     }
 
     private func invalidateCloudValidationStateIfNeeded(from oldConfig: ASRConfig, to newConfig: inout ASRConfig) {
@@ -388,42 +274,6 @@ final class ConfigStore {
         }
     }
 
-    private func normalizedInterruptedCloudValidationStates(in config: ASRConfig) -> ASRConfig {
-        var normalized = config
-
-        if normalized.tencentCloud.validationStatus == .validating {
-            normalized.tencentCloud.validationStatus = .unvalidated
-            normalized.tencentCloud.lastValidationError = nil
-        }
-
-        if normalized.aliyun.validationStatus == .validating {
-            normalized.aliyun.validationStatus = .unvalidated
-            normalized.aliyun.lastValidationError = nil
-        }
-
-        if normalized.volcengine.validationStatus == .validating {
-            normalized.volcengine.validationStatus = .unvalidated
-            normalized.volcengine.lastValidationError = nil
-        }
-
-        if normalized.xunfei.validationStatus == .validating {
-            normalized.xunfei.validationStatus = .unvalidated
-            normalized.xunfei.lastValidationError = nil
-        }
-
-        if normalized.xiaomiMiMo.validationStatus == .validating {
-            normalized.xiaomiMiMo.validationStatus = .unvalidated
-            normalized.xiaomiMiMo.lastValidationError = nil
-        }
-
-        if normalized.xiaomiMiMoTokenPlan.validationStatus == .validating {
-            normalized.xiaomiMiMoTokenPlan.validationStatus = .unvalidated
-            normalized.xiaomiMiMoTokenPlan.lastValidationError = nil
-        }
-
-        return normalized
-    }
-
     static func localModelsAvailable() -> Bool {
         let fm = FileManager.default
 
@@ -438,25 +288,8 @@ final class ConfigStore {
         return true
     }
 
-    /// 原子写入配置文件，确保目录和文件权限正确
-    private func writeConfigFile(_ configFile: ConfigFile) throws {
-        let fm = FileManager.default
-        let dirURL = configDirectory
-        let fileURL = configFileURL
-
-        // 确保目录存在且权限为 0700
-        if !fm.fileExists(atPath: dirURL.path) {
-            try fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
-        }
-        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dirURL.path)
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(configFile)
-
-        try data.write(to: fileURL, options: .atomic)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    private func writeConfigFile(_ file: ConfigFile) throws {
+        try PrivateJSONFile.write(file, to: configFileURL)
         configLoadFailed = false
     }
-
 }

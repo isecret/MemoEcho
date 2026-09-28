@@ -11,7 +11,7 @@ struct LLMValidationInput: Equatable, Sendable {
     var baseURL: String
     var apiKey: String
     var model: String
-    var thinkingDisabled: Bool
+    var omitThinkingParameter: Bool
 
     var normalizedBaseURL: String {
         baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,7 +32,7 @@ struct LLMValidationInput: Equatable, Sendable {
     }
 
     var fingerprint: String {
-        "\(normalizedBaseURL)\n\(normalizedAPIKey)\n\(normalizedModel)\n\(thinkingDisabled)"
+        "\(normalizedBaseURL)\n\(normalizedAPIKey)\n\(normalizedModel)\n\(omitThinkingParameter)"
     }
 
     func normalized() -> Self {
@@ -40,7 +40,7 @@ struct LLMValidationInput: Equatable, Sendable {
             baseURL: normalizedBaseURL,
             apiKey: normalizedAPIKey,
             model: normalizedModel,
-            thinkingDisabled: thinkingDisabled
+            omitThinkingParameter: omitThinkingParameter
         )
     }
 }

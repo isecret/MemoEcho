@@ -10,7 +10,7 @@ final class DiagnosticsLogger: Sendable {
     static let shared = DiagnosticsLogger()
 
     private let logger = Logger(
-        subsystem: "com.isecret.memoecho",
+        subsystem: "me.wangmao.memoecho",
         category: "Session"
     )
 
@@ -185,34 +185,6 @@ final class DiagnosticsLogger: Sendable {
 
     // MARK: - General Events
 
-    func windowContextCaptured(
-        sessionID: String,
-        event: WindowContextCaptureEvent,
-        rawCandidate: WindowContextCandidate
-    ) {
-        #if DEBUG
-        logger.debug(
-            """
-            [\(sessionID)] \(event.rawValue, privacy: .public) \
-            | app_name="\(rawCandidate.appName ?? "", privacy: .public)" \
-            | bundle_id="\(rawCandidate.bundleID ?? "", privacy: .public)" \
-            | window_title="\(rawCandidate.windowTitle ?? "", privacy: .public)" \
-            | role="\(rawCandidate.elementRole ?? "", privacy: .public)" \
-            | subrole="\(rawCandidate.elementSubrole ?? "", privacy: .public)" \
-            | placeholder="\(rawCandidate.placeholder ?? "", privacy: .public)" \
-            | selected_text="\(rawCandidate.selectedText ?? "", privacy: .public)" \
-            | before="\(rawCandidate.surroundingTextBefore ?? "", privacy: .public)" \
-            | after="\(rawCandidate.surroundingTextAfter ?? "", privacy: .public)" \
-            | nearby_labels="\(rawCandidate.nearbyLabels.joined(separator: " | "), privacy: .public)"
-            """
-        )
-        #else
-        _ = sessionID
-        _ = event
-        _ = rawCandidate
-        #endif
-    }
-
     func log(sessionID: String, event: String, detail: String? = nil) {
         if let detail {
             logger.info("[\(sessionID)] \(event, privacy: .public) | detail=\(detail, privacy: .public)")
@@ -264,6 +236,7 @@ extension MemoEchoError {
     /// 用于诊断日志的错误分类标识，不含用户文本或敏感信息
     var diagnosticClassification: String {
         switch self {
+        case .audioCaptureInterrupted: "audio_capture_interrupted"
         case .microphonePermissionDenied: "microphone_permission_denied"
         case .audioRecordingUnavailable: "audio_recording_unavailable"
         case .accessibilityPermissionDenied: "accessibility_permission_denied"

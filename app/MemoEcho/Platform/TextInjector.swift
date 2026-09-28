@@ -4,278 +4,314 @@ import Carbon
 import CoreGraphics
 import Foundation
 
-/// 文本注入器：默认通过剪贴板粘贴注入，失败时回退到 AX 写入
-struct TextInjector: Sendable {
-    private static let focusRetryIntervals: [TimeInterval] = [0.01, 0.02, 0.04]
-    private static let pasteboardPropagationDelay: TimeInterval = 0.03
-    private static let fastPasteboardRestoreDelay: TimeInterval = 0.15
-    private static let slowPasteboardRestoreDelay: TimeInterval = 0.8
-    private static let frontmostRetryIntervals: [TimeInterval] = [0.01, 0.02, 0.04]
-    private static let slowPasteboardBundleIDs = [
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
-        "abnerworks.Typora"
-    ]
-    private let focusedElementResolver = FocusedElementResolver()
+/// A destination identity can be captured even when the app cannot expose readable text.
+struct TextInjectionFocus: Sendable {
+    let pid: pid_t
+    let bundleID: String?
+    let identity: FocusedElementIdentity
+    let snapshot: FocusedElementTextSnapshot?
+
+    func isSameField(as other: Self) -> Bool {
+        pid == other.pid && bundleID == other.bundleID && identity == other.identity
+    }
+}
+
+typealias InjectionPasteboardSnapshot = [[NSPasteboard.PasteboardType: Data]]
+
+@MainActor
+protocol InjectionPasteboard: AnyObject {
+    var changeCount: Int { get }
+    func snapshot() throws -> InjectionPasteboardSnapshot
+    func write(_ text: String) -> Bool
+    func restore(_ snapshot: InjectionPasteboardSnapshot)
+}
+
+/// The lease only restores our own write. A newer user/app copy always wins.
+@MainActor
+final class InjectionPasteboardLease {
+    private let pasteboard: any InjectionPasteboard
+    private let original: InjectionPasteboardSnapshot
+    private var ownedChangeCount: Int?
+
+    init(pasteboard: any InjectionPasteboard) throws {
+        self.pasteboard = pasteboard
+        let count = pasteboard.changeCount
+        original = try pasteboard.snapshot()
+        guard count == pasteboard.changeCount else {
+            throw MemoEchoError.textInjectionFailure(detail: "剪贴板正在变化，请重试")
+        }
+        ownedChangeCount = count
+    }
+
+    var isOwned: Bool { ownedChangeCount == pasteboard.changeCount }
+
+    func write(_ text: String) -> Bool {
+        guard isOwned else { return false }
+        let written = pasteboard.write(text)
+        ownedChangeCount = pasteboard.changeCount
+        return written
+    }
+
+    func restore() {
+        guard isOwned else { return }
+        ownedChangeCount = nil
+        pasteboard.restore(original)
+    }
+}
+
+@MainActor
+protocol TextInjectionDriver: AnyObject {
+    var authorized: Bool { get }
+    var isInjecting: Bool { get set }
+    var pasteboard: any InjectionPasteboard { get }
+    func activate(pid: pid_t, bundleID: String?) -> Bool
+    func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus?
+    /// False must mean no event was posted; once posted, never retry through AX.
+    func postPaste(into target: TextInjectionFocus) -> Bool
+    func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool
+    func wait(milliseconds: Int) async
+}
+
+/// Clipboard paste is primary. Success requires a confirmed replacement in the same field.
+@MainActor
+struct TextInjector {
+    private let driver: any TextInjectionDriver
+
+    init(driver: any TextInjectionDriver = NativeTextInjectionDriver.shared) {
+        self.driver = driver
+    }
 
     struct InjectionResult: Sendable {
         let path: InjectionPath
         let breakdown: InjectionBreakdown
+        var beforeInjection: FocusedElementTextSnapshot? = nil
     }
 
-    enum InjectionPath: String, Sendable {
-        case paste
-        case axFallback
-    }
+    enum InjectionPath: String, Sendable { case paste, axFallback }
 
     struct InjectionBreakdown: Sendable {
-        var activateTargetMs: Int = 0
-        var focusBeforeMs: Int = 0
-        var pasteboardWriteMs: Int = 0
-        var pasteboardPropagationMs: Int = 0
-        var postPasteShortcutMs: Int = 0
-        var pasteVerificationMs: Int = 0
-        var axFallbackMs: Int = 0
-        var pasteboardRestoreMs: Int = 0
-        var totalMs: Int = 0
+        var activateTargetMs = 0
+        var focusBeforeMs = 0
+        var pasteboardWriteMs = 0
+        var pasteboardPropagationMs = 0
+        var postPasteShortcutMs = 0
+        var pasteVerificationMs = 0
+        var axFallbackMs = 0
+        var pasteboardRestoreMs = 0
+        var totalMs = 0
     }
 
-    // MARK: - Public API
+    func captureTarget(pid: pid_t?, bundleID: String?) -> TextInjectionFocus? {
+        guard driver.authorized, let pid else { return nil }
+        guard let focus = driver.focus(pid: pid, bundleID: bundleID) else { return nil }
+        // Keep only the field identity throughout recording; read text at delivery time.
+        return .init(pid: focus.pid, bundleID: focus.bundleID, identity: focus.identity, snapshot: nil)
+    }
 
-    /// 将文本注入到当前焦点应用的输入区域
-    func inject(
-        text: String,
-        targetPID: pid_t?,
-        targetBundleID: String?
-    ) throws -> InjectionResult {
-        guard AXIsProcessTrusted() else {
-            throw MemoEchoError.accessibilityPermissionDenied
-        }
-
-        let injectionStart = Date()
+    func inject(text: String, target: TextInjectionFocus?,
+                shouldContinue: () -> Bool = { true },
+                onOutputAttempt: () -> Void = {}) async throws -> InjectionResult {
+        guard driver.authorized else { throw MemoEchoError.accessibilityPermissionDenied }
+        guard !driver.isInjecting else { throw failure("上一次文本写入尚未结束") }
+        guard let target, !text.isEmpty else { throw failure("未找到原来的输入框，请手动复制文本") }
+        driver.isInjecting = true
+        defer { driver.isInjecting = false }
+        let started = Date()
         var breakdown = InjectionBreakdown()
-
-        if let targetPID {
-            let start = Date()
-            _ = restoreTargetApplication(pid: targetPID)
-            breakdown.activateTargetMs = millisecondsSince(start)
+        func checkCurrent() throws {
+            guard !Task.isCancelled, shouldContinue() else { throw CancellationError() }
+        }
+        try checkCurrent()
+        let activation = Date()
+        guard driver.activate(pid: target.pid, bundleID: target.bundleID) else {
+            throw failure("无法返回原来的应用，请手动复制文本")
+        }
+        breakdown.activateTargetMs = millisecondsSince(activation)
+        try checkCurrent()
+        let focusStart = Date()
+        guard let before = driver.focus(pid: target.pid, bundleID: target.bundleID),
+              before.isSameField(as: target), before.snapshot?.isComposing != true else {
+            throw failure("输入框已变化，请手动复制文本")
+        }
+        breakdown.focusBeforeMs = millisecondsSince(focusStart)
+        // Do not accept selection-only changes as proof when replacement is a no-op.
+        let expected: String? = before.snapshot.flatMap { snapshot in
+            guard let range = Range(snapshot.selection, in: snapshot.value) else { return nil }
+            return snapshot.value.replacingCharacters(in: range, with: text)
+        }
+        func unchangedTarget() -> Bool {
+            guard let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
+                  current.isSameField(as: before), current.snapshot?.isComposing != true else { return false }
+            return current.snapshot == before.snapshot
         }
 
-        let focusBeforeStart = Date()
-        let focusedElementBeforePaste = tryGetInjectableElement(targetPID: targetPID)
-        breakdown.focusBeforeMs = millisecondsSince(focusBeforeStart)
-        let snapshotBeforePaste = focusedElementBeforePaste.flatMap(snapshotValue(for:))
-
-        do {
-            let pasteResult = try pasteViaClipboard(text: text, targetBundleID: targetBundleID)
-            breakdown.pasteboardWriteMs = pasteResult.pasteboardWriteMs
-            breakdown.pasteboardPropagationMs = pasteResult.pasteboardPropagationMs
-            breakdown.postPasteShortcutMs = pasteResult.postPasteShortcutMs
-            breakdown.pasteboardRestoreMs = pasteResult.restoreDelayMs
-
-            let verificationStart = Date()
-            let requiresStrictVerification = Self.shouldUseStrictPasteVerification(
-                targetBundleID: targetBundleID
-            )
-
-            let shouldFallback: Bool
-            if requiresStrictVerification {
-                let focusedElementAfterPaste = tryGetInjectableElement(targetPID: targetPID)
-                let snapshotAfterPaste = focusedElementAfterPaste.flatMap(snapshotValue(for:))
-                shouldFallback = Self.shouldFallbackToAX(
-                    beforeValue: snapshotBeforePaste,
-                    afterValue: snapshotAfterPaste
-                )
-            } else {
-                shouldFallback = false
-            }
-            breakdown.pasteVerificationMs = millisecondsSince(verificationStart)
-
-            if !shouldFallback {
-                breakdown.totalMs = millisecondsSince(injectionStart)
-                return InjectionResult(
-                    path: .paste,
-                    breakdown: breakdown
-                )
-            }
-        } catch {
-            // 粘贴主路径失败时，继续尝试 AX 回退
-        }
-
-        if let focusedElement = tryGetInjectableElement(targetPID: targetPID) {
-            // 粘贴未生效时，使用 AXSelectedText 在光标位置插入（非破坏性）
-            let fallbackStart = Date()
-            if tryInsertViaAX(element: focusedElement, text: text) {
-                breakdown.axFallbackMs = millisecondsSince(fallbackStart)
-                breakdown.totalMs = millisecondsSince(injectionStart)
-                return InjectionResult(
-                    path: .axFallback,
-                    breakdown: breakdown
-                )
-            }
-        }
-
-        throw MemoEchoError.textInjectionFailure(detail: "文本未能成功写入当前焦点输入区域")
-    }
-
-    // MARK: - AX Element Discovery
-
-    private func tryGetInjectableElement(targetPID: pid_t?) -> AXUIElement? {
-        focusedElementResolver
-            .resolveFocusedElement(
-                targetPID: targetPID,
-                shouldRestoreTargetApplication: targetPID != nil
-            )?
-            .element
-    }
-
-    private func restoreTargetApplication(pid: pid_t) -> Bool {
-        focusedElementResolver.restoreTargetApplication(pid: pid)
-    }
-
-    // MARK: - AX Insertion
-
-    /// 尝试通过 AXSelectedText 在光标位置插入文本
-    private func tryInsertViaAX(element: AXUIElement, text: String) -> Bool {
-        let result = AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFString
-        )
-        return result == .success
-    }
-
-    private func snapshotValue(for element: AXUIElement) -> String? {
-        var valueRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(
-            element,
-            kAXValueAttribute as CFString,
-            &valueRef
-        )
-
-        guard result == .success else { return nil }
-
-        return valueRef as? String
-    }
-
-    static func shouldFallbackToAX(
-        beforeValue: String?,
-        afterValue: String?
-    ) -> Bool {
-        guard let beforeValue, let afterValue else { return false }
-        return beforeValue == afterValue
-    }
-
-    // MARK: - Pasteboard Primary
-
-    private func pasteViaClipboard(text: String, targetBundleID: String?) throws -> PasteOperationResult {
-        let pasteboard = NSPasteboard.general
-        let snapshot = snapshotPasteboard(pasteboard)
-
+        let lease = try InjectionPasteboardLease(pasteboard: driver.pasteboard)
+        defer { lease.restore() }
         let writeStart = Date()
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
-            restorePasteboard(snapshot, pasteboard: pasteboard)
-            throw MemoEchoError.textInjectionFailure(detail: "无法写入系统剪贴板")
+        let written = lease.write(text)
+        breakdown.pasteboardWriteMs = millisecondsSince(writeStart)
+        if written {
+            let propagation = Date()
+            await driver.wait(milliseconds: 30)
+            breakdown.pasteboardPropagationMs = millisecondsSince(propagation)
         }
-        let pasteboardWriteMs = millisecondsSince(writeStart)
+        try checkCurrent()
+        guard lease.isOwned, unchangedTarget() else {
+            throw failure("输入位置或剪贴板已变化，已停止写入，请手动复制文本")
+        }
+        let dispatchStart = Date()
+        let posted = written && driver.postPaste(into: before)
+        breakdown.postPasteShortcutMs = millisecondsSince(dispatchStart)
+        let path: InjectionPath
+        if posted {
+            onOutputAttempt()
+            path = .paste
+        } else {
+            // AX fallback is allowed only BEFORE any paste event could have been delivered.
+            let fallbackStart = Date()
+            guard before.snapshot != nil, unchangedTarget() else {
+                throw failure("无法写入原来的输入框，请手动复制文本")
+            }
+            // Even a failed AX write may have side effects; recovery must not blindly repeat it.
+            onOutputAttempt()
+            guard driver.insertViaAX(text, into: before) else {
+                throw failure("无法写入原来的输入框，请手动复制文本")
+            }
+            breakdown.axFallbackMs = millisecondsSince(fallbackStart)
+            path = .axFallback
+        }
 
-        let restoreDelay = shouldUseSlowPasteboardRestore(for: targetBundleID)
-            ? Self.slowPasteboardRestoreDelay
-            : Self.fastPasteboardRestoreDelay
-
-        schedulePasteboardRestore(
-            snapshot,
-            after: restoreDelay
-        )
-
-        let propagationStart = Date()
-        RunLoop.current.run(until: Date().addingTimeInterval(Self.pasteboardPropagationDelay))
-        let pasteboardPropagationMs = millisecondsSince(propagationStart)
-
-        let shortcutStart = Date()
-        try postPasteShortcut()
-        let postPasteShortcutMs = millisecondsSince(shortcutStart)
-
-        return PasteOperationResult(
-            pasteboardWriteMs: pasteboardWriteMs,
-            pasteboardPropagationMs: pasteboardPropagationMs,
-            postPasteShortcutMs: postPasteShortcutMs,
-            restoreDelayMs: Int(restoreDelay * 1000)
-        )
+        let verification = Date()
+        var invalidated = false
+        // Keep the clipboard available while the receiving app consumes its queued paste.
+        // Focus loss/cancellation invalidates success permanently; it never triggers a second write.
+        for _ in 0..<20 {
+            await driver.wait(milliseconds: 50)
+            if Task.isCancelled || !shouldContinue() { invalidated = true }
+            let current = driver.focus(pid: target.pid, bundleID: target.bundleID)
+            if current?.isSameField(as: before) != true { invalidated = true }
+            if !invalidated, let expected, expected != before.snapshot?.value,
+               let snapshot = current?.snapshot, !snapshot.isComposing,
+               snapshot.value == expected {
+                breakdown.pasteVerificationMs = millisecondsSince(verification)
+                let restoration = Date()
+                lease.restore()
+                breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
+                breakdown.totalMs = millisecondsSince(started)
+                return .init(path: path, breakdown: breakdown, beforeInjection: before.snapshot)
+            }
+        }
+        try checkCurrent()
+        throw failure("无法确认文本是否写入，请先检查原输入框，避免重复粘贴；文本可从菜单栏复制")
     }
 
-    private func snapshotPasteboard(_ pasteboard: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
-        (pasteboard.pasteboardItems ?? []).map { item in
-            var snapshot: [NSPasteboard.PasteboardType: Data] = [:]
+    private func failure(_ detail: String) -> MemoEchoError { .textInjectionFailure(detail: detail) }
+    private func millisecondsSince(_ start: Date) -> Int { Int(Date().timeIntervalSince(start) * 1000) }
+}
+
+@MainActor
+final class NativeInjectionPasteboard: InjectionPasteboard {
+    private let board: NSPasteboard
+    init(board: NSPasteboard = .general) { self.board = board }
+    var changeCount: Int { board.changeCount }
+
+    func snapshot() throws -> InjectionPasteboardSnapshot {
+        try (board.pasteboardItems ?? []).map { item in
+            var data: [NSPasteboard.PasteboardType: Data] = [:]
             for type in item.types {
-                if let data = item.data(forType: type) {
-                    snapshot[type] = data
+                guard let value = item.data(forType: type) else {
+                    throw MemoEchoError.textInjectionFailure(detail: "无法备份当前剪贴板，请手动复制文本")
                 }
+                data[type] = value
             }
-            return snapshot
+            return data
         }
     }
 
-    private func restorePasteboard(
-        _ snapshot: [[NSPasteboard.PasteboardType: Data]],
-        pasteboard: NSPasteboard
-    ) {
-        pasteboard.clearContents()
+    func write(_ text: String) -> Bool {
+        board.clearContents()
+        return board.setString(text, forType: .string)
+    }
 
-        guard !snapshot.isEmpty else { return }
-
-        for itemSnapshot in snapshot {
+    func restore(_ snapshot: InjectionPasteboardSnapshot) {
+        let items = snapshot.map { values in
             let item = NSPasteboardItem()
-            for (type, data) in itemSnapshot {
-                item.setData(data, forType: type)
-            }
-            pasteboard.writeObjects([item])
+            for (type, data) in values { item.setData(data, forType: type) }
+            return item
         }
+        board.clearContents()
+        if !items.isEmpty { board.writeObjects(items) }
+    }
+}
+
+@MainActor
+private final class NativeTextInjectionDriver: TextInjectionDriver {
+    static let shared = NativeTextInjectionDriver()
+    var isInjecting = false
+    var authorized: Bool { AXIsProcessTrusted() }
+    let pasteboard: any InjectionPasteboard = NativeInjectionPasteboard()
+    private let resolver = FocusedElementResolver()
+
+    func activate(pid: pid_t, bundleID: String?) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid),
+              bundleID == nil || app.bundleIdentifier == bundleID else { return false }
+        return resolver.restoreTargetApplication(pid: pid)
     }
 
-    private func schedulePasteboardRestore(
-        _ snapshot: [[NSPasteboard.PasteboardType: Data]],
-        after delay: TimeInterval
-    ) {
-        let restoreSnapshot = snapshot
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            self.restorePasteboard(restoreSnapshot, pasteboard: NSPasteboard.general)
-        }
+    func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus? {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let resolved = resolver.resolveFocusedElement(targetPID: pid, shouldRestoreTargetApplication: false),
+              bundleID == nil || resolved.bundleID == bundleID else { return nil }
+        let element = resolved.element
+        var role: CFTypeRef?
+        var subrole: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        guard subrole as? String != kAXSecureTextFieldSubrole else { return nil }
+        var writable = DarwinBoolean(false)
+        AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &writable)
+        var valueWritable = DarwinBoolean(false)
+        AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &valueWritable)
+        var enabled: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabled)
+        guard enabled as? Bool != false else { return nil }
+        let textRoles = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
+        guard writable.boolValue || valueWritable.boolValue || textRoles.contains(role as? String ?? "") else { return nil }
+        let identity = FocusedElementIdentity(element: element)
+        let snapshot = FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundleID)
+        if let snapshot, snapshot.identity != identity { return nil }
+        return .init(pid: pid, bundleID: resolved.bundleID, identity: identity, snapshot: snapshot)
     }
 
-    private func postPasteShortcut() throws {
+    func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool {
+        guard let current = focus(pid: target.pid, bundleID: target.bundleID),
+              current.isSameField(as: target), current.snapshot == target.snapshot,
+              let resolved = resolver.resolveFocusedElement(targetPID: target.pid, shouldRestoreTargetApplication: false),
+              FocusedElementIdentity(element: resolved.element) == target.identity else { return false }
+        return AXUIElementSetAttributeValue(resolved.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
+    }
+
+    func wait(milliseconds: Int) async {
+        // Unstructured task deliberately drains the paste window even if the caller is cancelled.
+        await Task { try? await Task.sleep(for: .milliseconds(milliseconds)) }.value
+    }
+
+    func postPaste(into target: TextInjectionFocus) -> Bool {
         let shortcut = Self.resolvePasteShortcut()
-
         guard let source = CGEventSource(stateID: .combinedSessionState),
-              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: false)
-        else {
-            throw MemoEchoError.textInjectionFailure(detail: "无法创建粘贴事件")
-        }
-
-        source.setLocalEventsFilterDuringSuppressionState(
-            [.permitLocalMouseEvents, .permitSystemDefinedEvents],
-            state: .eventSuppressionStateSuppressionInterval
-        )
-
-        keyDown.flags = shortcut.flags
-        keyUp.flags = shortcut.flags
-        keyDown.post(tap: .cgSessionEventTap)
-        keyUp.post(tap: .cgSessionEventTap)
+              let down = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: false) else { return false }
+        down.flags = shortcut.flags
+        up.flags = shortcut.flags
+        guard let current = focus(pid: target.pid, bundleID: target.bundleID),
+              current.isSameField(as: target), current.snapshot == target.snapshot else { return false }
+        // Route only to the captured process, even if another app becomes frontmost in this gap.
+        down.postToPid(target.pid)
+        up.postToPid(target.pid)
+        return true
     }
 
-    private func shouldUseSlowPasteboardRestore(for targetBundleID: String?) -> Bool {
-        guard let targetBundleID else { return false }
-        return Self.slowPasteboardBundleIDs.contains(targetBundleID)
-    }
-
-    private static func shouldUseStrictPasteVerification(targetBundleID: String?) -> Bool {
-        guard let targetBundleID else { return false }
-        return slowPasteboardBundleIDs.contains(targetBundleID)
-    }
-
-    private static func resolvePasteShortcut() -> (keyCode: CGKeyCode, flags: CGEventFlags) {
+    static func resolvePasteShortcut() -> (keyCode: CGKeyCode, flags: CGEventFlags) {
         let pasteShortcut = currentPasteShortcut()
         let modifiers = pasteShortcut.modifiers.intersection(.deviceIndependentFlagsMask)
         let keyEquivalent = normalizedKeyEquivalent(from: pasteShortcut.keyEquivalent) ?? "v"
@@ -343,30 +379,6 @@ struct TextInjector: Sendable {
         return flags
     }
 
-    private func millisecondsSince(_ start: Date) -> Int {
-        Int(Date().timeIntervalSince(start) * 1000)
-    }
-}
-
-extension TextInjector {
-    static func debugShouldUseStrictPasteVerification(targetBundleID: String?) -> Bool {
-        shouldUseStrictPasteVerification(targetBundleID: targetBundleID)
-    }
-
-    static func debugPasteboardRestoreDelay(targetBundleID: String?) -> Int {
-        Int(
-            (slowPasteboardBundleIDs.contains(targetBundleID ?? "")
-             ? slowPasteboardRestoreDelay
-             : fastPasteboardRestoreDelay) * 1000
-        )
-    }
-}
-
-private struct PasteOperationResult: Sendable {
-    let pasteboardWriteMs: Int
-    let pasteboardPropagationMs: Int
-    let postPasteShortcutMs: Int
-    let restoreDelayMs: Int
 }
 
 private struct KeyboardLayout {

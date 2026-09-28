@@ -84,6 +84,7 @@ jobs:
             exit 1
           fi
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_version=$(./scripts/ci/version-from-tag.sh --build-version "${GITHUB_REF_NAME}")" >> "$GITHUB_OUTPUT"
           echo "Using app version: ${APP_VERSION}"
 
       - name: Resolve package dependencies
@@ -106,7 +107,7 @@ jobs:
             -derivedDataPath .derivedData \
             -archivePath .derivedData/MemoEcho.xcarchive \
             MARKETING_VERSION="${{ steps.version.outputs.app_version }}" \
-            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.app_version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build_version }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="-" \
             | tee .derivedData/archive.log
@@ -238,11 +239,16 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           TITLE="${TAG}"
           NOTES="Automated macOS release artifact for ${TAG}."
+          PRERELEASE=false
+          if [[ "$TAG" == *-beta.* ]]; then
+            PRERELEASE=true
+          fi
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" "$DMG_PATH" "$ZIP_PATH" --clobber
+            gh release edit "${TAG}" --prerelease="$PRERELEASE"
           else
-            gh release create "${TAG}" "$DMG_PATH" "$ZIP_PATH" --title "$TITLE" --notes "$NOTES"
+            gh release create "${TAG}" "$DMG_PATH" "$ZIP_PATH" --title "$TITLE" --notes "$NOTES" --prerelease="$PRERELEASE"
           fi
 
       - name: Update appcast on main

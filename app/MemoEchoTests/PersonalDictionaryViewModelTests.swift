@@ -154,22 +154,8 @@ final class PersonalDictionaryViewModelTests: XCTestCase {
         let viewModel = makeViewModel()
         viewModel.addTerm("MemoEcho")
 
-        let importURL = tempDirectory.appendingPathComponent("import.json")
-        let importJSON = """
-        [
-          {
-            "id": "duplicate-id",
-            "term": "MemoEcho",
-            "source": "manual"
-          },
-          {
-            "id": "new-id",
-            "term": "FunASR",
-            "source": "manual"
-          }
-        ]
-        """
-        try importJSON.write(to: importURL, atomically: true, encoding: .utf8)
+        let importURL = tempDirectory.appendingPathComponent("import.csv")
+        try "MemoEcho\nFunASR\n".write(to: importURL, atomically: true, encoding: .utf8)
 
         viewModel.importEntries(from: importURL)
 
@@ -179,12 +165,12 @@ final class PersonalDictionaryViewModelTests: XCTestCase {
     }
 
     @MainActor
-    func testImportInvalidJSONShowsError() throws {
+    func testImportInvalidCSVShowsError() throws {
         let viewModel = makeViewModel()
         viewModel.addTerm("MemoEcho")
 
-        let importURL = tempDirectory.appendingPathComponent("invalid.json")
-        try "{ invalid".write(to: importURL, atomically: true, encoding: .utf8)
+        let importURL = tempDirectory.appendingPathComponent("invalid.csv")
+        try "wrong,column".write(to: importURL, atomically: true, encoding: .utf8)
 
         viewModel.importEntries(from: importURL)
 
@@ -198,11 +184,10 @@ final class PersonalDictionaryViewModelTests: XCTestCase {
         let viewModel = makeViewModel()
         viewModel.addTerm("MemoEcho")
 
-        let exportURL = tempDirectory.appendingPathComponent("export.json")
+        let exportURL = tempDirectory.appendingPathComponent("export.csv")
         viewModel.exportEntries(to: exportURL)
 
-        let exportedEntries = try JSONDecoder().decode([DictionaryEntry].self, from: Data(contentsOf: exportURL))
-        XCTAssertEqual(exportedEntries.map(\.term), ["MemoEcho"])
+        XCTAssertEqual(try String(contentsOf: exportURL, encoding: .utf8), "MemoEcho\n")
         XCTAssertEqual(viewModel.statusMessage, "已导出 1 个词条")
         XCTAssertNil(viewModel.errorMessage)
     }
@@ -248,6 +233,65 @@ final class PersonalDictionaryViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.entries.map(\.term), ["朴邻"])
         XCTAssertEqual(viewModel.entries.first?.source, .autoLearned)
+    }
+
+    @MainActor
+    func testDeletedAutomaticTermCanBeLearnedAgain() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        let viewModel = PersonalDictionaryViewModel(store: store)
+        _ = try store.addLearnedTermIfNeeded("MemoEcho")
+        XCTAssertTrue(viewModel.deleteEntry(try XCTUnwrap(viewModel.entries.first)))
+        XCTAssertEqual(viewModel.totalCount, 0)
+        XCTAssertTrue(PersonalDictionaryStore(directoryURL: tempDirectory).entries.isEmpty)
+        XCTAssertTrue(try store.addLearnedTermIfNeeded("MemoEcho"))
+        XCTAssertEqual(viewModel.entries.first?.source, .autoLearned)
+        XCTAssertFalse(viewModel.addTerm("memoecho"))
+    }
+
+    @MainActor
+    func testSourceNavigationCombinesWithSearchAndKeepsGlobalOrder() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        let viewModel = PersonalDictionaryViewModel(store: store)
+        try store.addEntry(DictionaryEntry(term: "Manual Alpha"))
+        _ = try store.addLearnedTermIfNeeded("Auto Alpha")
+        _ = try store.addLearnedTermIfNeeded("Auto Beta")
+        XCTAssertEqual(viewModel.filteredEntries(matching: "").count, 3)
+        viewModel.selectedFilter = .autoAdded
+        XCTAssertEqual(viewModel.filteredEntries(matching: "alpha").map(\.term), ["Auto Alpha"])
+        XCTAssertEqual(viewModel.filteredEntries(matching: "").count, 2)
+        viewModel.selectedFilter = .manualAdded
+        XCTAssertEqual(viewModel.filteredEntries(matching: "ALPHA").map(\.term), ["Manual Alpha"])
+        XCTAssertTrue(viewModel.filteredEntries(matching: "Beta").isEmpty)
+        viewModel.selectedFilter = .all
+        XCTAssertEqual(viewModel.filteredEntries(matching: "").map(\.term), ["Manual Alpha", "Auto Alpha", "Auto Beta"])
+    }
+
+    @MainActor
+    func testDeleteNeighborStaysWithinFilterAndSearchResults() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        let viewModel = PersonalDictionaryViewModel(store: store)
+        _ = try store.addLearnedTermIfNeeded("Auto One")
+        try store.addEntry(DictionaryEntry(term: "Manual One"))
+        _ = try store.addLearnedTermIfNeeded("Auto Two")
+        viewModel.selectedFilter = .autoAdded
+        XCTAssertEqual(viewModel.neighboringEntryID(afterDeleting: store.entries[0].id), store.entries[2].id)
+        XCTAssertNil(viewModel.neighboringEntryID(afterDeleting: store.entries[0].id, matching: "One"))
+    }
+
+    @MainActor
+    func testEditedAndImportedAutoTermsMoveToManualFilter() throws {
+        let store = PersonalDictionaryStore(directoryURL: tempDirectory)
+        let viewModel = PersonalDictionaryViewModel(store: store)
+        _ = try store.addLearnedTermIfNeeded("Auto One")
+        _ = try store.addLearnedTermIfNeeded("Auto Two")
+        XCTAssertTrue(viewModel.commitTermUpdate(id: store.entries[0].id, term: "Edited One"))
+        let file = tempDirectory.appendingPathComponent("import.csv")
+        try "Auto Two\n".write(to: file, atomically: true, encoding: .utf8)
+        viewModel.importEntries(from: file)
+        viewModel.selectedFilter = .manualAdded
+        XCTAssertEqual(viewModel.filteredEntries(matching: "").count, 2)
+        viewModel.selectedFilter = .autoAdded
+        XCTAssertTrue(viewModel.filteredEntries(matching: "").isEmpty)
     }
 
     @MainActor

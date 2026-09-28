@@ -17,7 +17,7 @@ struct CloudASRRequestMetrics: Sendable {
 
 enum CloudASRRequestLogger {
     private static let logger = Logger(
-        subsystem: "com.isecret.memoecho",
+        subsystem: "me.wangmao.memoecho",
         category: "CloudASR"
     )
 
