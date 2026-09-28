@@ -150,10 +150,17 @@ struct VoiceInputReadiness: Equatable {
         case .failed: llm = .blocked("AI 模型验证失败，请检查配置后重试")
         }
 
+        let accessibilityReadiness: ReadinessStatus
+        switch accessibility {
+        case .unchecked: accessibilityReadiness = .pending("请检查辅助功能权限")
+        case .granted: accessibilityReadiness = .ready
+        case .requiresManualEnable: accessibilityReadiness = .blocked("请开启辅助功能权限")
+        }
+
         return Self(
             hotkey: hotkey,
             microphone: microphoneReadiness,
-            accessibility: accessibility == .granted ? .ready : .blocked("请开启辅助功能权限"),
+            accessibility: accessibilityReadiness,
             asr: asr,
             llm: llm
         )

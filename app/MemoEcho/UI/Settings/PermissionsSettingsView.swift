@@ -20,6 +20,7 @@ enum PermissionCopy {
 
     static func accessibilityStatus(_ status: AccessibilityPermission) -> String {
         switch status {
+        case .unchecked: "未检查"
         case .granted: "已授权"
         case .requiresManualEnable: "未授权"
         }
@@ -34,7 +35,11 @@ enum PermissionCopy {
     }
 
     static func accessibilityAction(_ status: AccessibilityPermission) -> String? {
-        status == .requiresManualEnable ? openSettingsTitle : nil
+        switch status {
+        case .unchecked: "检查权限"
+        case .requiresManualEnable: openSettingsTitle
+        case .granted: nil
+        }
     }
 }
 
@@ -61,7 +66,8 @@ struct PermissionsSettingsView: View {
             SettingsPaneSection {
                 SettingsFormRow(title: PermissionCopy.accessibilityTitle) {
                     HStack(spacing: 8) {
-                        PermissionStatusBadge(granted: permissionsManager.accessibilityStatus == .granted)
+                        PermissionStatusBadge(granted: permissionsManager.accessibilityStatus == .unchecked
+                                              ? nil : permissionsManager.accessibilityStatus == .granted)
                         Text(PermissionCopy.accessibilityStatus(permissionsManager.accessibilityStatus))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -78,10 +84,15 @@ struct PermissionsSettingsView: View {
                 }
             }
         }
-        .onAppear { permissionsManager.refreshAll() }
+        .onAppear { refreshPermissions() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            permissionsManager.refreshAll()
+            refreshPermissions()
         }
+    }
+
+    private func refreshPermissions() {
+        permissionsManager.checkAccessibilityPermissionForUserAction()
+        permissionsManager.refreshAll()
     }
 
     // MARK: - Microphone
@@ -132,11 +143,12 @@ struct PermissionsSettingsView: View {
 // MARK: - Status Badge
 
 private struct PermissionStatusBadge: View {
-    let granted: Bool
+    let granted: Bool?
 
     var body: some View {
-        Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
-            .foregroundStyle(granted ? .green : .red)
+        Image(systemName: granted == nil ? "circle.dashed"
+                  : granted == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+            .foregroundStyle(granted == nil ? Color.secondary : granted == true ? .green : .red)
             .imageScale(.large)
     }
 }

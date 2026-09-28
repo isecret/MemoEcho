@@ -200,6 +200,7 @@ final class AppCoordinator {
         }
         perms.onAccessibilityGranted = { [weak self] in
             guard let self else { return }
+            self.accessibilityGuideController.dismiss()
             self.setupHotkey()
             if self.onboardingCoordinator.isPresented { self.onboardingCoordinator.refresh() }
         }
@@ -538,7 +539,7 @@ final class AppCoordinator {
         guard configStore.onboardingProgress.hasAttemptedAccessibilityDrag || configStore.hasCompletedInitialSetup else {
             return
         }
-        permissionsManager.checkAccessibilityPermissionForVoiceInput()
+        permissionsManager.checkAccessibilityPermissionForUserAction()
     }
 
     private func makeSettingsToolbar() -> NSToolbar {

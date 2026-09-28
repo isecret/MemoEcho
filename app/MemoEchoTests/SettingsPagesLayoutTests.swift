@@ -47,6 +47,19 @@ final class SettingsPagesLayoutTests: XCTestCase {
         XCTAssertEqual(fixture.window.contentLayoutRect.height, normalHeight, accuracy: 0.5)
     }
 
+    func testOpeningPermissionsPageChecksExistingGrantWithoutDrag() async throws {
+        let fixture = try Fixture(accessibilityQueriesEnabled: false)
+        defer { fixture.cleanup() }
+        XCTAssertEqual(fixture.permissions.accessibilityStatus, .unchecked)
+        fixture.show(.permissions)
+        await settle(fixture)
+        XCTAssertEqual(fixture.permissions.accessibilityStatus, .granted)
+        fixture.permissionState.accessibility = .requiresManualEnable
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await settle(fixture)
+        XCTAssertEqual(fixture.permissions.accessibilityStatus, .requiresManualEnable)
+    }
+
     func testPermissionsStatusesAndGuideErrorResizeWithoutTopGap() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -152,7 +165,7 @@ final class SettingsPagesLayoutTests: XCTestCase {
         let cloudValidation: CloudASRValidationService
         var window: NSWindow!
 
-        init() throws {
+        init(accessibilityQueriesEnabled: Bool = true) throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent("SettingsPages-\(UUID())")
             config = ConfigStore(configDirectory: directory)
             dictionary = PersonalDictionaryStore(directoryURL: directory)
@@ -162,7 +175,7 @@ final class SettingsPagesLayoutTests: XCTestCase {
                 microphoneStatus: { [permissionState] in permissionState.microphone },
                 accessibilityStatus: { [permissionState] in permissionState.accessibility },
                 requestMicrophone: {}, openMicrophoneSettings: {}, openAccessibilitySettings: {}
-            ), accessibilityStatusQueryEnabled: true)
+            ), accessibilityStatusQueryEnabled: accessibilityQueriesEnabled)
             download = ModelDownloadManager(configStore: config)
             cloudValidation = CloudASRValidationService(configStore: config, validatorFactory: { _ in ReadyCloud() })
             let host = SettingsWindowLayout.makeHostingController(rootView: Pages(fixture: self))

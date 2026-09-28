@@ -40,12 +40,17 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: me.wangmao.memoecho
+        APP_DISPLAY_NAME: MemoEcho
         CODE_SIGN_ENTITLEMENTS: MemoEcho/MemoEcho.entitlements
         MARKETING_VERSION: "1.0.0-beta.2"
         CURRENT_PROJECT_VERSION: "1.0.0b2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: MemoEcho/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: MemoEcho/Platform/SherpaOnnxBridge.h
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: me.wangmao.memoecho.debug
+          APP_DISPLAY_NAME: MemoEcho Dev
     preBuildScripts:
       - name: "Validate Source Resources"
         outputFiles:

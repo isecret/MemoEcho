@@ -5,15 +5,60 @@ import XCTest
 
 final class PermissionsManagerTests: XCTestCase {
     @MainActor
-    func testNewInstallDoesNotQueryAccessibilityBeforeDraggingAppIntoSettings() {
+    func testLaunchAndBackgroundRefreshDoNotQueryAccessibility() {
         let system = PermissionOperationsStub()
         let manager = PermissionsManager(operations: system.operations)
 
         manager.refreshAll()
         manager.applicationDidBecomeActive()
-        manager.promptAndOpenAccessibilitySettings()
 
         XCTAssertEqual(system.accessibilityChecks, 0)
+    }
+
+    @MainActor
+    func testUncheckedLaunchDoesNotClaimPermissionWasDenied() {
+        let system = PermissionOperationsStub()
+        system.accessibility = .granted
+        let manager = PermissionsManager(operations: system.operations)
+        XCTAssertEqual(PermissionCopy.accessibilityStatus(manager.accessibilityStatus), "未检查")
+        XCTAssertEqual(system.accessibilityChecks, 0)
+    }
+
+    @MainActor
+    func testGrantedPermissionIsCheckedBeforeOpeningGuide() {
+        let system = PermissionOperationsStub()
+        system.accessibility = .granted
+        let manager = PermissionsManager(operations: system.operations)
+        var guides = 0
+        manager.onAccessibilityGuideRequested = { guides += 1; return true }
+        manager.promptAndOpenAccessibilitySettings()
+        XCTAssertEqual(manager.accessibilityStatus, .granted)
+        XCTAssertEqual(guides, 0)
+        XCTAssertFalse(manager.isHandlingAuthorization)
+        XCTAssertEqual(system.accessibilityChecks, 1)
+    }
+
+    @MainActor
+    func testReturningFromManualGrantRefreshesWithoutDragCallback() {
+        let system = PermissionOperationsStub()
+        let manager = PermissionsManager(operations: system.operations)
+        manager.promptAndOpenAccessibilitySettings()
+        manager.applicationDidResignActive()
+        system.accessibility = .granted
+        manager.applicationDidBecomeActive()
+        XCTAssertEqual(manager.accessibilityStatus, .granted)
+        XCTAssertFalse(manager.isHandlingAuthorization)
+    }
+
+    @MainActor
+    func testEnforcementRejectsGrantRevokedSinceLastCheck() {
+        let system = PermissionOperationsStub()
+        system.accessibility = .granted
+        let manager = PermissionsManager(operations: system.operations)
+        manager.checkAccessibilityPermissionForUserAction()
+        system.accessibility = .requiresManualEnable
+        XCTAssertThrowsError(try manager.ensureAccessibilityAuthorized())
+        XCTAssertEqual(manager.accessibilityStatus, .requiresManualEnable)
     }
 
     @MainActor
@@ -22,7 +67,7 @@ final class PermissionsManagerTests: XCTestCase {
         system.accessibility = .granted
         let manager = PermissionsManager(operations: system.operations)
 
-        manager.checkAccessibilityPermissionForVoiceInput()
+        manager.checkAccessibilityPermissionForUserAction()
         manager.refreshAll()
         manager.applicationDidBecomeActive()
 
@@ -39,7 +84,7 @@ final class PermissionsManagerTests: XCTestCase {
 
         manager.promptAndOpenAccessibilitySettings()
         manager.beginAccessibilityStatusChecksAfterDrag()
-        XCTAssertEqual(system.accessibilityChecks, 1)
+        XCTAssertEqual(system.accessibilityChecks, 2)
         XCTAssertEqual(manager.accessibilityStatus, .requiresManualEnable)
 
         system.accessibility = .granted

@@ -143,3 +143,7 @@ wrangler pages deploy dist/website --project-name memoecho --branch main
 ### 本地配置文件
 
 `~/.memoecho/config.json` 保存用户设置、服务连接参数和鉴权信息；`state.json` 保存引导进度和配置验证、模型能力记录；词条仍在 `dictionary.json`。配置目录权限为 `0700`，配置和状态文件为 `0600`。下载过程和错误信息不写入配置。当前格式不兼容历史配置；退出应用后删除 config，再启动会重置引导状态并重新配置。
+
+### 开发版身份与权限
+
+Debug 构建的 Bundle ID 为 `me.wangmao.memoecho.debug`，显示名称为 `MemoEcho Dev`；Release 保持 `me.wangmao.memoecho`。两者的系统权限各自授权，Debug 不使用正式版的 Sparkle 更新入口。验证正式版升级后的权限继承时，应使用同一 Developer ID 签名的两个 Release 安装包。

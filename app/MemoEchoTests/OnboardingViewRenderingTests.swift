@@ -71,6 +71,8 @@ final class OnboardingViewRenderingTests: XCTestCase {
     func testAccessibilityCopyMatchesSettingsForEveryAuthorizationState() {
         XCTAssertEqual(PermissionCopy.accessibilityTitle, "辅助功能权限")
         XCTAssertEqual(PermissionCopy.accessibilityStatus(.granted), "已授权")
+        XCTAssertEqual(PermissionCopy.accessibilityStatus(.unchecked), "未检查")
+        XCTAssertEqual(PermissionCopy.accessibilityAction(.unchecked), "检查权限")
         XCTAssertEqual(PermissionCopy.accessibilityStatus(.requiresManualEnable), "未授权")
         XCTAssertEqual(PermissionCopy.accessibilityAction(.requiresManualEnable), "打开系统设置")
         XCTAssertNil(PermissionCopy.accessibilityAction(.granted))

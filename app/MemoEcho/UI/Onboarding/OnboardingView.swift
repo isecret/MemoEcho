@@ -285,6 +285,10 @@ struct OnboardingView: View {
             )
         }
         .padding(.horizontal, 60)
+        .onAppear { coordinator.permissionsManager.checkAccessibilityPermissionForUserAction() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            coordinator.permissionsManager.checkAccessibilityPermissionForUserAction()
+        }
     }
 
     private func permissionCard(title: String, purpose: String, symbol: String, statusText: String, granted: Bool) -> some View {

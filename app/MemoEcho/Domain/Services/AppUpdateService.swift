@@ -5,6 +5,17 @@ import Sparkle
 @MainActor
 @Observable
 final class AppUpdateService {
+    // A development installation must never replace itself with the public app.
+    static var updatesEnabled: Bool {
+        #if DEBUG
+        false
+        #else
+        true
+        #endif
+    }
+
+    var isAvailable: Bool { Self.updatesEnabled }
+
     @ObservationIgnored
     private let updaterController: SPUStandardUpdaterController
 
@@ -28,15 +39,15 @@ final class AppUpdateService {
         )
 
         let updater = updaterController.updater
-        automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
-        canCheckForUpdates = updater.canCheckForUpdates
+        automaticallyChecksForUpdates = Self.updatesEnabled && updater.automaticallyChecksForUpdates
+        canCheckForUpdates = Self.updatesEnabled && updater.canCheckForUpdates
 
         bindUpdaterState()
         syncStateFromUpdater()
     }
 
     func start() {
-        guard !didStart else { return }
+        guard Self.updatesEnabled, !didStart else { return }
 
         updaterController.startUpdater()
         didStart = true
@@ -44,6 +55,7 @@ final class AppUpdateService {
     }
 
     func checkForUpdates() {
+        guard Self.updatesEnabled else { return }
         if !didStart {
             start()
         }
@@ -54,6 +66,7 @@ final class AppUpdateService {
     }
 
     func setAutomaticallyChecksForUpdates(_ enabled: Bool) {
+        guard Self.updatesEnabled else { return }
         updaterController.updater.automaticallyChecksForUpdates = enabled
         syncStateFromUpdater()
     }
@@ -74,8 +87,8 @@ final class AppUpdateService {
 
     private func syncStateFromUpdater() {
         let updater = updaterController.updater
-        automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
-        canCheckForUpdates = updater.canCheckForUpdates
+        automaticallyChecksForUpdates = Self.updatesEnabled && updater.automaticallyChecksForUpdates
+        canCheckForUpdates = Self.updatesEnabled && updater.canCheckForUpdates
     }
 
 }

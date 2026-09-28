@@ -134,28 +134,31 @@ struct GeneralSettingsView: View {
                 }
             }
 
-            SettingsPaneSection {
-                SettingsFormRow(title: "自动检查更新") {
-                    HStack(spacing: 14) {
-                        Toggle(
-                            "",
-                            isOn: Binding(
-                                get: { updateService.automaticallyChecksForUpdates },
-                                set: { updateService.setAutomaticallyChecksForUpdates($0) }
+            if updateService.isAvailable {
+                SettingsPaneSection {
+                    SettingsFormRow(title: "自动检查更新") {
+                        HStack(spacing: 14) {
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { updateService.automaticallyChecksForUpdates },
+                                    set: { updateService.setAutomaticallyChecksForUpdates($0) }
+                                )
                             )
-                        )
-                        .toggleStyle(.checkbox)
-                        .labelsHidden()
+                            .toggleStyle(.checkbox)
+                            .labelsHidden()
 
-                        Button("检查更新") {
-                            updateService.checkForUpdates()
+                            Button("检查更新") {
+                                updateService.checkForUpdates()
+                            }
+                            .disabled(!updateService.canCheckForUpdates)
                         }
-                        .disabled(!updateService.canCheckForUpdates)
                     }
+                } footer: {
+                    Text("当前版本：v\(appVersion)")
                 }
-            } footer: {
-                Text("当前版本：v\(appVersion)")
             }
+
         }
         .onAppear {
             loadDraft()

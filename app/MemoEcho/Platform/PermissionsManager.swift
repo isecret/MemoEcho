@@ -13,6 +13,7 @@ enum MicrophonePermission: String, Sendable {
 }
 
 enum AccessibilityPermission: String, Sendable {
+    case unchecked
     case granted
     case requiresManualEnable
 }
@@ -95,7 +96,7 @@ final class PermissionsManager {
     private(set) var accessibilityGuideError: String?
 
     private(set) var microphoneStatus: MicrophonePermission = .notDetermined
-    private(set) var accessibilityStatus: AccessibilityPermission = .requiresManualEnable
+    private(set) var accessibilityStatus: AccessibilityPermission = .unchecked
     private(set) var isRequestingMicrophonePermission = false
     var isHandlingAuthorization: Bool { authorization != nil }
 
@@ -122,10 +123,12 @@ final class PermissionsManager {
     }
 
     func applicationDidBecomeActive() {
+        let returningFromAccessibility = leftAppForAuthorization && authorization == .accessibility
         if leftAppForAuthorization, !isRequestingMicrophonePermission {
             authorization = nil
             leftAppForAuthorization = false
         }
+        if returningFromAccessibility { updateAccessibilityStatus() }
         refreshAll()
     }
 
@@ -169,8 +172,8 @@ final class PermissionsManager {
         updateAccessibilityStatus()
     }
 
-    /// A deliberate hotkey press may check an existing installation without enabling launch-time polling.
-    func checkAccessibilityPermissionForVoiceInput() {
+    /// An explicit user action checks current trust without enabling background polling.
+    func checkAccessibilityPermissionForUserAction() {
         updateAccessibilityStatus()
     }
 
@@ -190,10 +193,11 @@ final class PermissionsManager {
 
     /// 打开系统设置，并由应用协调器展示可拖拽的授权引导。
     func promptAndOpenAccessibilitySettings() {
-        refreshAll()
-        guard accessibilityStatus != .granted, !isHandlingAuthorization else { return }
-        authorization = .accessibility
+        guard !isHandlingAuthorization else { return }
         accessibilityGuideError = nil
+        updateAccessibilityStatus()
+        guard accessibilityStatus != .granted else { return }
+        authorization = .accessibility
         if let onAccessibilityGuideRequested {
             if !onAccessibilityGuideRequested() {
                 authorization = nil
@@ -220,7 +224,7 @@ final class PermissionsManager {
 
     /// 确保辅助功能权限已授予，否则抛出错误
     func ensureAccessibilityAuthorized() throws {
-        checkAccessibilityPermission()
+        updateAccessibilityStatus()
         guard accessibilityStatus == .granted else {
             throw PermissionError.accessibilityPermissionDenied
         }
