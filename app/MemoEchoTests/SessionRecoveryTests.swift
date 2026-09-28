@@ -371,8 +371,11 @@ final class SessionRecoveryTests: XCTestCase {
                                          audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
                                          ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
                                          asrProviderOverride: { _ in FailingASR() })
+        defer { session.cancel() }
         session.startRecording()
-        await waitUntil { session.recovery != nil }
+        // This integration case denoises a real 55-second segment. Shared CI
+        // runners need more time than the lightweight recovery unit tests.
+        await waitUntil(timeout: .seconds(15)) { session.recovery != nil }
         XCTAssertEqual(recorder.stops, 1)
         XCTAssertEqual(session.state, .error)
         XCTAssertEqual(session.recovery?.pendingSegments.map(\.index), [0, 1])
@@ -478,8 +481,10 @@ final class SessionRecoveryTests: XCTestCase {
         return (session, directory)
     }
 
-    private func waitUntil(_ condition: () -> Bool) async {
-        for _ in 0..<200 {
+    private func waitUntil(timeout: Duration = .seconds(2), _ condition: () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
             if condition() { return }
             try? await Task.sleep(for: .milliseconds(10))
         }
