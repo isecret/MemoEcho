@@ -297,13 +297,18 @@ final class HUDFeedbackControllerTests: XCTestCase {
         XCTAssertNil(controller.modeCueLabel)
     }
 
-    func testUnverifiedPasteShowsNeutralNoticeWithoutRetryAction() {
+    func testUnverifiedPasteDismissesHUDWithoutNoticeOrRetryAction() async {
         let controller = HUDFeedbackController()
+        controller.handleEvent(.recoveryStarted)
         controller.recoveryActionTitle = "重试写入"
+        controller.onRecoveryAction = {}
         controller.handleEvent(.outputDispatched)
-        XCTAssertEqual(controller.hudState, .notice("已尝试粘贴"))
+        XCTAssertEqual(controller.hudState, .processing, "Dismiss without flashing a result notice")
         XCTAssertNil(controller.recoveryActionTitle)
-        controller.handleEvent(.processingCancelled)
+        XCTAssertNil(controller.onRecoveryAction)
+        await waitForHUDToHide(controller)
+        XCTAssertEqual(controller.hudState, .hidden)
+        XCTAssertFalse(controller.isHUDPresented)
     }
 
     func testProcessingFinishedDismissesHUDWithoutSuccessState() async {

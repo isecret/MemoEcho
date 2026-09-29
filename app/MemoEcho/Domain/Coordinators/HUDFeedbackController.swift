@@ -178,9 +178,7 @@ final class HUDFeedbackController {
             stopEscMonitor()
             resetBars()
             clearRecoveryAction()
-            hudState = .notice("已尝试粘贴")
-            showHUD()
-            scheduleDismiss(after: 1.8)
+            dismissHUD()
 
         case .processingFinished:
             cancelPendingStartSound()
