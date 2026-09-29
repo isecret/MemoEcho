@@ -470,7 +470,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(session.recovery?.stage, .translation)
     }
 
-    func testUnverifiedPasteCompletesWithCopyOnlyRecoveryAndNoFailure() async throws {
+    func testUnverifiedPasteCompletesWithoutRecoveryOrMenuText() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.window()
         let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
@@ -487,6 +487,13 @@ final class SessionRecoveryTests: XCTestCase {
             default: break
             }
         }
+        driver.onWait = { tick in
+            guard tick == 2 else { return }
+            XCTAssertEqual(driver.pastes, 1)
+            XCTAssertEqual(dispatched, 1, "Dismiss Thinking after dispatch, before waiting for clipboard cleanup")
+            XCTAssertTrue(driver.isInjecting, "Keep the injection lease active while the app consumes the paste")
+            XCTAssertEqual(driver.board.restores, 0)
+        }
         let cp = checkpoint(target: target)
         session.retainRecovery(cp)
         session.retryRecovery()
@@ -496,10 +503,11 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(dispatched, 1)
         XCTAssertEqual(finished, 0)
         XCTAssertEqual(failed, 0)
-        XCTAssertEqual(session.lastInjectionFailureText, "整理结果")
-        XCTAssertTrue(cp.outputUnverified)
+        XCTAssertNil(session.lastInjectionFailureText)
+        XCTAssertNil(session.recovery)
+        XCTAssertTrue(cp.discarded)
+        XCTAssertNil(cp.finalText)
         XCTAssertTrue(cp.outputAttempted)
-        XCTAssertEqual(cp.stage, .output)
         XCTAssertFalse(cp.canRetry)
         XCTAssertFalse(session.canRetryRecovery)
         XCTAssertNil(cp.target)
@@ -510,6 +518,60 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(driver.pastes, 1)
         await waitUntil { session.recovery == nil }
         XCTAssertNil(session.lastInjectionFailureText)
+    }
+
+    func testUnreadableFieldHidesHUDBeforeClipboardCleanup() async {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.focus(readable: false)
+        let originalClipboard = driver.board.items
+        let (session, directory) = makeCoordinator(driver: driver, worker: processor())
+        let hud = HUDFeedbackController()
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        session.onFeedbackEvent = { hud.handleEvent($0) }
+        driver.onAsyncWait = { tick in
+            guard tick == 2 else { return }
+            // Simulate a receiver still consuming the paste after the normal HUD fade.
+            await self.waitUntil(timeout: .seconds(1)) { hud.hudState == .hidden }
+            XCTAssertEqual(hud.hudState, .hidden)
+            XCTAssertFalse(hud.isHUDPresented)
+            XCTAssertTrue(driver.isInjecting)
+            XCTAssertEqual(driver.board.restores, 0)
+        }
+        session.retainRecovery(checkpoint(target: driver.current))
+        session.retryRecovery()
+        await waitUntil { !session.isRecovering }
+        XCTAssertEqual(session.state, .done)
+        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.board.items, originalClipboard)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testUnverifiedDispatchStillReportsLaterTargetLoss() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.window()
+        let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
+        let (session, directory) = makeCoordinator(driver: driver, worker: processor())
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        var events: [String] = []
+        session.onFeedbackEvent = {
+            switch $0 {
+            case .outputDispatched: events.append("dispatched")
+            case .processingFailed: events.append("failed")
+            case .processingFinished: events.append("finished")
+            default: break
+            }
+        }
+        driver.onWait = { tick in if tick == 2 { driver.continuity.invalidate() } }
+        session.retainRecovery(checkpoint(target: target))
+        session.retryRecovery()
+        await waitUntil { !session.isRecovering }
+        XCTAssertEqual(events, ["dispatched", "failed"])
+        XCTAssertEqual(session.state, .error)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.board.restores, 1)
+        XCTAssertTrue(session.recovery?.outputAttempted == true)
     }
 
     private func makeCoordinator(driver: FakeInjectionDriver = FakeInjectionDriver(), worker: SessionRecoveryProcessor,

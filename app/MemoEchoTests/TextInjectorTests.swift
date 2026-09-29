@@ -8,7 +8,10 @@ final class TextInjectorTests: XCTestCase {
         let driver = FakeInjectionDriver()
         let original = driver.board.items
         driver.onWait = { tick in if tick == 5 { driver.apply("hello") } }
-        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        let result = try await TextInjector(driver: driver).inject(
+            text: "hello", target: driver.current,
+            onUnverifiedPasteDispatched: { XCTFail("Readable fields must keep waiting for confirmation") }
+        )
         XCTAssertEqual(result.path, .paste)
         XCTAssertEqual(result.beforeInjection?.value, "前后")
         XCTAssertEqual(driver.pastes, 1)

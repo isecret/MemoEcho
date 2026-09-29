@@ -45,10 +45,8 @@ struct MenuBarView: View {
             if recovery.outputAttempted {
                 Text("请先检查原输入框，避免重复粘贴")
             }
-            if !recovery.outputUnverified {
-                Button("检查设置") { appCoordinator.openFailedSessionSettings() }
-                    .disabled(state.isProcessing)
-            }
+            Button("检查设置") { appCoordinator.openFailedSessionSettings() }
+                .disabled(state.isProcessing)
             Button("丢弃上次结果") { appCoordinator.sessionCoordinator.discardRecovery() }
                 .disabled(state.isProcessing && !appCoordinator.sessionCoordinator.isRecovering)
             Text("仅临时保留 10 分钟，退出后清除")

@@ -126,7 +126,8 @@ struct TextInjector {
 
     func inject(text: String, target: TextInjectionFocus?,
                 shouldContinue: () -> Bool = { true },
-                onOutputAttempt: () -> Void = {}) async throws -> InjectionResult {
+                onOutputAttempt: () -> Void = {},
+                onUnverifiedPasteDispatched: () -> Void = {}) async throws -> InjectionResult {
         guard driver.authorized else { throw MemoEchoError.accessibilityPermissionDenied }
         guard !driver.isInjecting else { throw failure("上一次文本写入尚未结束") }
         guard let target, !text.isEmpty else { throw failure("未找到原来的输入框，请手动复制文本") }
@@ -191,6 +192,9 @@ struct TextInjector {
         if posted {
             onOutputAttempt()
             path = .paste
+            // Unreadable targets have no acknowledgement to wait for. Let the HUD
+            // dismiss now while the clipboard lease and safety checks remain active.
+            if before.snapshot == nil { onUnverifiedPasteDispatched() }
         } else {
             // AX fallback is allowed only BEFORE any paste event could have been delivered.
             let fallbackStart = Date()

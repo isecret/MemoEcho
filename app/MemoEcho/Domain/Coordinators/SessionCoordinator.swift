@@ -866,10 +866,15 @@ final class SessionCoordinator {
             state = .injecting
             diag.resultSource = PolishResult.Source.llm.rawValue
             lastResult = SessionResult(text: text, source: .llm)
+            var outputFeedbackSent = false
             let result = try await textOutput.deliver(text) { text in
                 try await textInjector.inject(text: text, target: checkpoint.target,
                                                shouldContinue: { self.sessionGeneration == generation && checkpoint.isValid(at: Date()) },
-                                               onOutputAttempt: { checkpoint.outputAttempted = true })
+                                               onOutputAttempt: { checkpoint.outputAttempted = true },
+                                               onUnverifiedPasteDispatched: {
+                    outputFeedbackSent = true
+                    self.onFeedbackEvent?(.outputDispatched)
+                })
             }
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             if let result { diagnostics.injectionCompleted(sessionID: sessionID, path: result.path, breakdown: result.breakdown) }
@@ -878,26 +883,15 @@ final class SessionCoordinator {
                 diagnostics.log(sessionID: sessionID, event: "output_confirmation", detail: unverified ? "dispatched" : "verified")
             }
             isRecovering = false
-            if !isOnboardingTrial, unverified {
-                // Keep only the final text for explicit copying, never for another automatic write.
-                checkpoint.outputAttempted = true
-                checkpoint.outputUnverified = true
-                checkpoint.pendingSegments.removeAll()
-                checkpoint.transcripts.removeAll()
-                checkpoint.polished = nil
-                checkpoint.context = nil
-                checkpoint.target = nil
-                retainRecovery(checkpoint)
-                lastInjectionFailureText = text
-            } else {
-                if !isOnboardingTrial {
-                    lastInjectionFailureText = nil
+            if !isOnboardingTrial {
+                lastInjectionFailureText = nil
+                if !unverified {
                     beginPostInjectionLearningIfNeeded(generation: generation, mode: checkpoint.mode, sessionID: sessionID,
                                                        beforeInjection: result?.beforeInjection, insertedText: text)
-                    discardRecovery()
                 }
-                checkpoint.discard()
+                discardRecovery()
             }
+            checkpoint.discard()
             targetInput = nil
             lastResult = nil
             clearWindowContextCapture()
@@ -905,7 +899,9 @@ final class SessionCoordinator {
             finishStageTiming()
             diag.totalMs = initial.totalMs + Int(Date().timeIntervalSince(start) * 1000)
             diagnostics.sessionEnded(sessionID: sessionID, result: diag)
-            onFeedbackEvent?(unverified ? .outputDispatched : .processingFinished)
+            if !outputFeedbackSent {
+                onFeedbackEvent?(unverified ? .outputDispatched : .processingFinished)
+            }
             scheduleResetToIdle()
         } catch {
             guard sessionGeneration == generation, !Task.isCancelled, checkpoint.isValid(at: Date()) else { return }
