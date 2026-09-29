@@ -13,6 +13,7 @@ struct HotkeyRecorderView: View {
     @State private var previewCombo: HotkeyCombo?
 
     var body: some View {
+        let actionTitle = phase == .idle ? "更改…" : "取消"
         let layout = usesProminentKeycaps
             ? AnyLayout(VStackLayout(spacing: 20))
             : AnyLayout(HStackLayout(spacing: 8))
@@ -21,7 +22,7 @@ struct HotkeyRecorderView: View {
                 .frame(minHeight: usesProminentKeycaps ? 88 : SettingsFormLayout.rowMinHeight, alignment: .leading)
                 .layoutPriority(0)
 
-            Button(phase == .idle ? "更改…" : "取消") {
+            Button(actionTitle) {
                 if phase == .idle {
                     beginRecording()
                 } else {
@@ -31,6 +32,8 @@ struct HotkeyRecorderView: View {
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
             .help(phase == .idle ? "更改快捷键" : "取消录制")
+            // Rebuild only the button; keep the recorder and its capture state alive.
+            .id(actionTitle)
         }
         .frame(width: usesProminentKeycaps ? 550 : SettingsFormLayout.controlWidth,
                alignment: usesProminentKeycaps ? .center : .leading)

@@ -124,6 +124,8 @@ struct PermissionsSettingsView: View {
                 }
             }
             .disabled(permissionsManager.isHandlingAuthorization)
+            // Refresh native focus geometry when the action title changes width.
+            .id(title)
         }
     }
 
@@ -136,6 +138,7 @@ struct PermissionsSettingsView: View {
                 permissionsManager.promptAndOpenAccessibilitySettings()
             }
             .disabled(permissionsManager.isHandlingAuthorization)
+            .id(title)
         }
     }
 }

@@ -493,6 +493,9 @@ struct OnboardingView: View {
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
                 .disabled(primaryDisabled)
+                // Recreate the native focus geometry when the label changes width.
+                // Reusing the control can leave its focus ring at the previous size.
+                .id(primaryTitle)
         }
         .frame(height: 38)
     }
