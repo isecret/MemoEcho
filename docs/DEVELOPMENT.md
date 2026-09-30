@@ -70,7 +70,7 @@ swift scripts/generate_app_icon.swift assets/branding app/MemoEcho/Resources/Ass
 
 MemoEcho 后续版本应保持 `me.wangmao.memoecho` 与相同的 `APPLE_SIGNING_IDENTITY`，以便延续本应用的系统授权。首次安装 MemoEcho 时需要重新授予麦克风与辅助功能权限。
 
-本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.6`，内部构建号为 `1.0.0b6`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`，构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
+本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.7`，内部构建号为 `1.0.0b7`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`，构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
 
 如需发布可被应用内自动更新识别的正式版本，必须在 CI 中配置 `SPARKLE_PRIVATE_KEY` secret。其值应为 Sparkle `generate_keys -x` 导出的私钥文件内容；若缺失，release workflow 会直接失败，避免发布出 GitHub Release 已生成但 `updates/appcast.xml` 仍为空的版本。
 
