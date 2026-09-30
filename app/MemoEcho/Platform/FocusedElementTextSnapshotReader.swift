@@ -30,23 +30,32 @@ struct FocusedElementTextSnapshot: Sendable, Equatable {
 }
 
 struct FocusedElementTextSnapshotReader: Sendable {
+    enum ReadFailure: String {
+        case permissionDenied, missingTarget, appNotFrontmost, unresolvedField
+        case secureField, notWritable, valueUnavailable, valueTooLarge
+        case selectionUnavailable, selectionOutOfBounds, bundleChanged
+    }
     private let resolver = FocusedElementResolver()
 
     @MainActor
-    func read(targetPID: pid_t?, targetBundleID: String?) -> FocusedElementTextSnapshot? {
-        guard AXIsProcessTrusted(), let targetPID,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
-              let resolved = resolver.resolveFocusedElement(targetPID: targetPID, shouldRestoreTargetApplication: false)
-        else { return nil }
+    func read(targetPID: pid_t?, targetBundleID: String?,
+              onFailure: ((ReadFailure) -> Void)? = nil) -> FocusedElementTextSnapshot? {
+        func fail(_ reason: ReadFailure) -> FocusedElementTextSnapshot? { onFailure?(reason); return nil }
+        guard AXIsProcessTrusted() else { return fail(.permissionDenied) }
+        guard let targetPID else { return fail(.missingTarget) }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else { return fail(.appNotFrontmost) }
+        guard let resolved = resolver.resolveFocusedElement(targetPID: targetPID, shouldRestoreTargetApplication: false)
+        else { return fail(.unresolvedField) }
         let element = resolved.element
         // Secure fields never enter the learning pipeline.
-        guard string(element, kAXSubroleAttribute) != kAXSecureTextFieldSubrole,
-              isWritable(element, kAXSelectedTextAttribute) || isWritable(element, kAXValueAttribute),
-              let value = string(element, kAXValueAttribute), value.utf16.count <= 100_000,
-              let selection = range(element, kAXSelectedTextRangeAttribute),
-              Range(selection, in: value) != nil else { return nil }
+        guard string(element, kAXSubroleAttribute) != kAXSecureTextFieldSubrole else { return fail(.secureField) }
+        guard isWritable(element, kAXSelectedTextAttribute) || isWritable(element, kAXValueAttribute) else { return fail(.notWritable) }
+        guard let value = string(element, kAXValueAttribute) else { return fail(.valueUnavailable) }
+        guard value.utf16.count <= 100_000 else { return fail(.valueTooLarge) }
+        guard let selection = range(element, kAXSelectedTextRangeAttribute) else { return fail(.selectionUnavailable) }
+        guard Range(selection, in: value) != nil else { return fail(.selectionOutOfBounds) }
         let bundleID = resolved.bundleID ?? targetBundleID
-        guard targetBundleID == nil || bundleID == targetBundleID else { return nil }
+        guard targetBundleID == nil || bundleID == targetBundleID else { return fail(.bundleChanged) }
         // Some AX implementations expose marked text; absence is not proof of commitment.
         let marked = range(element, "AXMarkedTextRange")
         return .init(pid: targetPID, bundleID: bundleID, identity: .init(element: element),

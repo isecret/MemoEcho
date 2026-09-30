@@ -177,23 +177,50 @@ final class ConfigStore {
         switch platform {
         case .localSenseVoice: break
         case .tencentCloudSentence:
+            asrConfig.tencentCloud.sentenceValidationStatus = status
+            asrConfig.tencentCloud.sentenceLastValidationError = error
+        case .tencentCloudRealtime:
             asrConfig.tencentCloud.validationStatus = status
             asrConfig.tencentCloud.lastValidationError = error
         case .aliyunSentence:
+            asrConfig.aliyun.sentenceValidationStatus = status
+            asrConfig.aliyun.sentenceLastValidationError = error
+        case .aliyunRealtime:
             asrConfig.aliyun.validationStatus = status
             asrConfig.aliyun.lastValidationError = error
-        case .volcengineSentence:
+        case .aliyunBailianHTTPASR:
+            asrConfig.aliyunBailianHTTP.validationStatus = status
+            asrConfig.aliyunBailianHTTP.lastValidationError = error
+        case .aliyunBailianASR:
+            asrConfig.aliyunBailian.validationStatus = status
+            asrConfig.aliyunBailian.lastValidationError = error
+        case .volcengineRealtime:
             asrConfig.volcengine.validationStatus = status
             asrConfig.volcengine.lastValidationError = error
-        case .xunfeiSentence:
+        case .volcengineBigModelSentence:
+            asrConfig.volcengine.bigModelSentenceValidationStatus = status
+            asrConfig.volcengine.bigModelSentenceValidationError = error
+        case .volcengineSentence:
+            asrConfig.volcengine.fileValidationStatus = status
+            asrConfig.volcengine.fileLastValidationError = error
+        case .volcengineTraditionalSentence:
+            asrConfig.volcengineTraditional.sentenceValidationStatus = status
+            asrConfig.volcengineTraditional.sentenceLastValidationError = error
+        case .volcengineTraditionalRealtime:
+            asrConfig.volcengineTraditional.realtimeValidationStatus = status
+            asrConfig.volcengineTraditional.realtimeLastValidationError = error
+        case .xunfeiIAT:
+            asrConfig.xunfei.iatValidationStatus = status
+            asrConfig.xunfei.iatLastValidationError = error
+        case .xunfeiRealtime:
             asrConfig.xunfei.validationStatus = status
             asrConfig.xunfei.lastValidationError = error
-        case .xiaomiMiMoASR:
-            asrConfig.xiaomiMiMo.validationStatus = status
-            asrConfig.xiaomiMiMo.lastValidationError = error
-        case .xiaomiMiMoTokenPlanASR:
-            asrConfig.xiaomiMiMoTokenPlan.validationStatus = status
-            asrConfig.xiaomiMiMoTokenPlan.lastValidationError = error
+        case .mimoASR:
+            asrConfig.mimo.validationStatus = status
+            asrConfig.mimo.lastValidationError = error
+        case .openAICompatibleASR:
+            asrConfig.openAICompatible.validationStatus = status
+            asrConfig.openAICompatible.lastValidationError = error
         }
     }
 
@@ -238,7 +265,23 @@ final class ConfigStore {
     }
 
     private func invalidateCloudValidationStateIfNeeded(from oldConfig: ASRConfig, to newConfig: inout ASRConfig) {
-        if oldConfig.tencentCloud.secretId != newConfig.tencentCloud.secretId
+        if CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: oldConfig).fingerprint
+            != CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: newConfig).fingerprint {
+            newConfig.tencentCloud.sentenceValidationStatus = .unvalidated
+            newConfig.tencentCloud.sentenceLastValidationError = nil
+        }
+        if CloudASRValidationInput(platform: .aliyunSentence, asrConfig: oldConfig).fingerprint
+            != CloudASRValidationInput(platform: .aliyunSentence, asrConfig: newConfig).fingerprint {
+            newConfig.aliyun.sentenceValidationStatus = .unvalidated
+            newConfig.aliyun.sentenceLastValidationError = nil
+        }
+        if CloudASRValidationInput(platform: .xunfeiIAT, asrConfig: oldConfig).fingerprint
+            != CloudASRValidationInput(platform: .xunfeiIAT, asrConfig: newConfig).fingerprint {
+            newConfig.xunfei.iatValidationStatus = .unvalidated
+            newConfig.xunfei.iatLastValidationError = nil
+        }
+        if oldConfig.tencentCloud.appID != newConfig.tencentCloud.appID
+            || oldConfig.tencentCloud.secretId != newConfig.tencentCloud.secretId
             || oldConfig.tencentCloud.secretKey != newConfig.tencentCloud.secretKey {
             newConfig.tencentCloud.validationStatus = .unvalidated
             newConfig.tencentCloud.lastValidationError = nil
@@ -251,26 +294,51 @@ final class ConfigStore {
             newConfig.aliyun.lastValidationError = nil
         }
 
+        if oldConfig.aliyunBailianHTTP.connectionIdentity != newConfig.aliyunBailianHTTP.connectionIdentity {
+            newConfig.aliyunBailianHTTP.validationStatus = .unvalidated
+            newConfig.aliyunBailianHTTP.lastValidationError = nil
+        }
+        if oldConfig.aliyunBailian.connectionIdentity != newConfig.aliyunBailian.connectionIdentity {
+            newConfig.aliyunBailian.validationStatus = .unvalidated
+            newConfig.aliyunBailian.lastValidationError = nil
+        }
+
         if oldConfig.volcengine.apiKey != newConfig.volcengine.apiKey {
+            newConfig.volcengine.fileValidationStatus = .unvalidated
+            newConfig.volcengine.fileLastValidationError = nil
+        }
+        if CloudASRValidationInput(platform: .volcengineBigModelSentence, asrConfig: oldConfig).fingerprint
+            != CloudASRValidationInput(platform: .volcengineBigModelSentence, asrConfig: newConfig).fingerprint {
+            newConfig.volcengine.bigModelSentenceValidationStatus = .unvalidated
+            newConfig.volcengine.bigModelSentenceValidationError = nil
+        }
+        if oldConfig.volcengineTraditional.sentenceConnectionIdentity != newConfig.volcengineTraditional.sentenceConnectionIdentity {
+            newConfig.volcengineTraditional.sentenceValidationStatus = .unvalidated
+            newConfig.volcengineTraditional.sentenceLastValidationError = nil
+        }
+        if oldConfig.volcengineTraditional.realtimeConnectionIdentity != newConfig.volcengineTraditional.realtimeConnectionIdentity {
+            newConfig.volcengineTraditional.realtimeValidationStatus = .unvalidated
+            newConfig.volcengineTraditional.realtimeLastValidationError = nil
+        }
+        if oldConfig.volcengine.apiKey != newConfig.volcengine.apiKey
+            || oldConfig.volcengine.modelVersion != newConfig.volcengine.modelVersion {
             newConfig.volcengine.validationStatus = .unvalidated
             newConfig.volcengine.lastValidationError = nil
         }
 
-        if oldConfig.xunfei.appID != newConfig.xunfei.appID
-            || oldConfig.xunfei.apiKey != newConfig.xunfei.apiKey
-            || oldConfig.xunfei.apiSecret != newConfig.xunfei.apiSecret {
+        if oldConfig.xunfei.realtimeAPIKey != newConfig.xunfei.realtimeAPIKey
+            || oldConfig.xunfei.appID != newConfig.xunfei.appID {
             newConfig.xunfei.validationStatus = .unvalidated
             newConfig.xunfei.lastValidationError = nil
         }
 
-        if oldConfig.xiaomiMiMo.apiKey != newConfig.xiaomiMiMo.apiKey {
-            newConfig.xiaomiMiMo.validationStatus = .unvalidated
-            newConfig.xiaomiMiMo.lastValidationError = nil
+        if oldConfig.mimo.connectionIdentity != newConfig.mimo.connectionIdentity {
+            newConfig.mimo.validationStatus = .unvalidated
+            newConfig.mimo.lastValidationError = nil
         }
-
-        if oldConfig.xiaomiMiMoTokenPlan.apiKey != newConfig.xiaomiMiMoTokenPlan.apiKey {
-            newConfig.xiaomiMiMoTokenPlan.validationStatus = .unvalidated
-            newConfig.xiaomiMiMoTokenPlan.lastValidationError = nil
+        if oldConfig.openAICompatible.connectionIdentity != newConfig.openAICompatible.connectionIdentity {
+            newConfig.openAICompatible.validationStatus = .unvalidated
+            newConfig.openAICompatible.lastValidationError = nil
         }
     }
 

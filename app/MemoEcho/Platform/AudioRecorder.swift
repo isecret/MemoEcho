@@ -5,8 +5,19 @@ protocol AudioRecording: AnyObject {
     @MainActor var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)? { get set }
     @MainActor var currentDurationMs: Int { get }
     @MainActor func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws
+    @MainActor func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool, onPCMChunk: (@Sendable (Data) -> Void)?) async throws
     @MainActor func currentLevel() -> Float
     @MainActor func stopRecording() -> AudioRecordingResult
+}
+
+extension AudioRecording {
+    /// Existing recorder doubles retain their previous behavior. AudioRecorder
+    /// implements this requirement to disable its full-recording PCM copy.
+    @MainActor
+    func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool,
+                        onPCMChunk: (@Sendable (Data) -> Void)?) async throws {
+        try await startRecording(device: device, onPCMChunk: onPCMChunk)
+    }
 }
 
 /// 音频录制器，直接采集为 PCM/WAV 16kHz mono，并支持指定输入设备
@@ -27,10 +38,11 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
     private let captureQueue = DispatchQueue(label: "memoecho.audio.capture")
     private let sampleLock = NSLock()
     private let retainsAudio: Bool
+    private var retainFullAudio = true
+    private var capturedSampleCount = 0
     private var capturedPCMData = Data()
     private var latestLevel: Float = 0
     private var recording = false
-    private var recordingStartTime: TimeInterval?
     @MainActor var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
     @MainActor private var captureID = UUID()
     @MainActor private var observers: [NSObjectProtocol] = []
@@ -47,8 +59,8 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
 
     @MainActor
     var currentDurationMs: Int {
-        guard recording, let recordingStartTime else { return 0 }
-        return max(0, Int((ProcessInfo.processInfo.systemUptime - recordingStartTime) * 1_000))
+        guard recording else { return 0 }
+        return sampleLock.withLock { capturedSampleCount * 1_000 / Int(Self.sampleRate) }
     }
 
     /// 开始录音（MainActor 调用）
@@ -58,9 +70,17 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
     ///   - onPCMChunk: PCM 数据实时回调，在 cleanup 后、startRunning 前设置，避免被清理
     @MainActor
     func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)? = nil) async throws {
+        try await startRecording(device: device, retainFullAudio: true, onPCMChunk: onPCMChunk)
+    }
+
+    /// Real-time ASR consumes callbacks and opts out of a full-recording PCM copy.
+    @MainActor
+    func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool,
+                        onPCMChunk: (@Sendable (Data) -> Void)? = nil) async throws {
         guard !recording else { return }
 
         cleanupRecordingState()
+        sampleLock.withLock { self.retainFullAudio = retainFullAudio && retainsAudio }
         let id = captureID
         callbackLock.withLock { _onPCMChunk = onPCMChunk }
 
@@ -108,7 +128,8 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
             session.commitConfiguration()
 
             sampleLock.withLock {
-                capturedPCMData.removeAll(keepingCapacity: true)
+                capturedPCMData.removeAll(keepingCapacity: false)
+                capturedSampleCount = 0
                 latestLevel = 0
             }
 
@@ -133,7 +154,6 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
                 throw AudioRecorderError.startFailed
             }
 
-            recordingStartTime = ProcessInfo.processInfo.systemUptime
             recording = true
             startHealthMonitoring(id: id)
         } catch {
@@ -160,25 +180,22 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
         }
         recording = false
 
-        let duration = recordingStartTime.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
-        let durationMs = Int(duration * 1000)
-        recordingStartTime = nil
 
         let session = captureSession
         audioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        if let session {
-            captureQueue.sync {
-                if session.isRunning {
-                    session.stopRunning()
-                }
-            }
+        // Barrier: every already accepted PCM callback has returned before finish
+        // can flush the streaming processor. Late output is rejected by identity.
+        captureQueue.sync {
+            if let session, session.isRunning { session.stopRunning() }
+            sampleLock.withLock { acceptingOutput = nil }
         }
 
-        let pcmData = sampleLock.withLock { capturedPCMData }
+        let (pcmData, sampleCount) = sampleLock.withLock { (capturedPCMData, capturedSampleCount) }
+        let durationMs = sampleCount * 1_000 / Int(Self.sampleRate)
         cleanupRecordingState()
 
         guard !pcmData.isEmpty else {
-            return AudioRecordingResult(data: Data(), durationMs: durationMs)
+            return AudioRecordingResult(data: Data(), durationMs: durationMs, sampleCount: sampleCount)
         }
 
         let wavData = WAVAudioEncoder.encodePCM16(
@@ -186,7 +203,7 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
             sampleRate: Int(Self.sampleRate),
             channels: Self.channels
         )
-        return AudioRecordingResult(data: wavData, durationMs: durationMs)
+        return AudioRecordingResult(data: wavData, durationMs: durationMs, sampleCount: sampleCount)
     }
 
     @MainActor
@@ -207,10 +224,10 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
         }
         captureSession = nil
         audioOutput = nil
-        recordingStartTime = nil
         recording = false
         sampleLock.withLock {
-            capturedPCMData.removeAll(keepingCapacity: true)
+            capturedPCMData.removeAll(keepingCapacity: false)
+            capturedSampleCount = 0
             latestLevel = 0
             lastBufferAt = nil
             intervalPeakRMS = 0
@@ -274,7 +291,8 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
         let level = Self.calculateLevel(fromPCM16Data: pcmData)
         let accepted = sampleLock.withLock {
             guard acceptingOutput === output else { return false }
-            if retainsAudio { capturedPCMData.append(pcmData) }
+            capturedSampleCount += pcmData.count / MemoryLayout<Int16>.size
+            if retainFullAudio { capturedPCMData.append(pcmData) }
             latestLevel = level
             lastBufferAt = ProcessInfo.processInfo.systemUptime
             intervalPeakRMS = max(intervalPeakRMS, Self.rms(fromPCM16Data: pcmData))
@@ -380,6 +398,13 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
 struct AudioRecordingResult: Sendable {
     let data: Data
     let durationMs: Int
+    let sampleCount: Int
+
+    init(data: Data, durationMs: Int, sampleCount: Int = 0) {
+        self.data = data
+        self.durationMs = durationMs
+        self.sampleCount = sampleCount
+    }
 
     /// 录音时长是否低于短录音阈值（500ms）
     var isShortRecording: Bool {

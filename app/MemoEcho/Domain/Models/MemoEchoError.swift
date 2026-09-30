@@ -65,8 +65,16 @@ enum MemoEchoError: Error, Equatable, Sendable {
             "云端 ASR 配置未完成，请检查当前平台配置"
         case .cloudASRAuthenticationFailure:
             "云端 ASR 认证失败，请检查当前平台凭据"
-        case .cloudASRNetworkFailure:
-            "云端 ASR 请求失败，请检查网络"
+        case .cloudASRNetworkFailure(let message):
+            // Only fixed internal codes may expand into actionable UI text. Never echo arbitrary server errors.
+            switch message {
+            case "local_network_unavailable":
+                "网络不可用。访问局域网服务时，请在系统设置 → 隐私与安全性 → 本地网络中允许 MemoEcho"
+            case "asr_timeout":
+                "识别请求超时；本地模型首次加载可能较慢，请待服务就绪后重试"
+            default:
+                "云端 ASR 请求失败，请检查网络"
+            }
         case .cloudASREmptyResponse:
             "云端 ASR 返回空结果"
         case .cloudASRInvalidResponse(let detail):

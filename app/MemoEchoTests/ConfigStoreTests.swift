@@ -18,6 +18,180 @@ final class ConfigStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testLegacyVolcengineFileConfigurationAndSuccessRecordSurviveReload() throws {
+        let initial = ConfigStore(configDirectory: tempDirectory)
+        try initial.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "synthetic-model"), apiKey: "synthetic-llm")
+        let configURL = tempDirectory.appendingPathComponent("config.json")
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any])
+        root["asr"] = ["selectedPlatform": "volcengineSentence", "volcengine": ["apiKey": "synthetic-file-key"]]
+        let legacyData = try JSONSerialization.data(withJSONObject: root)
+        try legacyData.write(to: configURL)
+        let state = AppStateStore(directory: tempDirectory)
+        var value = state.value
+        value.verifiedCloudConfigurations["volcengineSentence"] = AppStateStore.fingerprint("volcengineSentence\nsynthetic-file-key")
+        try state.save(value)
+
+        let store = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(store.configLoadFailed)
+        XCTAssertEqual(try Data(contentsOf: configURL), legacyData, "Loading must not rewrite historical settings")
+        XCTAssertEqual(store.asrConfig.selectedPlatform, .volcengineSentence)
+        XCTAssertEqual(store.asrConfig.volcengine.apiKey, "synthetic-file-key")
+        XCTAssertEqual(store.asrConfig.volcengine.fileValidationStatus, .verified)
+        XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .unvalidated)
+        XCTAssertEqual(store.openAIAPIKey, "synthetic-llm")
+        XCTAssertTrue(store.isASRReady)
+        try store.saveASRConfig(store.asrConfig)
+        let reloaded = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(reloaded.configLoadFailed)
+        XCTAssertEqual(reloaded.asrConfig.selectedPlatform, .volcengineSentence)
+        XCTAssertEqual(reloaded.asrConfig.volcengine.apiKey, "synthetic-file-key")
+        XCTAssertEqual(reloaded.openAIAPIKey, "synthetic-llm")
+        XCTAssertEqual(reloaded.llmConfig.model, "synthetic-model")
+        XCTAssertTrue(reloaded.isASRReady)
+    }
+
+    @MainActor
+    func testVolcengineModelVersionDoesNotInvalidateFileButKeyInvalidatesAllThree() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.volcengine.apiKey = "synthetic-key"
+        config.volcengine.modelVersion = .v1
+        config.selectedPlatform = .volcengineSentence
+        try store.saveASRConfig(config)
+        for platform in [ASRPlatform.volcengineSentence, .volcengineRealtime, .volcengineBigModelSentence] {
+            try store.updateCloudValidationState(for: platform, status: .verified)
+        }
+        config = store.asrConfig
+        config.volcengine.modelVersion = .v2
+        try store.saveASRConfig(config)
+        XCTAssertEqual(store.asrConfig.volcengine.fileValidationStatus, .verified)
+        XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.volcengine.bigModelSentenceValidationStatus, .unvalidated)
+        XCTAssertTrue(ConfigStore(configDirectory: tempDirectory).isASRReady)
+
+        for platform in [ASRPlatform.volcengineRealtime, .volcengineBigModelSentence] {
+            try store.updateCloudValidationState(for: platform, status: .verified)
+        }
+        config = store.asrConfig
+        config.volcengine.apiKey = "replacement-key"
+        try store.saveASRConfig(config)
+        XCTAssertEqual(store.asrConfig.volcengine.fileValidationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.volcengine.bigModelSentenceValidationStatus, .unvalidated)
+        XCTAssertFalse(ConfigStore(configDirectory: tempDirectory).isASRReady)
+    }
+
+    @MainActor
+    func testVolcengineFileVerificationNeverMarksWebSocketProductsReady() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.volcengine.apiKey = "synthetic-key"
+        config.selectedPlatform = .volcengineSentence
+        try store.saveASRConfig(config)
+        try store.updateCloudValidationState(for: .volcengineSentence, status: .failed, error: "synthetic-error")
+        XCTAssertEqual(store.asrConfig.volcengine.fileLastValidationError, "synthetic-error")
+        XCTAssertNil(store.asrConfig.volcengine.lastValidationError)
+        try store.updateCloudValidationState(for: .volcengineSentence, status: .verified)
+        let reloaded = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertTrue(reloaded.asrConfig.volcengine.fileState.isReady)
+        XCTAssertFalse(reloaded.asrConfig.volcengine.isReady)
+        XCTAssertFalse(reloaded.asrConfig.volcengine.bigModelSentenceState.isReady)
+    }
+
+    @MainActor
+    func testLegacySentenceSelectionPreservesIATCredentialsButRequiresRealtimeValidation() throws {
+        _ = ConfigStore(configDirectory: tempDirectory)
+        let configURL = tempDirectory.appendingPathComponent("config.json")
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any])
+        root["asr"] = ["selectedPlatform": "xunfeiSentence", "xunfei": ["appID": "synthetic-app", "apiKey": "synthetic-iat", "apiSecret": "synthetic-secret", "realtimeAPIKey": "synthetic-rtasr"]]
+        try JSONSerialization.data(withJSONObject: root).write(to: configURL)
+        let store = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertFalse(store.configLoadFailed)
+        XCTAssertEqual(store.asrConfig.selectedPlatform, .xunfeiIAT)
+        XCTAssertEqual(store.asrConfig.xunfei.apiKey, "synthetic-iat")
+        XCTAssertEqual(store.asrConfig.xunfei.apiSecret, "synthetic-secret")
+        XCTAssertEqual(store.asrConfig.xunfei.realtimeAPIKey, "synthetic-rtasr")
+        XCTAssertFalse(store.isASRReady)
+        try store.updateCloudValidationState(for: .xunfeiIAT, status: .verified)
+        try store.saveASRConfig(store.asrConfig)
+        let reloaded = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(reloaded.asrConfig.selectedPlatform, .xunfeiIAT)
+        XCTAssertTrue(reloaded.isASRReady)
+        XCTAssertEqual(reloaded.asrConfig.xunfei.validationStatus, .unvalidated)
+    }
+
+    @MainActor
+    func testBailianHTTPAndRealtimeConfigurationsPersistSeparately() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.selectedPlatform = .aliyunBailianHTTPASR
+        config.aliyunBailianHTTP = .init(baseURL: "https://example.com/api/v1", apiKey: "synthetic-http", model: "custom-http-model")
+        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "synthetic-wss", model: "custom-realtime-model")
+        try store.saveASRConfig(config)
+        try store.updateCloudValidationState(for: .aliyunBailianHTTPASR, status: .verified)
+        XCTAssertEqual(store.asrConfig.aliyunBailian.validationStatus, .unvalidated)
+        try store.updateCloudValidationState(for: .aliyunBailianASR, status: .verified)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.selectedPlatform, .aliyunBailianHTTPASR)
+        XCTAssertEqual(restored.asrConfig.aliyunBailianHTTP.model, "custom-http-model")
+        XCTAssertEqual(restored.asrConfig.aliyunBailian.model, "custom-realtime-model")
+        XCTAssertTrue(restored.isASRReady)
+        var edited = restored.asrConfig
+        edited.aliyunBailianHTTP.model = "changed-http-model"
+        try restored.saveASRConfig(edited)
+        XCTAssertEqual(restored.asrConfig.aliyunBailianHTTP.validationStatus, .unvalidated)
+        XCTAssertEqual(restored.asrConfig.aliyunBailian.validationStatus, .verified)
+        XCTAssertEqual(ConfigStore(configDirectory: tempDirectory).asrConfig.aliyunBailian.validationStatus, .verified)
+    }
+
+    @MainActor
+    func testSentenceAndRealtimeValidationPersistIndependently() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.tencentCloud.appID = "synthetic-app"
+        config.tencentCloud.secretId = "synthetic-id"
+        config.tencentCloud.secretKey = "synthetic-key"
+        config.selectedPlatform = .tencentCloudSentence
+        try store.saveASRConfig(config)
+        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        XCTAssertEqual(store.asrConfig.tencentCloud.validationStatus, .unvalidated)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
+
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.selectedPlatform, .tencentCloudSentence)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.sentenceValidationStatus, .verified)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.validationStatus, .verified)
+        var edited = restored.asrConfig
+        edited.tencentCloud.appID = "changed-realtime-app"
+        try restored.saveASRConfig(edited)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.sentenceValidationStatus, .verified)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.validationStatus, .unvalidated)
+        edited = restored.asrConfig
+        edited.tencentCloud.secretKey = "changed-shared-key"
+        try restored.saveASRConfig(edited)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.sentenceValidationStatus, .unvalidated)
+        XCTAssertEqual(ConfigStore(configDirectory: tempDirectory).asrConfig.tencentCloud.sentenceValidationStatus, .unvalidated)
+    }
+
+    @MainActor
+    func testEditingIATCredentialsDoesNotInvalidateRTASR() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.xunfei.appID = "synthetic-app"
+        config.xunfei.apiKey = "synthetic-iat"
+        config.xunfei.apiSecret = "synthetic-secret"
+        config.xunfei.realtimeAPIKey = "synthetic-rtasr"
+        try store.saveASRConfig(config)
+        try store.updateCloudValidationState(for: .xunfeiIAT, status: .verified)
+        try store.updateCloudValidationState(for: .xunfeiRealtime, status: .verified)
+        config = store.asrConfig
+        config.xunfei.apiKey = "changed-iat-key"
+        try store.saveASRConfig(config)
+        XCTAssertEqual(store.asrConfig.xunfei.iatValidationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.xunfei.validationStatus, .verified)
+    }
+
+    @MainActor
     func testWindowContextDefaultsOnAndPersistsOffAcrossOtherSaves() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         XCTAssertTrue(store.windowContextEnabled)
@@ -164,40 +338,38 @@ final class ConfigStoreTests: XCTestCase {
     func testSaveAndReloadNewCloudASRConfig() throws {
         let firstStore = ConfigStore(configDirectory: tempDirectory)
         var asrConfig = firstStore.asrConfig
-        asrConfig.selectedPlatform = .volcengineSentence
+        asrConfig.selectedPlatform = .volcengineRealtime
         asrConfig.volcengine.apiKey = "volc-key"
         asrConfig.aliyun.accessKeyId = "ak"
         asrConfig.aliyun.accessKeySecret = "secret"
         asrConfig.aliyun.appKey = "app"
-        asrConfig.xiaomiMiMo.apiKey = "mimo-key"
-        asrConfig.xiaomiMiMoTokenPlan.apiKey = "token-plan-key"
+        asrConfig.openAICompatible = .init(baseURL: "http://localhost:8000/v1", model: "asr")
         try firstStore.saveASRConfig(asrConfig)
-        try firstStore.updateCloudValidationState(for: .volcengineSentence, status: .verified)
-        try firstStore.updateCloudValidationState(for: .xiaomiMiMoASR, status: .verified)
-        try firstStore.updateCloudValidationState(for: .xiaomiMiMoTokenPlanASR, status: .verified)
+        try firstStore.updateCloudValidationState(for: .volcengineRealtime, status: .verified)
+        try firstStore.updateCloudValidationState(for: .openAICompatibleASR, status: .verified)
 
         let secondStore = ConfigStore(configDirectory: tempDirectory)
-        XCTAssertEqual(secondStore.asrConfig.selectedPlatform, .volcengineSentence)
+        XCTAssertEqual(secondStore.asrConfig.selectedPlatform, .volcengineRealtime)
         XCTAssertEqual(secondStore.asrConfig.volcengine.apiKey, "volc-key")
         XCTAssertEqual(secondStore.asrConfig.volcengine.validationStatus, .verified)
         XCTAssertEqual(secondStore.asrConfig.aliyun.accessKeyId, "ak")
         XCTAssertEqual(secondStore.asrConfig.aliyun.accessKeySecret, "secret")
         XCTAssertEqual(secondStore.asrConfig.aliyun.appKey, "app")
-        XCTAssertEqual(secondStore.asrConfig.xiaomiMiMo.apiKey, "mimo-key")
-        XCTAssertEqual(secondStore.asrConfig.xiaomiMiMo.validationStatus, .verified)
-        XCTAssertEqual(secondStore.asrConfig.xiaomiMiMoTokenPlan.apiKey, "token-plan-key")
-        XCTAssertEqual(secondStore.asrConfig.xiaomiMiMoTokenPlan.validationStatus, .verified)
+        XCTAssertEqual(secondStore.asrConfig.openAICompatible.model, "asr")
+        XCTAssertEqual(secondStore.asrConfig.openAICompatible.apiKey, "")
+        XCTAssertEqual(secondStore.asrConfig.openAICompatible.validationStatus, .verified)
     }
 
     @MainActor
     func testChangingCloudCredentialsInvalidatesValidationState() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var asrConfig = store.asrConfig
-        asrConfig.selectedPlatform = .tencentCloudSentence
+        asrConfig.selectedPlatform = .tencentCloudRealtime
+        asrConfig.tencentCloud.appID = "123456"
         asrConfig.tencentCloud.secretId = "secret-id"
         asrConfig.tencentCloud.secretKey = "secret-key"
         try store.saveASRConfig(asrConfig)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
 
         var changedConfig = store.asrConfig
         changedConfig.tencentCloud.secretKey = "new-secret-key"
@@ -284,10 +456,136 @@ final class ConfigStoreTests: XCTestCase {
 
 
     @MainActor
+    func testRealtimeCredentialChangesInvalidateOnlyTheirVerification() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var asr = store.asrConfig
+        asr.tencentCloud.appID = "123456"
+        asr.tencentCloud.secretId = "synthetic-id"
+        asr.tencentCloud.secretKey = "synthetic-secret"
+        asr.xunfei.appID = "synthetic-app"
+        asr.xunfei.realtimeAPIKey = "synthetic-rtasr-key"
+        asr.mimo.apiKey = "synthetic-mimo-key"
+        try store.saveASRConfig(asr)
+        for platform in [ASRPlatform.tencentCloudRealtime, .xunfeiRealtime, .mimoASR] {
+            try store.updateCloudValidationState(for: platform, status: .verified)
+        }
+        var edited = store.asrConfig
+        edited.tencentCloud.appID = "654321"
+        try store.saveASRConfig(edited)
+        XCTAssertEqual(store.asrConfig.tencentCloud.validationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.xunfei.validationStatus, .verified)
+        XCTAssertEqual(store.asrConfig.mimo.validationStatus, .verified)
+        edited = store.asrConfig
+        edited.xunfei.realtimeAPIKey = "changed-rtasr-key"
+        try store.saveASRConfig(edited)
+        XCTAssertEqual(store.asrConfig.xunfei.validationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.mimo.validationStatus, .verified)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.tencentCloud.validationStatus, .unvalidated)
+        XCTAssertEqual(restored.asrConfig.xunfei.validationStatus, .unvalidated)
+        XCTAssertEqual(restored.asrConfig.mimo.validationStatus, .verified)
+    }
+
+    @MainActor
+    func testMiMoConnectionEditsInvalidateIndependentVerification() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var asr = store.asrConfig
+        asr.selectedPlatform = .mimoASR
+        asr.mimo.apiKey = "synthetic-key"
+        asr.openAICompatible = .init(baseURL: "http://localhost:8000/v1", model: "asr")
+        try store.saveASRConfig(asr)
+        try store.updateCloudValidationState(for: .openAICompatibleASR, status: .verified)
+        for field in ["baseURL", "apiKey", "model"] {
+            var reset = store.asrConfig
+            reset.mimo = .init(apiKey: "synthetic-key")
+            try store.saveASRConfig(reset)
+            try store.updateCloudValidationState(for: .mimoASR, status: .verified)
+            XCTAssertTrue(ConfigStore(configDirectory: tempDirectory).isASRReady)
+            var edited = store.asrConfig
+            switch field {
+            case "baseURL": edited.mimo.baseURL = "https://other.example/v1"
+            case "apiKey": edited.mimo.apiKey = "other-key"
+            default: edited.mimo.model = "other-model"
+            }
+            try store.saveASRConfig(edited)
+            XCTAssertEqual(store.asrConfig.mimo.validationStatus, .unvalidated)
+            XCTAssertEqual(store.asrConfig.openAICompatible.validationStatus, .verified)
+            XCTAssertFalse(ConfigStore(configDirectory: tempDirectory).isASRReady)
+        }
+    }
+
+    @MainActor
+    func testVolcengineModelChangeInvalidatesBothLargeModelServices() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.volcengine.apiKey = "synthetic-key"
+        config.volcengine.modelVersion = .v1
+        try store.saveASRConfig(config)
+        for platform in [ASRPlatform.volcengineRealtime, .volcengineBigModelSentence] {
+            try store.updateCloudValidationState(for: platform, status: .verified)
+        }
+        config = store.asrConfig
+        config.volcengine.modelVersion = .v2
+        try store.saveASRConfig(config)
+        XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.volcengine.bigModelSentenceValidationStatus, .unvalidated)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.volcengine.modelVersion, .v2)
+        XCTAssertEqual(restored.asrConfig.volcengine.validationStatus, .unvalidated)
+        XCTAssertEqual(restored.asrConfig.volcengine.bigModelSentenceValidationStatus, .unvalidated)
+    }
+
+    @MainActor
+    func testTraditionalClusterChangesKeepTheOtherServiceIdentity() throws {
+        let store = ConfigStore(configDirectory: tempDirectory)
+        var config = store.asrConfig
+        config.volcengineTraditional = .init(appID: "app", accessToken: "synthetic-token", sentenceCluster: "short", realtimeCluster: "stream")
+        try store.saveASRConfig(config)
+        try store.updateCloudValidationState(for: .volcengineTraditionalSentence, status: .verified)
+        try store.updateCloudValidationState(for: .volcengineTraditionalRealtime, status: .verified)
+        config = store.asrConfig
+        let previous = CloudASRValidationInput(platform: .volcengineTraditionalRealtime, asrConfig: store.asrConfig).fingerprint
+        let short = CloudASRValidationInput(platform: .volcengineTraditionalSentence, asrConfig: store.asrConfig).fingerprint
+        config.volcengineTraditional.sentenceCluster = "other-short"
+        try store.saveASRConfig(config)
+        XCTAssertEqual(store.asrConfig.volcengineTraditional.sentenceValidationStatus, .unvalidated)
+        XCTAssertEqual(store.asrConfig.volcengineTraditional.realtimeValidationStatus, .verified)
+        XCTAssertEqual(CloudASRValidationInput(platform: .volcengineTraditionalRealtime, asrConfig: store.asrConfig).fingerprint, previous)
+        XCTAssertNotEqual(CloudASRValidationInput(platform: .volcengineTraditionalSentence, asrConfig: store.asrConfig).fingerprint, short)
+        let restored = ConfigStore(configDirectory: tempDirectory)
+        XCTAssertEqual(restored.asrConfig.volcengineTraditional.sentenceCluster, "other-short")
+        XCTAssertEqual(restored.asrConfig.volcengineTraditional.realtimeCluster, "stream")
+        XCTAssertEqual(restored.asrConfig.volcengineTraditional.accessToken, "synthetic-token")
+    }
+
+    @MainActor
+    func testTraditionalSharedCredentialsInvalidateBothProductsOnly() throws {
+        for field in ["appID", "accessToken"] {
+            let store = ConfigStore(configDirectory: tempDirectory.appendingPathComponent(field))
+            var config = store.asrConfig
+            config.volcengine.apiKey = "large-model-key"
+            config.volcengineTraditional = .init(appID: "app", accessToken: "synthetic-token",
+                sentenceCluster: "short", realtimeCluster: "stream")
+            try store.saveASRConfig(config)
+            for platform in [ASRPlatform.volcengineTraditionalSentence, .volcengineTraditionalRealtime, .volcengineRealtime] {
+                try store.updateCloudValidationState(for: platform, status: .verified)
+            }
+            config = store.asrConfig
+            if field == "appID" { config.volcengineTraditional.appID = "other-app" }
+            else { config.volcengineTraditional.accessToken = "other-token" }
+            try store.saveASRConfig(config)
+            XCTAssertEqual(store.asrConfig.volcengineTraditional.sentenceValidationStatus, .unvalidated)
+            XCTAssertEqual(store.asrConfig.volcengineTraditional.realtimeValidationStatus, .unvalidated)
+            XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .verified)
+        }
+    }
+
+    @MainActor
     func testFilesSeparateSettingsCredentialsAndDurableState() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         try store.saveLLMConfig(.init(baseURL: "https://example.com/v1", model: "test"), apiKey: "synthetic-llm-secret")
         var asr = store.asrConfig
+        asr.tencentCloud.appID = "123456"
         asr.tencentCloud.secretId = "synthetic-id"
         asr.tencentCloud.secretKey = "synthetic-asr-secret"
         asr.aliyun.accessKeyId = "partially-filled"
@@ -295,7 +593,7 @@ final class ConfigStoreTests: XCTestCase {
         let before = try Data(contentsOf: tempDirectory.appendingPathComponent("config.json"))
         try store.saveOnboardingProgress(.init(lastVisitedStep: .llm))
         try store.markThinkingParameterUnsupported(for: store.llmConfig, apiKey: store.openAIAPIKey)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
         store.updateLocalModelStatus(.downloading)
         XCTAssertEqual(try Data(contentsOf: tempDirectory.appendingPathComponent("config.json")), before)
         let settings = try XCTUnwrap(JSONSerialization.jsonObject(with: before) as? [String: Any])
@@ -329,8 +627,8 @@ final class ConfigStoreTests: XCTestCase {
         try store.saveASRConfig(asr)
         let configBefore = try Data(contentsOf: tempDirectory.appendingPathComponent("config.json"))
         for status in [CloudASRValidationStatus.validating, .failed] {
-            try store.updateCloudValidationState(for: .volcengineSentence, status: .verified)
-            try store.updateCloudValidationState(for: .volcengineSentence, status: status, error: "synthetic error")
+            try store.updateCloudValidationState(for: .volcengineRealtime, status: .verified)
+            try store.updateCloudValidationState(for: .volcengineRealtime, status: status, error: "synthetic error")
             store.updateLocalModelStatus(.downloading, error: "synthetic download error")
             let restored = ConfigStore(configDirectory: tempDirectory)
             XCTAssertEqual(restored.asrConfig.volcengine.validationStatus, .unvalidated)
@@ -366,7 +664,7 @@ final class ConfigStoreTests: XCTestCase {
         var asr = store.asrConfig
         asr.volcengine.apiKey = "original"
         try store.saveASRConfig(asr)
-        try store.updateCloudValidationState(for: .volcengineSentence, status: .verified)
+        try store.updateCloudValidationState(for: .volcengineRealtime, status: .verified)
         let url = tempDirectory.appendingPathComponent("config.json")
         var json = try String(contentsOf: url, encoding: .utf8)
         json = json.replacingOccurrences(of: "original", with: "different")
@@ -431,7 +729,7 @@ final class ConfigStoreTests: XCTestCase {
         try FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         store.updateLocalModelStatus(.failed, error: "download failed")
-        try store.updateCloudValidationState(for: .volcengineSentence, status: .validating)
+        try store.updateCloudValidationState(for: .volcengineRealtime, status: .validating)
         try store.saveOnboardingProgress(.init(lastVisitedStep: .llm))
         XCTAssertEqual(store.asrConfig.local.modelStatus, .failed)
         XCTAssertEqual(store.asrConfig.volcengine.validationStatus, .validating)

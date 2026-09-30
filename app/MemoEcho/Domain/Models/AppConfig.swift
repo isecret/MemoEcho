@@ -14,47 +14,87 @@ struct LLMConfig: Codable, Equatable, Sendable {
 enum ASRPlatform: String, Codable, Equatable, Sendable, CaseIterable {
     case localSenseVoice = "localSenseVoice"
     case tencentCloudSentence = "tencentCloudSentence"
+    case tencentCloudRealtime = "tencentCloudRealtime"
     case aliyunSentence = "aliyunSentence"
+    case aliyunRealtime = "aliyunRealtime"
+    case aliyunBailianHTTPASR = "aliyunBailianHTTPASR"
+    case aliyunBailianASR = "aliyunBailianASR"
+    case volcengineRealtime = "volcengineRealtime"
+    case volcengineBigModelSentence = "volcengineBigModelSentence"
     case volcengineSentence = "volcengineSentence"
-    case xunfeiSentence = "xunfeiSentence"
-    case xiaomiMiMoASR = "xiaomiMiMoASR"
-    case xiaomiMiMoTokenPlanASR = "xiaomiMiMoTokenPlanASR"
+    case volcengineTraditionalSentence = "volcengineTraditionalSentence"
+    case volcengineTraditionalRealtime = "volcengineTraditionalRealtime"
+    case xunfeiIAT = "xunfeiIAT"
+    case xunfeiRealtime = "xunfeiRealtime"
+    case openAICompatibleASR = "openAICompatibleASR"
+    case mimoASR = "mimoASR"
+
+    var isRealtime: Bool {
+        switch self {
+        case .tencentCloudRealtime, .aliyunRealtime, .aliyunBailianASR, .volcengineRealtime, .volcengineBigModelSentence, .volcengineTraditionalSentence, .volcengineTraditionalRealtime, .xunfeiIAT, .xunfeiRealtime: true
+        default: false
+        }
+    }
 
     var displayName: String {
         switch self {
         case .localSenseVoice:
-            "本地 SenseVoice"
+            "本地 · SenseVoice"
         case .tencentCloudSentence:
-            "腾讯云"
+            "腾讯云 · 一句话识别"
+        case .tencentCloudRealtime:
+            "腾讯云 · 实时语音识别"
         case .aliyunSentence:
-            "阿里云"
+            "阿里云 · 一句话识别"
+        case .aliyunRealtime:
+            "阿里云 · 实时语音识别"
+        case .aliyunBailianHTTPASR:
+            "阿里云 · 百炼语音识别"
+        case .aliyunBailianASR:
+            "阿里云 · 百炼实时语音识别"
+        case .volcengineRealtime:
+            "火山引擎 · 大模型流式语音识别"
+        case .volcengineBigModelSentence:
+            "火山引擎 · 大模型一句话识别"
         case .volcengineSentence:
-            "火山引擎"
-        case .xunfeiSentence:
-            "科大讯飞"
-        case .xiaomiMiMoASR:
-            "小米 MiMo"
-        case .xiaomiMiMoTokenPlanASR:
-            "小米 MiMo（Token Plan）"
+            "火山引擎 · 录音文件极速版"
+        case .volcengineTraditionalSentence:
+            "火山引擎 · 一句话识别"
+        case .volcengineTraditionalRealtime:
+            "火山引擎 · 流式语音识别"
+        case .xunfeiIAT:
+            "科大讯飞 · 语音听写"
+        case .xunfeiRealtime:
+            "科大讯飞 · 实时语音转写"
+        case .mimoASR:
+            "小米 · MiMo"
+        case .openAICompatibleASR:
+            "OpenAI 兼容"
         }
     }
 
     var cloudConfigSummary: String {
         switch self {
         case .localSenseVoice:
-            "语音在本机识别，不会发送到云端语音识别服务。"
-        case .tencentCloudSentence:
-            "语音会发送到腾讯云一句话识别服务。"
-        case .aliyunSentence:
-            "语音会发送到阿里云语音识别服务。"
+            "语音在本机识别，转写文本由 AI 整理。"
+        case .tencentCloudSentence, .aliyunSentence, .mimoASR:
+            "音频会发送到所选服务，识别后由 AI 整理。"
+        case .tencentCloudRealtime, .aliyunRealtime:
+            "录音时会上传音频，请先开通对应的实时识别服务。"
+        case .aliyunBailianHTTPASR:
+            "音频会上传到百炼。地址可填 /api/v1 或完整接口地址。"
+        case .aliyunBailianASR:
+            "录音时会上传音频，模型需支持当前百炼实时接口。"
+        case .volcengineRealtime, .volcengineBigModelSentence:
+            "录音时会上传音频，请开通所选模型版本对应的服务。"
         case .volcengineSentence:
-            "语音会发送到火山引擎语音识别服务。"
-        case .xunfeiSentence:
-            "语音会发送到科大讯飞语音识别服务。"
-        case .xiaomiMiMoASR:
-            "语音会发送到小米 MiMo 语音识别服务。"
-        case .xiaomiMiMoTokenPlanASR:
-            "语音会发送到小米 MiMo Token Plan 语音识别服务。"
+            "音频分段上传到火山引擎，识别后由 AI 整理。"
+        case .volcengineTraditionalSentence, .volcengineTraditionalRealtime:
+            "录音时会上传音频，请开通所选的语音识别服务。"
+        case .xunfeiIAT, .xunfeiRealtime:
+            "录音时会上传音频。语音听写与实时语音转写的 API Key 不能混用。"
+        case .openAICompatibleASR:
+            "音频会发送到所选服务。使用 Audio Transcriptions，地址通常以 /v1 结尾。"
         }
     }
 
@@ -64,16 +104,34 @@ enum ASRPlatform: String, Codable, Equatable, Sendable, CaseIterable {
             URL(string: "https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html")!
         case .tencentCloudSentence:
             URL(string: "https://cloud.tencent.com/document/product/1093/35646")!
+        case .tencentCloudRealtime:
+            URL(string: "https://cloud.tencent.com/document/product/1093/48982")!
         case .aliyunSentence:
             URL(string: "https://help.aliyun.com/zh/isi/developer-reference/short-sentence-recognition")!
+        case .aliyunRealtime:
+            URL(string: "https://help.aliyun.com/zh/isi/developer-reference/real-time-speech-recognition")!
+        case .aliyunBailianHTTPASR:
+            URL(string: "https://help.aliyun.com/zh/model-studio/fun-asr-flash-recorded-speech-recognition-http-api")!
+        case .aliyunBailianASR:
+            URL(string: "https://help.aliyun.com/zh/model-studio/paraformer-real-time-speech-recognition")!
+        case .volcengineRealtime:
+            URL(string: "https://docs.volcengine.com/docs/DoubaoVoice/LargemodelstreamingautomaticspeechrecognitionAPI?lang=zh")!
+        case .volcengineBigModelSentence:
+            URL(string: "https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-automatic-speech-recognition-websocket?lang=zh")!
         case .volcengineSentence:
-            URL(string: "https://www.volcengine.com/docs/6561/1257584")!
-        case .xunfeiSentence:
+            URL(string: "https://docs.volcengine.com/docs/DoubaoVoice/recording-file-recognition-lite-http?lang=zh")!
+        case .volcengineTraditionalSentence:
+            URL(string: "https://docs.volcengine.com/docs/DoubaoVoice/One-sentencerecognition?lang=zh")!
+        case .volcengineTraditionalRealtime:
+            URL(string: "https://docs.volcengine.com/docs/DoubaoVoice/Streamingautomaticspeechrecognition?lang=zh")!
+        case .xunfeiIAT:
             URL(string: "https://www.xfyun.cn/doc/asr/voicedictation/API.html")!
-        case .xiaomiMiMoASR:
-            URL(string: "https://platform.xiaomimimo.com/docs/zh-CN/api/audio/Speech-Recognition")!
-        case .xiaomiMiMoTokenPlanASR:
-            URL(string: "https://platform.xiaomimimo.com/docs/zh-CN/api/audio/Speech-Recognition")!
+        case .xunfeiRealtime:
+            URL(string: "https://www.xfyun.cn/doc/asr/rtasr/API.html")!
+        case .mimoASR:
+            URL(string: "https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition")!
+        case .openAICompatibleASR:
+            URL(string: "https://github.com/isecret/MemoEcho/blob/main/docs/USAGE.md#openai-兼容")!
         }
     }
 }
@@ -84,39 +142,51 @@ struct ASRConfig: Codable, Equatable, Sendable {
     var local: LocalASRConfig = LocalASRConfig()
     var tencentCloud: TencentASRConfig = TencentASRConfig()
     var aliyun: AliyunASRConfig = AliyunASRConfig()
+    var aliyunBailianHTTP = AliyunBailianHTTPASRConfig()
+    var aliyunBailian = AliyunBailianASRConfig()
     var volcengine: VolcengineASRConfig = VolcengineASRConfig()
+    var volcengineTraditional = VolcengineTraditionalASRConfig()
     var xunfei: XunfeiASRConfig = XunfeiASRConfig()
-    var xiaomiMiMo: XiaomiMiMoASRConfig = XiaomiMiMoASRConfig()
-    var xiaomiMiMoTokenPlan: XiaomiMiMoASRConfig = XiaomiMiMoASRConfig()
+    var openAICompatible = OpenAICompatibleASRConfig()
+    var mimo = MiMoASRConfig()
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case selectedPlatform, local, tencentCloud, aliyun, volcengine, xunfei, xiaomiMiMo, xiaomiMiMoTokenPlan
+        case selectedPlatform, local, tencentCloud, aliyun, aliyunBailian, aliyunBailianHTTP, volcengine, volcengineTraditional, xunfei, openAICompatible, mimo
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        selectedPlatform = try container.decode(ASRPlatform.self, forKey: .selectedPlatform)
+        let platform = try container.decode(String.self, forKey: .selectedPlatform)
+        if platform == "xunfeiSentence" { selectedPlatform = .xunfeiIAT }
+        else if let current = ASRPlatform(rawValue: platform) { selectedPlatform = current }
+        else { throw DecodingError.dataCorruptedError(forKey: .selectedPlatform, in: container, debugDescription: "Unsupported ASR platform") }
+        mimo = try container.decodeIfPresent(MiMoASRConfig.self, forKey: .mimo) ?? MiMoASRConfig()
         local = try container.decodeIfPresent(LocalASRConfig.self, forKey: .local) ?? LocalASRConfig()
         tencentCloud = try container.decodeIfPresent(TencentASRConfig.self, forKey: .tencentCloud) ?? TencentASRConfig()
         aliyun = try container.decodeIfPresent(AliyunASRConfig.self, forKey: .aliyun) ?? AliyunASRConfig()
+        aliyunBailianHTTP = try container.decodeIfPresent(AliyunBailianHTTPASRConfig.self, forKey: .aliyunBailianHTTP) ?? AliyunBailianHTTPASRConfig()
+        aliyunBailian = try container.decodeIfPresent(AliyunBailianASRConfig.self, forKey: .aliyunBailian) ?? AliyunBailianASRConfig()
         volcengine = try container.decodeIfPresent(VolcengineASRConfig.self, forKey: .volcengine) ?? VolcengineASRConfig()
+        volcengineTraditional = try container.decodeIfPresent(VolcengineTraditionalASRConfig.self, forKey: .volcengineTraditional) ?? VolcengineTraditionalASRConfig()
         xunfei = try container.decodeIfPresent(XunfeiASRConfig.self, forKey: .xunfei) ?? XunfeiASRConfig()
-        xiaomiMiMo = try container.decodeIfPresent(XiaomiMiMoASRConfig.self, forKey: .xiaomiMiMo) ?? XiaomiMiMoASRConfig()
-        xiaomiMiMoTokenPlan = try container.decodeIfPresent(XiaomiMiMoASRConfig.self, forKey: .xiaomiMiMoTokenPlan) ?? XiaomiMiMoASRConfig()
+        openAICompatible = try container.decodeIfPresent(OpenAICompatibleASRConfig.self, forKey: .openAICompatible) ?? OpenAICompatibleASRConfig()
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(selectedPlatform, forKey: .selectedPlatform)
+        if mimo.hasUserConfiguration { try container.encode(mimo, forKey: .mimo) }
         if let source = local.mirrorSource, !source.isEmpty { try container.encode(local, forKey: .local) }
-        if !tencentCloud.secretId.isEmpty || !tencentCloud.secretKey.isEmpty { try container.encode(tencentCloud, forKey: .tencentCloud) }
+        if !tencentCloud.appID.isEmpty || !tencentCloud.secretId.isEmpty || !tencentCloud.secretKey.isEmpty { try container.encode(tencentCloud, forKey: .tencentCloud) }
         if !aliyun.accessKeyId.isEmpty || !aliyun.accessKeySecret.isEmpty || !aliyun.appKey.isEmpty { try container.encode(aliyun, forKey: .aliyun) }
-        if !volcengine.apiKey.isEmpty { try container.encode(volcengine, forKey: .volcengine) }
-        if !xunfei.appID.isEmpty || !xunfei.apiKey.isEmpty || !xunfei.apiSecret.isEmpty { try container.encode(xunfei, forKey: .xunfei) }
-        if !xiaomiMiMo.apiKey.isEmpty { try container.encode(xiaomiMiMo, forKey: .xiaomiMiMo) }
-        if !xiaomiMiMoTokenPlan.apiKey.isEmpty { try container.encode(xiaomiMiMoTokenPlan, forKey: .xiaomiMiMoTokenPlan) }
+        if aliyunBailianHTTP.hasUserConfiguration { try container.encode(aliyunBailianHTTP, forKey: .aliyunBailianHTTP) }
+        if aliyunBailian.hasUserConfiguration { try container.encode(aliyunBailian, forKey: .aliyunBailian) }
+        if volcengine.hasUserConfiguration { try container.encode(volcengine, forKey: .volcengine) }
+        if volcengineTraditional.hasUserConfiguration { try container.encode(volcengineTraditional, forKey: .volcengineTraditional) }
+        if !xunfei.realtimeAPIKey.isEmpty || !xunfei.appID.isEmpty || !xunfei.apiKey.isEmpty || !xunfei.apiSecret.isEmpty { try container.encode(xunfei, forKey: .xunfei) }
+        if openAICompatible.hasUserConfiguration { try container.encode(openAICompatible, forKey: .openAICompatible) }
     }
 
     func isReady(localModelsAvailable: Bool) -> Bool {
@@ -124,17 +194,35 @@ struct ASRConfig: Codable, Equatable, Sendable {
         case .localSenseVoice:
             return localModelsAvailable
         case .tencentCloudSentence:
+            return tencentCloud.sentenceState.isReady
+        case .tencentCloudRealtime:
             return tencentCloud.isReady
         case .aliyunSentence:
+            return aliyun.sentenceState.isReady
+        case .aliyunRealtime:
             return aliyun.isReady
-        case .volcengineSentence:
+        case .aliyunBailianHTTPASR:
+            return aliyunBailianHTTP.isReady
+        case .aliyunBailianASR:
+            return aliyunBailian.isReady
+        case .volcengineRealtime:
             return volcengine.isReady
-        case .xunfeiSentence:
+        case .volcengineBigModelSentence:
+            return volcengine.bigModelSentenceState.isReady
+        case .volcengineSentence:
+            return volcengine.fileState.isReady
+        case .volcengineTraditionalSentence:
+            return volcengineTraditional.sentenceState.isReady
+        case .volcengineTraditionalRealtime:
+            return volcengineTraditional.realtimeState.isReady
+        case .xunfeiIAT:
+            return xunfei.iatState.isReady
+        case .xunfeiRealtime:
             return xunfei.isReady
-        case .xiaomiMiMoASR:
-            return xiaomiMiMo.isReady
-        case .xiaomiMiMoTokenPlanASR:
-            return xiaomiMiMoTokenPlan.isReady
+        case .mimoASR:
+            return mimo.isReady
+        case .openAICompatibleASR:
+            return openAICompatible.isReady
         }
     }
 
@@ -145,17 +233,35 @@ struct ASRConfig: Codable, Equatable, Sendable {
         case .localSenseVoice:
             return "本地模型未下载，请在设置页下载"
         case .tencentCloudSentence:
+            return tencentCloud.sentenceState.notReadyReason(platformName: "腾讯云一句话")
+        case .tencentCloudRealtime:
             return tencentCloud.notReadyReason(platformName: "腾讯云")
         case .aliyunSentence:
+            return aliyun.sentenceState.notReadyReason(platformName: "阿里云一句话")
+        case .aliyunRealtime:
             return aliyun.notReadyReason(platformName: "阿里云")
-        case .volcengineSentence:
+        case .aliyunBailianHTTPASR:
+            return aliyunBailianHTTP.notReadyReason(platformName: "阿里云百炼语音识别")
+        case .aliyunBailianASR:
+            return aliyunBailian.notReadyReason(platformName: "阿里云百炼")
+        case .volcengineRealtime:
             return volcengine.notReadyReason(platformName: "火山引擎")
-        case .xunfeiSentence:
+        case .volcengineBigModelSentence:
+            return volcengine.bigModelSentenceState.notReadyReason(platformName: "火山引擎大模型一句话")
+        case .volcengineSentence:
+            return volcengine.fileState.notReadyReason(platformName: "火山引擎录音文件极速版")
+        case .volcengineTraditionalSentence:
+            return volcengineTraditional.sentenceState.notReadyReason(platformName: "火山引擎传统一句话")
+        case .volcengineTraditionalRealtime:
+            return volcengineTraditional.realtimeState.notReadyReason(platformName: "火山引擎传统实时")
+        case .xunfeiIAT:
+            return xunfei.iatState.notReadyReason(platformName: "科大讯飞语音听写")
+        case .xunfeiRealtime:
             return xunfei.notReadyReason(platformName: "科大讯飞")
-        case .xiaomiMiMoASR:
-            return xiaomiMiMo.notReadyReason(platformName: "小米 MiMo")
-        case .xiaomiMiMoTokenPlanASR:
-            return xiaomiMiMoTokenPlan.notReadyReason(platformName: "小米 MiMo（Token Plan）")
+        case .mimoASR:
+            return mimo.notReadyReason(platformName: "小米 MiMo")
+        case .openAICompatibleASR:
+            return openAICompatible.notReadyReason(platformName: "OpenAI 兼容")
         }
     }
 }
@@ -239,25 +345,35 @@ struct LocalASRConfig: Codable, Equatable, Sendable {
     }
 }
 
-/// 腾讯云一句话识别配置
+/// 腾讯云实时识别配置
 struct TencentASRConfig: Codable, Equatable, Sendable {
     // Persist user input only; status and errors belong to the current process.
-    private enum CodingKeys: String, CodingKey { case secretId, secretKey }
+    private enum CodingKeys: String, CodingKey { case appID, secretId, secretKey }
 
+    var appID: String = ""
     var secretId: String = ""
     var secretKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
     var lastValidationError: String?
+    var sentenceValidationStatus: CloudASRValidationStatus = .unvalidated
+    var sentenceLastValidationError: String?
 
     init() {}
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        appID = try c.decodeIfPresent(String.self, forKey: .appID) ?? ""
+        secretId = try c.decodeIfPresent(String.self, forKey: .secretId) ?? ""
+        secretKey = try c.decodeIfPresent(String.self, forKey: .secretKey) ?? ""
+    }
+
     var isComplete: Bool {
-        !secretId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !appID.isEmpty && appID.allSatisfy(\.isNumber) && !secretId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !secretKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
-/// 阿里云一句话识别配置
+/// 阿里云智能语音交互实时识别配置
 struct AliyunASRConfig: Codable, Equatable, Sendable {
     // Persist user input only; status and errors belong to the current process.
     private enum CodingKeys: String, CodingKey { case accessKeyId, accessKeySecret, appKey }
@@ -267,6 +383,8 @@ struct AliyunASRConfig: Codable, Equatable, Sendable {
     var appKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
     var lastValidationError: String?
+    var sentenceValidationStatus: CloudASRValidationStatus = .unvalidated
+    var sentenceLastValidationError: String?
 
 
     init() {}
@@ -279,67 +397,86 @@ struct AliyunASRConfig: Codable, Equatable, Sendable {
     }
 }
 
-/// 火山引擎文件识别配置
-struct VolcengineASRConfig: Codable, Equatable, Sendable {
-    // Persist user input only; status and errors belong to the current process.
-    private enum CodingKeys: String, CodingKey { case apiKey }
-
-    var apiKey: String = ""
-    var validationStatus: CloudASRValidationStatus = .unvalidated
-    var lastValidationError: String?
-
-
-    init() {}
-
-
-    var isComplete: Bool {
-        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+enum VolcengineASRModelVersion: String, Codable, CaseIterable, Sendable {
+    case v2 = "2.0"
+    case v1 = "1.0"
+    var resourceID: String {
+        switch self {
+        case .v1: "volc.bigasr.sauc.duration"
+        case .v2: "volc.seedasr.sauc.duration"
+        }
     }
 }
 
-/// 科大讯飞语音听写配置
+/// File and large-model WebSocket services share credentials, but never verification state.
+struct VolcengineASRConfig: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey { case apiKey, modelVersion }
+    var apiKey = ""
+    var modelVersion: VolcengineASRModelVersion = .v2
+    var validationStatus: CloudASRValidationStatus = .unvalidated
+    var lastValidationError: String?
+    var bigModelSentenceValidationStatus: CloudASRValidationStatus = .unvalidated
+    var bigModelSentenceValidationError: String?
+    var fileValidationStatus: CloudASRValidationStatus = .unvalidated
+    var fileLastValidationError: String?
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        apiKey = try values.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        modelVersion = try values.decodeIfPresent(VolcengineASRModelVersion.self, forKey: .modelVersion) ?? .v2
+    }
+    var isComplete: Bool {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !key.isEmpty && key.rangeOfCharacter(from: .controlCharacters) == nil
+    }
+    var hasUserConfiguration: Bool { !apiKey.isEmpty || modelVersion != .v2 }
+    var fileState: SentenceASRState {
+        .init(isComplete: isComplete, validationStatus: fileValidationStatus,
+              lastValidationError: fileLastValidationError, requiredFields: " API Key")
+    }
+    var bigModelSentenceState: SentenceASRState {
+        .init(isComplete: isComplete, validationStatus: bigModelSentenceValidationStatus,
+              lastValidationError: bigModelSentenceValidationError, requiredFields: " API Key")
+    }
+}
+
+/// 讯飞 IAT 与 RTASR 使用各自产品的凭据和验证状态。
 struct XunfeiASRConfig: Codable, Equatable, Sendable {
     // Persist user input only; status and errors belong to the current process.
-    private enum CodingKeys: String, CodingKey { case appID, apiKey, apiSecret }
+    private enum CodingKeys: String, CodingKey { case appID, apiKey, apiSecret, realtimeAPIKey }
 
     var appID: String = ""
     var apiKey: String = ""
     var apiSecret: String = ""
+    var realtimeAPIKey: String = ""
     var validationStatus: CloudASRValidationStatus = .unvalidated
     var lastValidationError: String?
+    var iatValidationStatus: CloudASRValidationStatus = .unvalidated
+    var iatLastValidationError: String?
 
 
     init() {}
 
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        appID = try c.decodeIfPresent(String.self, forKey: .appID) ?? ""
+        apiKey = try c.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        apiSecret = try c.decodeIfPresent(String.self, forKey: .apiSecret) ?? ""
+        realtimeAPIKey = try c.decodeIfPresent(String.self, forKey: .realtimeAPIKey) ?? ""
+    }
 
     var isComplete: Bool {
         !appID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !apiSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !realtimeAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
-/// 小米 MiMo ASR 配置
-struct XiaomiMiMoASRConfig: Codable, Equatable, Sendable {
-    // Persist user input only; status and errors belong to the current process.
-    private enum CodingKeys: String, CodingKey { case apiKey }
-
-    var apiKey: String = ""
-    var validationStatus: CloudASRValidationStatus = .unvalidated
-    var lastValidationError: String?
-
-
-    init() {}
-
-
-    var isComplete: Bool {
-        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
 
 extension TencentASRConfig: CloudASRConfigState {
     func incompleteReason(platformName: String) -> String {
-        "\(platformName) ASR 配置不完整，请填写 SecretId 和 SecretKey"
+        "\(platformName) ASR 配置不完整，请填写 AppID、SecretId 和 SecretKey"
     }
 }
 
@@ -357,15 +494,10 @@ extension VolcengineASRConfig: CloudASRConfigState {
 
 extension XunfeiASRConfig: CloudASRConfigState {
     func incompleteReason(platformName: String) -> String {
-        "\(platformName) ASR 配置不完整，请填写 AppID、API Key 和 API Secret"
+        "\(platformName) ASR 配置不完整，请填写 AppID 和实时转写 RTASR API Key"
     }
 }
 
-extension XiaomiMiMoASRConfig: CloudASRConfigState {
-    func incompleteReason(platformName: String) -> String {
-        "\(platformName) ASR 配置不完整，请填写 API Key"
-    }
-}
 
 // MARK: - 通用配置
 
@@ -743,4 +875,77 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         }
     }
 
+}
+
+
+/// A service-specific view over shared credentials, with independent validation state.
+struct SentenceASRState: CloudASRConfigState {
+    let isComplete: Bool
+    var validationStatus: CloudASRValidationStatus
+    var lastValidationError: String?
+    let requiredFields: String
+    func incompleteReason(platformName: String) -> String {
+        "\(platformName) ASR 配置不完整，请填写\(requiredFields)"
+    }
+}
+
+extension TencentASRConfig {
+    var sentenceState: SentenceASRState {
+        .init(isComplete: !secretId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !secretKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              validationStatus: sentenceValidationStatus, lastValidationError: sentenceLastValidationError,
+              requiredFields: " SecretId 和 SecretKey")
+    }
+}
+extension AliyunASRConfig {
+    var sentenceState: SentenceASRState {
+        .init(isComplete: isComplete, validationStatus: sentenceValidationStatus,
+              lastValidationError: sentenceLastValidationError, requiredFields: " AccessKey ID、AccessKey Secret 和 AppKey")
+    }
+}
+extension XunfeiASRConfig {
+    var iatState: SentenceASRState {
+        .init(isComplete: !appID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !apiSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              validationStatus: iatValidationStatus, lastValidationError: iatLastValidationError,
+              requiredFields: " AppID、IAT API Key 和 API Secret")
+    }
+}
+
+enum ASRVendorGroup: String, CaseIterable, Identifiable {
+    case local = "本地", tencent = "腾讯云", aliyun = "阿里云", volcengine = "火山引擎"
+    case xunfei = "科大讯飞", xiaomi = "小米", custom = "自定义"
+    var id: String { rawValue }
+    var platforms: [ASRPlatform] {
+        switch self {
+        case .tencent:
+            return [.tencentCloudRealtime, .tencentCloudSentence]
+        case .aliyun:
+            return [.aliyunBailianASR, .aliyunBailianHTTPASR, .aliyunRealtime, .aliyunSentence]
+        case .volcengine:
+            return [.volcengineRealtime, .volcengineBigModelSentence,
+                    .volcengineSentence,
+                    .volcengineTraditionalRealtime, .volcengineTraditionalSentence]
+        case .xunfei:
+            return [.xunfeiRealtime, .xunfeiIAT]
+        default:
+            return ASRPlatform.allCases.filter { $0.vendorGroup == self }
+        }
+    }
+}
+
+extension ASRPlatform {
+    var vendorGroup: ASRVendorGroup {
+        switch self {
+        case .localSenseVoice: .local
+        case .tencentCloudSentence, .tencentCloudRealtime: .tencent
+        case .aliyunSentence, .aliyunRealtime, .aliyunBailianHTTPASR, .aliyunBailianASR: .aliyun
+        case .volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence, .volcengineTraditionalSentence, .volcengineTraditionalRealtime: .volcengine
+        case .xunfeiIAT, .xunfeiRealtime: .xunfei
+        case .mimoASR: .xiaomi
+        case .openAICompatibleASR: .custom
+        }
+    }
+    var pickerTitle: String { displayName }
 }

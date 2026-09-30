@@ -19,7 +19,7 @@
 - UI：SwiftUI
 - 系统交互：AppKit
 - 架构：MVVM + Service Layer
-- ASR：本地 SenseVoice 离线识别 / 腾讯云一句话识别（用户手动选择）
+- ASR：本地 SenseVoice；云厂商实时与既有分段入口并存，火山保留录音文件极速版；OpenAI 兼容 Audio Transcriptions；独立 MiMo Chat 音频协议（Issue #7 实施中）
 - LLM：OpenAI Chat Completions 兼容接口
 - 音频格式：PCM/WAV 16k mono
 - 配置存储：~/.memoecho/config.json（UTF-8 JSON）
@@ -66,7 +66,8 @@ AGENTS.md
 - 按一次开始录音，再按一次结束录音
 - 录音期间基于静音检测自动切段，单段上限 55 秒，分段串行 ASR
 - 本地 SenseVoice 离线语音识别（模型外置到用户目录）
-- 腾讯云一句话识别（用户手动选择）
+- 五个云厂商原生实时语音服务与已恢复的分段识别入口（用户手动选择），不自动回退或映射服务
+- OpenAI 兼容 Audio Transcriptions 与独立 MiMo 非实时识别
 - OpenAI 兼容 LLM 润色（必须成功后才注入）
 - LLM 翻译模式
 - 文本注入
@@ -76,7 +77,7 @@ AGENTS.md
 除非用户明确提出，否则以下内容不在范围内：
 
 - macOS 系统级输入法
-- 实时流式识别
+- 实时识别中间文字预览
 - 多种 LLM 协议
 - 自定义 Prompt
 - 风格模式切换
@@ -85,6 +86,8 @@ AGENTS.md
 - Agent 工作流扩展
 
 ## 核心行为约束
+
+Issue #7 正在实施。以下静音切段、55 秒上限及分段串行 ASR 用于 SenseVoice、OpenAI 兼容 HTTP、MiMo、腾讯／阿里一句话、百炼 HTTP 和火山录音文件极速版；云厂商 WebSocket 入口在录音期间连续处理 PCM，不能套用分段请求队列。火山文件入口保留历史标识与配置，不做服务映射。详细边界见 `docs/plans/realtime-asr.md`、`docs/plans/volcengine-asr-products.md`，未完成真实联调时不得宣称验收通过。
 
 - 交互方式固定为单一全局快捷键，按一次开始录音，再按一次结束录音
 - App 不设置固定录音时长上限；录音期间根据静音停顿自动切段并提前 ASR
@@ -106,7 +109,10 @@ AGENTS.md
 ## 架构与实现约束
 
 - 优先保持 `UI / Domain / Providers / Platform / Persistence` 分层清晰
-- `SessionCoordinator` 负责主链路编排，包括分段 ASR 队列管理、取消、错误传播和最终文本拼接
+- `SessionCoordinator` 按引擎能力选择实时或分段链路，负责取消、错误传播、完整文本汇总和后续 LLM/注入
+- 实时 ASR 使用 `RealtimeASRSession` 和有界音频缓存，连续降噪、串行发送音频、显式收尾；只有明确 final 才能进入 LLM
+- 原生实时失败不自动重连、不自动换服务；手动恢复仅处理未确认音频，十分钟内存保留规则不变
+- MiMo 使用新 `mimoASR` / `asr.mimo`，不兼容或迁移历史小米/通用 Chat 凭据；残留 OpenAI Chat 配置必须明确报错
 - `AudioSegmenter` 负责基于 16k PCM 的静音检测和自动切段，输出 sealed segment
 - `AudioRecorder` 支持录音期间向 `AudioSegmenter` 提供 PCM chunk
 - 分段 ASR 串行执行，降低并发与限流风险
@@ -132,7 +138,7 @@ AGENTS.md
 以下修改必须先向用户升级确认：
 
 - 产品从“菜单栏助手”改为“系统输入法”
-- 新增 ASR 平台超出已有 localSenseVoice / tencentCloud 范围
+- 新增 ASR 平台超出 Issue #7 已确认范围
 - LLM 接口协议变更或开放自定义 Prompt / 高级参数
 - 文本注入策略从当前主方案切换到剪贴板主方案
 - 录音保存策略、日志保留策略、隐私边界变化

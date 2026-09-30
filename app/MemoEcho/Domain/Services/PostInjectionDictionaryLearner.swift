@@ -7,8 +7,19 @@ protocol PostInjectionDictionaryLearning: Sendable {
         insertedText: String,
         store: PersonalDictionaryStore,
         shouldContinue: @escaping @MainActor @Sendable () -> Bool,
+        onObservation: @escaping @MainActor @Sendable (PostInjectionObservationEvent) -> Void,
         onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void
     ) async
+}
+
+/// Diagnostic stages only; never includes field text, candidates, or model responses.
+enum PostInjectionObservationEvent: String, Sendable {
+    case started, baselineVerified, evaluating, existingTerm
+    case textChanged, selectionChanged, selectionActive, compositionActive
+    case invalidInput, cancelled, targetUnavailable, targetChanged
+    case baselineMismatch, baselineSelectionMismatch, baselineCompositionActive, baselineTimedOut
+    case outsideInsertedRange, fieldCleared, editTooLarge
+    case evaluationLimit, evaluationInvalidated, observationTimedOut
 }
 
 struct LearnedTermReplacement: Equatable, Sendable {
@@ -77,7 +88,9 @@ struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable
 
     init(
         snapshotProvider: @escaping SnapshotProvider = { pid, bundle in
-            FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundle)
+            FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundle, onFailure: { reason in
+                DiagnosticsLogger.shared.log(sessionID: "dictionary", event: "dictionary_snapshot_unavailable", detail: reason.rawValue)
+            })
         },
         termEvaluator: any ProperNounLearningEvaluating,
         sleep: @escaping Sleep = { try? await Task.sleep(for: $0) },
@@ -94,17 +107,31 @@ struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable
         insertedText: String,
         store: PersonalDictionaryStore,
         shouldContinue: @escaping @MainActor @Sendable () -> Bool,
+        onObservation: @escaping @MainActor @Sendable (PostInjectionObservationEvent) -> Void = { _ in },
         onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void
     ) async {
+        onObservation(.started)
         guard !beforeInjection.isComposing, !insertedText.isEmpty,
-              let selection = Range(beforeInjection.selection, in: beforeInjection.value) else { return }
+              let selection = Range(beforeInjection.selection, in: beforeInjection.value) else {
+            onObservation(.invalidInput)
+            return
+        }
         let prefix = String(beforeInjection.value[..<selection.lowerBound])
         let suffix = String(beforeInjection.value[selection.upperBound...])
         let expected = prefix + insertedText + suffix
         func current() -> FocusedElementTextSnapshot? {
-            guard shouldContinue(), !Task.isCancelled,
-                  let snapshot = snapshotProvider(beforeInjection.pid, beforeInjection.bundleID),
-                  snapshot.belongsToSameField(as: beforeInjection) else { return nil }
+            guard shouldContinue(), !Task.isCancelled else {
+                onObservation(.cancelled)
+                return nil
+            }
+            guard let snapshot = snapshotProvider(beforeInjection.pid, beforeInjection.bundleID) else {
+                onObservation(.targetUnavailable)
+                return nil
+            }
+            guard snapshot.belongsToSameField(as: beforeInjection) else {
+                onObservation(.targetChanged)
+                return nil
+            }
             return snapshot
         }
 
@@ -119,36 +146,68 @@ struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable
                 break
             }
             // Only the pre-insertion state may be retried. Other edits are ambiguous.
-            guard snapshot.value == beforeInjection.value else { return }
+            guard snapshot.value == beforeInjection.value else {
+                if snapshot.value == expected {
+                    onObservation(snapshot.isComposing ? .baselineCompositionActive : .baselineSelectionMismatch)
+                } else {
+                    onObservation(.baselineMismatch)
+                }
+                return
+            }
             await sleep(Self.pollInterval)
         }
-        guard var previous = baseline else { return }
+        guard var previous = baseline else {
+            onObservation(.baselineTimedOut)
+            return
+        }
+        onObservation(.baselineVerified)
         let deadline = now() + Self.observationDuration
         var stableSince = now()
         var evaluatedVersions = Set<String>()
 
         while now() < deadline {
             await sleep(Self.pollInterval)
-            guard now() < deadline, let snapshot = current() else { return }
+            guard now() < deadline else { break }
+            guard let snapshot = current() else { return }
             guard snapshot.value.hasPrefix(prefix), snapshot.value.hasSuffix(suffix),
-                  snapshot.value.count >= prefix.count + suffix.count else { return }
+                  snapshot.value.count >= prefix.count + suffix.count else {
+                onObservation(.outsideInsertedRange)
+                return
+            }
             let edited = String(snapshot.value.dropFirst(prefix.count).dropLast(suffix.count))
-            guard !edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard !edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                onObservation(.fieldCleared)
+                return
+            }
             // Limit the edit envelope without treating delete-then-retype as a final correction.
             if let change = Self.extractReplacement(from: insertedText, to: edited),
-               change.oldSpan.count > 64 || change.newSpan.count > 64 { return }
-            if abs(edited.count - insertedText.count) > 64 { return }
+               change.oldSpan.count > 64 || change.newSpan.count > 64 {
+                onObservation(.editTooLarge)
+                return
+            }
+            if abs(edited.count - insertedText.count) > 64 {
+                onObservation(.editTooLarge)
+                return
+            }
 
             if snapshot != previous || snapshot.isComposing || snapshot.selection.length != 0 {
+                if snapshot.value != previous.value { onObservation(.textChanged) }
+                if snapshot.selection != previous.selection { onObservation(.selectionChanged) }
+                if snapshot.selection.length != 0, previous.selection.length == 0 { onObservation(.selectionActive) }
+                if snapshot.isComposing, !previous.isComposing { onObservation(.compositionActive) }
                 previous = snapshot
                 stableSince = now()
                 continue
             }
             guard now() - stableSince >= Self.stabilizationDuration,
                   edited != insertedText, !evaluatedVersions.contains(edited) else { continue }
-            guard evaluatedVersions.count < 3 else { return }
+            guard evaluatedVersions.count < 3 else {
+                onObservation(.evaluationLimit)
+                return
+            }
             evaluatedVersions.insert(edited)
             guard let candidate = Self.makeCandidate(from: insertedText, to: edited) else { continue }
+            onObservation(.evaluating)
 
             let validity = ObservationValidity()
             let monitor = Task { @MainActor in
@@ -165,7 +224,10 @@ struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable
             do {
                 let decision = try await termEvaluator.evaluate(candidate)
                 // No store mutation or feedback from cancelled, expired, edited or refocused requests.
-                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else { return }
+                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else {
+                    onObservation(.evaluationInvalidated)
+                    return
+                }
                 switch decision {
                 case .accept(let term, let start):
                     guard Self.validatedTerm(term, start: start, candidate: candidate) != nil else {
@@ -173,14 +235,19 @@ struct PostInjectionDictionaryLearner: PostInjectionDictionaryLearning, Sendable
                         continue
                     }
                     if try store.addLearnedTermIfNeeded(term) { onDecision(.learned(term)) }
+                    else { onObservation(.existingTerm) }
                 case .reject:
                     onDecision(.rejected(candidate.replacedSpan))
                 }
             } catch {
-                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else { return }
+                guard validity.isValid, now() < deadline, let latest = current(), latest == snapshot else {
+                    onObservation(.evaluationInvalidated)
+                    return
+                }
                 onDecision(.failed(candidate.replacedSpan, reason: "learning_failed"))
             }
         }
+        onObservation(.observationTimedOut)
     }
 
     private final class ObservationValidity { var isValid = true }

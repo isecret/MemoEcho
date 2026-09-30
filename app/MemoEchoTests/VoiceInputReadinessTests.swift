@@ -55,8 +55,9 @@ final class VoiceInputReadinessTests: XCTestCase {
 
     func testCloudConfigurationMustBeCompleteAndValidated() {
         var config = ASRConfig()
-        config.selectedPlatform = .tencentCloudSentence
+        config.selectedPlatform = .tencentCloudRealtime
         XCTAssertFalse(make(asrConfig: config, cloudStatus: .ready).asr.isReady)
+        config.tencentCloud.appID = "123456"
         config.tencentCloud.secretId = "test-id"
         config.tencentCloud.secretKey = "test-key"
         for status in [CloudASRValidationDisplayStatus.incomplete, .checking, .failed] {

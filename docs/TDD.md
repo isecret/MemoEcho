@@ -1,5 +1,7 @@
 # MemoEcho TDD
 
+> ASR 更新状态（2026-09-30）：[Issue #7](https://github.com/isecret/MemoEcho/issues/7) 实施中。五个云厂商专用入口改用实时服务；SenseVoice、本地/自定义 Audio Transcriptions 和独立 MiMo 保留分段处理。以文末实时 ASR 决策为准，前文旧接口记录不代表新版本仍提供这些服务。尚未完成本次真实服务与输入框端到端验收。
+
 ## 1. 文档信息
 
 - 项目名称：MemoEcho
@@ -412,6 +414,7 @@
 - 比较原始插入文本与最终修改，允许删除后重输形成一次纠正；清空、超出局部修改预算或范围外编辑终止。一次会话最多评估 3 个不同最终版本，不阻塞主链路。
 - 只向学习 LLM 发送差异及前后各最多 24 字的局部片段，不发送其他输入框正文；要求结构化返回完整 term 和其在修订片段中的字符起点。程序验证 term 原样存在、覆盖新差异、未跨词边界，允许 2～48 字符的中英文术语。
 - 模型结果返回后重新验证取消、会话 generation、元素身份、正文和光标；确认仍有效才入库。未知/不稳定/格式错误结果不学习。不记录局部正文日志。
+- 自动学习诊断记录开始观察、基线确认、候选评估及提前退出原因（输入框不可读/变化、基线或选区不匹配、清空、范围外修改、超时等），只写固定事件名，不包含输入正文、候选词或模型响应，便于区分未开始评估和模型拒绝。
 - 存储事务保证学习、删除失败时内存回滚。撤销学习使用普通删除，删除后仍可重新学习；不维护禁止状态或排除名单。
 - HUD 沿用新词提示；菜单栏提供最近一次撤销，词典页提供编辑和删除入口。候选积累、相关词召回和 ASR 热词接入留到 P2。
 
@@ -529,28 +532,33 @@ Segment 级诊断字段（每段独立记录）：
 - `asr.aliyun.accessKeyId`
 - `asr.aliyun.accessKeySecret`
 - `asr.aliyun.appKey`
+- `asr.aliyunBailian.apiKey`
+- `asr.openAICompatible.apiKey`
 - `asr.volcengine.apiKey`
 - `asr.xunfei.appID`
 - `asr.xunfei.apiKey`
 - `asr.xunfei.apiSecret`
-- `asr.xiaomiMiMo.apiKey`
-- `asr.xiaomiMiMoTokenPlan.apiKey`
 
 ### 8.3 ASR 配置
 
-- `asr.selectedPlatform`：当前选中的 ASR 平台（`localSenseVoice` / `tencentCloudSentence` / `aliyunSentence` / `volcengineSentence` / `xunfeiSentence` / `xiaomiMiMoASR` / `xiaomiMiMoTokenPlanASR`）
+- `asr.selectedPlatform`：当前选中的 ASR 平台（`localSenseVoice` / `tencentCloudSentence` / `aliyunSentence` / `aliyunBailianASR` / `volcengineSentence` / `xunfeiSentence` / `openAICompatibleASR`）
 - `asr.local.mirrorSource`：自定义镜像源 URL
 - `asr.tencentCloud.secretId`：腾讯云 SecretId
 - `asr.tencentCloud.secretKey`：腾讯云 SecretKey
 - `asr.aliyun.accessKeyId`：阿里云 AccessKey ID
 - `asr.aliyun.accessKeySecret`：阿里云 AccessKey Secret
 - `asr.aliyun.appKey`：阿里云 AppKey
+- `asr.aliyunBailian.baseURL`：百炼 Base URL 或完整接口地址
+- `asr.aliyunBailian.apiKey`：百炼 API Key
+- `asr.aliyunBailian.model`：百炼非实时 ASR 模型
+- `asr.openAICompatible.apiFormat`：音频转写或音频 Chat 协议
+- `asr.openAICompatible.baseURL`：自定义服务地址
+- `asr.openAICompatible.apiKey`：可选 Bearer Key
+- `asr.openAICompatible.model`：服务提供的 ASR 模型
 - `asr.volcengine.apiKey`：火山引擎 API Key
 - `asr.xunfei.appID`：科大讯飞 AppID
 - `asr.xunfei.apiKey`：科大讯飞 API Key
 - `asr.xunfei.apiSecret`：科大讯飞 API Secret
-- `asr.xiaomiMiMo.apiKey`：小米 MiMo API Key
-- `asr.xiaomiMiMoTokenPlan.apiKey`：小米 MiMo Token Plan API Key
 
 ### 8.4 个人词典配置
 
@@ -590,9 +598,9 @@ Segment 级诊断字段（每段独立记录）：
 ### 9.1 Provider 架构
 
 - 统一 `ASRProvider` 协议需支持 final 结果。
-- 用户在设置中手动选择 ASR 平台：`本地 SenseVoice`、`腾讯云`、`阿里云`、`火山引擎`、`科大讯飞`、`小米 MiMo`、`小米 MiMo（Token Plan）`。
+- 用户在设置中手动选择 ASR 平台：`本地 SenseVoice`、`腾讯云`、`阿里云`、`阿里云百炼`、`火山引擎`、`科大讯飞`、`OpenAI 兼容`。
 - 默认实现为 `SenseVoiceASRProvider`，通过 `SenseVoiceRuntimeManager` 管理本地 recognizer。
-- 云端 Provider 固定为 `TencentSentenceASRProvider`、`AliyunSentenceASRProvider`、`VolcengineSentenceASRProvider`、`XunfeiSentenceASRProvider`、`XiaomiMiMoASRProvider`。
+- 云端 Provider 固定为 `TencentSentenceASRProvider`、`AliyunSentenceASRProvider`、`AliyunBailianASRProvider`、`VolcengineSentenceASRProvider`、`XunfeiSentenceASRProvider`、`OpenAICompatibleASRProvider`。
 - 不做平台间自动回退；所选平台不可用时直接报错阻止录音。
 
 ### 9.2 RNNoise 降噪
@@ -626,16 +634,17 @@ Segment 级诊断字段（每段独立记录）：
 - 配置：SecretId、SecretKey，存于 `~/.memoecho/config.json` 的 `asr.tencentCloud`。
 - `AliyunSentenceASRProvider` 通过 `CreateToken + 录音文件识别极速版` 接口提交 `wav` 音频。
 - 配置：AccessKey ID、AccessKey Secret、AppKey，存于 `asr.aliyun`。
+- `AliyunBailianASRProvider` 使用 DashScope 非实时 ASR，提交 WAV Data URL 并解析 `output.text`；配置与协议边界见文末 Issue #6 专节。
 - `VolcengineSentenceASRProvider` 直接调用火山引擎文件识别接口。
 - 配置：API Key，存于 `asr.volcengine`。
 - `XunfeiSentenceASRProvider` 使用语音听写 WebSocket 接口，并从 `wav` 中提取 PCM 数据按帧发送。
 - 配置：AppID、API Key、API Secret，存于 `asr.xunfei`。
-- `XiaomiMiMoASRProvider` 调用 OpenAI Chat Completions 兼容接口；普通 MiMo Base URL 为 `https://api.xiaomimimo.com/v1`，Token Plan Base URL 为 `https://token-plan-cn.xiaomimimo.com/v1`，最终请求路径均为 `/chat/completions`。
-- 模型固定为 `mimo-v2.5-asr`，请求体通过 `messages[].content[].input_audio.data` 传入 `data:audio/wav;base64,<audio>`，`asr_options.language` 固定发送 `auto`。
-- 鉴权使用 `Authorization: Bearer <apiKey>`，配置仅包含 API Key；Token Plan 作为 ASR 选择列表中的独立入口，不开放任意 Base URL 输入。
+- `OpenAICompatibleASRProvider` 按 `apiFormat` 使用 multipart `/audio/transcriptions` 或 JSON `/chat/completions`；模型和地址由用户配置。Key 空时不发鉴权头，非空使用 Bearer。
+- URL 规范化由 `OpenAICompatibleASRConfig` 共用于 Provider、验证和指纹，允许 HTTPS 与限定本机／私网的 HTTP；保留端口和路径前缀，拒绝带凭据、query、fragment 和协议不匹配的完整 endpoint。
+- 网络客户端拒绝重定向；两种协议严格独立解析，不试探回退。设置验证使用 `ASRValidationAudio` 的合成 WAV，空结果必须失败。小米专用 Provider、枚举和配置已删除，不迁移历史数据。
 - 所有云 Provider 超时按分段时长动态计算：`min(90s, max(15s, segmentDurationSeconds * 1.3 + 10s))`。
 - 云端 ASR Provider 均需提供 `validateCredentials()` 能力，供设置页真实验证调用。
-- 验证请求以最小真实请求验证鉴权与接口可达性；若鉴权成功但测试音频返回空结果，仍视为验证通过。
+- 验证请求以最小真实请求验证鉴权与接口可达性；既有静音探测 Provider 可将有效协议的空结果视为验证通过，百炼和 OpenAI 兼容使用合成语音，必须取得非空文本。
 
 ### 9.6 分段 ASR 编排
 
@@ -685,7 +694,7 @@ Segment 级诊断字段（每段独立记录）：
 - 识别失败 -> `asrProcessFailure`
 - 本地运行时初始化失败 -> `asrRuntimeMissing`
 
-云端 ASR 错误（腾讯云 / 阿里云 / 火山引擎 / 科大讯飞 / 小米 MiMo / 小米 MiMo Token Plan）：
+云端 ASR 错误（腾讯云 / 阿里云 / 火山引擎 / 科大讯飞 / 阿里云百炼 / OpenAI 兼容）：
 - 配置不完整 -> `cloudASRConfigurationIncomplete`
 - 鉴权失败 -> `cloudASRAuthenticationFailure`
 - 网络错误 -> `cloudASRNetworkFailure`
@@ -1033,3 +1042,68 @@ Segment 级诊断字段（每段独立记录）：
 - 280 pt 高的滚动区上下各使用 12 pt 透明渐隐遮罩；内容上下各留 12 pt 空间，滚到首尾时完整显示首末行，只有越过视口边缘的词条渐隐。遮罩仅作用于词条内容层，并随内容偏移补偿以固定在视口边缘；原生滚动条和空列表提示不参与渐隐，不增加水平缩进。
 
 - 词典左右键导航根据词条在视口内的位置按需滚动：位于上下 12 pt 渐隐带之外时保持滚动位置；进入渐隐带或视口外时，仅滚动到最近的清晰边缘。新增/编辑后的定位仍使用居中展示。
+
+### 阿里云百炼 ASR（Issue #6）
+
+OpenAI 兼容 ASR 的接口契约、局域网 HTTP、配置验证及小米删除边界见[实施方案](plans/openai-compatible-asr.md)。该独立变更不改变本节 DashScope 契约。
+
+- `ASRPlatform.aliyunBailianASR` → `AliyunBailianASRProvider`，实现 `ASRProvider` 和 `CloudASRValidating`。新增 `AliyunBailianASRConfig`，`asr.aliyunBailian` 仅保存 `baseURL` / `apiKey` / `model`；旧配置缺少新字段时使用默认值。验证状态和错误不进入 config.json，验证成功仍以连接指纹写入 state.json。
+- 地址解析共用于就绪检查、Provider 和验证指纹。Base URL 须以 `/api/v1` 结尾，追加 `/services/aigc/multimodal-generation/generation`；完整地址直接使用。规范化首尾空白和尾部斜杠；只接受带 host 的 HTTPS URL，拒绝内嵌凭据、query、fragment。
+- 验证指纹包含平台、规范化后的最终请求地址、模型和 Key，使用结构化编码避免换行分隔歧义。连接变化后失效旧验证，迟到结果不能覆盖新配置。
+- 使用 `Authorization: Bearer`、`Content-Type: application/json`、`X-DashScope-SSE: disable`。请求为 `model` + `input.messages[].content[].input_audio.data`（WAV Data URL）+ `parameters.format: wav` / `parameters.sample_rate: "16000"`。
+- 仅解析 `output.text` 和可选 `request_id`；显式空文本与缺失/错误类型字段区分。凭据验证使用随包合成语音，验证和实际识别的空文本均失败；200 错误对象、HTML、无效 JSON 均不算验证成功。
+- 沿用分段动态超时与串行 ASR；取消透传 CancellationError，取消后的结果丢弃。其他错误映射现有云 ASR 错误，不做自动重发、换域名或平台回退。
+- 百炼会以 HTTP 400 / `ASR_RESPONSE_HAVE_NO_WORDS` 拒绝纯静音，不能沿用其他平台的静音探测。验证样本为 `Resources/ASRValidation/asr-validation.wav`：macOS Tingting 语音、语速 160 合成“你好，语音识别测试。”，转换为 16kHz、单声道 PCM16 WAV，时长 2.34s；不包含用户录音。资源缺失明确失败，空识别结果转换为验证失败，不能被公共验证服务当作静音成功。
+- 诊断仅记录固定平台/接口标识、HTTP 状态、固定错误类别、字节数、耗时；不记录自定义域名、地址、凭据、音频、转写文字或原始错误正文。
+- 官方契约参考：https://help.aliyun.com/en/model-studio/fun-asr-flash-recorded-speech-recognition-http-api 。真实百炼及输入框端到端验收完成前不宣称可用。
+
+### OpenAI 兼容 ASR 配置与验证
+
+- 配置键：`asr.openAICompatible.apiFormat`（`audioTranscriptions` / `chatCompletions`）、`baseURL`、`apiKey`、`model`；平台值为 `openAICompatibleASR`。缺失新字段使用空配置，不导入旧平台数据。
+- 连接身份包含格式、规范化 endpoint、model、key；运行态不进入 config.json，state.json 仅保存身份哈希。
+- multipart 上传 WAV 二进制，字段为 file、model、response_format=json；Chat 上传原始 Base64 + format=wav，固定 stream=false，不带 asr_options。分别解析顶层 text 和 choices[0].message.content；拒绝错误对象及截断／过滤结束原因。
+- 使用可取消 URLSession 请求和分段动态超时；网络和解析错误仅输出固定诊断类别，禁止记录自定义地址、原始错误正文与转写。
+- 完整边界、HTTP 主机范围、旧配置读取失败结果及测试清单见[实施方案](plans/openai-compatible-asr.md)。
+
+### ASR 实时化与 MiMo 拆分（2026-09-30，实施中）
+
+下一版按引擎能力分流：五个云厂商实时入口使用会话式 `RealtimeASRSession`；SenseVoice、Audio Transcriptions 和独立 MiMo 使用非流式 Provider。本地既有分段队列继续保留，实时路径绕过它。
+
+- OpenAI 兼容移除 Chat 请求／解析分支与协议选择器，保留 multipart `/audio/transcriptions`。
+- 百炼配置层与实时请求层均不维护模型白名单；Model 去除首尾空白后非空即满足完整性校验，并按填写值传入 `run-task.payload.model`。保留 WSS `/api-ws/v1/inference` 协议及 URL 安全校验，模型错误交由真实服务响应处理，不自动切换到 `/realtime` 或 HTTP。
+- MiMo 使用独立 Provider、配置身份、表单和验证，负责其 `/chat/completions` 音频契约及私有字段；不与通用 ASR 或 LLM 共用配置。
+- 不导入历史小米键、旧验证状态或通用入口的 Chat 凭据；残留通用 Chat 配置不能静默按文件转写协议发请求，应提示手动重新配置。
+- MiMo 单入口及新配置键的建议、实时内存／恢复边界、测试范围见[实施方案](plans/realtime-asr.md)。当前正在实施并补充自动化测试；真实凭据、长录音和输入框验收仍待完成。
+
+### 一句话服务恢复与厂商分组（2026-09-30）
+
+- 恢复四个 `*Sentence` 平台 ID 和原 Provider，工厂按明确选择路由。`isRealtime` 决定 SessionCoordinator 进入实时会话还是现有分段队列；不修改实时适配器或自动降级。
+- 厂商分组和识别类型由领域层的平台元数据提供，设置和引导复用同一 Picker。
+- 凭据沿用原厂商配置键，同一配置保存独立的一句话运行期验证状态，不编码进 config.json；state.json 的成功指纹按平台 ID 隔离。一句话腾讯不要求实时 AppID；讯飞 IAT 使用 appID/apiKey/apiSecret，RTASR 使用 appID/realtimeAPIKey。修改共享凭据时使对应服务重新验证，修改专用凭据不影响另一服务。
+- 旧 `*Sentence` ID 原样解码，现有 `*Realtime` ID 保持不变，历史小米 ID 仍不恢复。
+
+百炼增加 `aliyunBailianHTTPASR` 选中值和独立 `aliyunBailianHTTP` 配置，当前实时 `aliyunBailianASR` 配置不变。HTTP 通过 `AliyunBailianHTTPASRProvider` 向 `/api/v1/services/aigc/multimodal-generation/generation` 提交 `input_audio` WAV Data URL，设置 `X-DashScope-SSE: disable`；读取完整 `output.text`，拒绝错误信封、未完成句子和空转写。地址允许基础 `/api/v1` 或完整路径，要求 HTTPS 且无内嵌凭据、query、fragment。Model 只检查非空，不设白名单；模型协议由真实验证确认。
+
+### IAT 原生实时适配（2026-09-30）
+
+新增 `xunfeiIAT` 实时平台，映射旧 `xunfeiSentence` 选择并保留 IAT 配置；运行验证状态与 RTASR 分开，连接指纹带新平台标识。IAT 走既有 `RealtimeCloudASRSession`/`RealtimeRecognitionPipeline`，使用 HMAC-SHA256 日期签名、JSON Base64 PCM，首音频帧 `status=0` 带 common/business，后续 `status=1`，结束 `status=2`。连接后直接准备首音频帧，不等待 RTASR 式 started 消息。
+
+动态修正按 `sn` 保存结果，`pgs=rpl` 按 `rg` 删除范围后替换；仅 `data.status=2` 提交完整会话转写。IAT 的正常断线不能代替最终标志；错误、超时或过早结束不提交部分文本。IAT 帧长 1280B/40ms、会话音频上限 55 秒、不预连接，防止预连接消耗 60 秒墙钟期限；配置 `eos=10000`，客户端连续低能量静音达到 6 秒时主动换会话。静音换会话仍持续上传音频，不改为完成 WAV 后识别。
+
+RTASR 保留既有签名、binary PCM 与 normal-close-after-end 收尾语义。设置与引导在讯飞分组显示两个产品名称和实时标签。协议依据：[IAT WebAPI](https://www.xfyun.cn/doc/asr/voicedictation/API.html)。长录音与长静音真实服务行为仍需验收。
+
+### 语音引擎展示名称（2026-09-30）
+
+`ASRPlatform.displayName` 为云厂商入口提供完整的“厂商 · 产品”名称，`pickerTitle` 直接复用，设置、首次引导及文档链接的辅助说明保持一致。本地显示“本地 · SenseVoice”，自定义显示“OpenAI 兼容”，选择器不追加离线／非实时后缀，上传方式由配置说明解释。`ASRVendorGroup.platforms` 显式排列多产品厂商：腾讯实时在一句话前；阿里云百炼系列在智能语音交互系列前，顺序为百炼实时、百炼 HTTP、普通实时、普通一句话；讯飞实时语音转写在语音听写前。火山按产品系列排列，系列内流式在一句话前；不能仅按 `isRealtime` 排序，因为火山一句话也支持边录边传。平台 raw value、厂商分组、Provider 路由和验证指纹均不变。
+
+`ASRPlatform.cloudConfigSummary` 合并音频去向与必要的配置提示，`ASRSettingsView` 底部只展示这一段常规说明。额外文案仅用于当前草稿的地址错误、保存失败，以及有效 HTTP 地址的明文提醒；不再叠加通用实时提示和各厂商协议说明。设置与引导共用该表单，验证、保存和识别链路不变。
+
+### 火山引擎产品路由扩展（2026-09-30，实施中）
+
+恢复 `volcengineSentence` 平台和历史 `VolcengineSentenceASRProvider`，使用 HTTP `/api/v3/auc/bigmodel/recognize/flash`、`X-Api-Key`、固定 `volc.bigasr.auc_turbo` 资源，提交 Base64 WAV，读取 `result.text`，走非实时分段队列。保留 `volcengineRealtime` 的大模型实时路由及 `volcengineBigModelSentence` 的 `bigmodel_nostream` 原生实时管线。旧 JSON 的 `volcengineSentence` 直接解码为同一平台，保留 `asr.volcengine.apiKey` 和其他设置，不新增映射。文件验证独立使用 `fileValidationStatus`、`fileLastValidationError` 和 `fileState`，均不写入 config；成功指纹保持历史平台 ID 与 Key 的换行拼接格式，不含实时模型版本。验证使用内置合成语音并要求非空文本；Provider 接入现有可注入 HTTP 客户端，支持取消，日志及用户错误不透传响应正文。`isRealtime` 描述音频上传能力，不按“一句话”展示名称判断。大模型会话配置传入 mode 与 resource ID，模型 1.0／2.0 共用 V3 framing。模型版本参与一句话与实时成功指纹；API Key 编辑使文件版和两个大模型 WebSocket 产品的验证失效，模型版本只影响两个 WebSocket 产品。
+
+传统两个平台共用 `wss://openspeech.bytedance.com/api/v2/asr`，各自传入 Cluster，使用 `Authorization: Bearer; <token>` 和首帧 app 配置。独立 V2 codec 使用 raw PCM、gzip 二进制帧，服务 JSON `result` 为候选数组、`sequence<0` 为终包；不能沿用 V3 终包 flag。两个入口均标记 `isRealtime=true`，配置验证走原生实时会话与合成音频。中间累计快照可修订，最终仅提交一次；无文本终包不提升 partial。按客户端 55／90 秒窗口续接，禁止预连接等待音频，并按音频时钟上传。验证指纹含平台、AppID、Token 和所选 Cluster，编辑另一产品 Cluster 不使当前验证失效。完整技术边界见[接入方案](plans/volcengine-asr-products.md)。
+
+传统设置页不暴露 Cluster。默认一句话 `volcengine_input`、实时 `volcengine_streaming`，缺省或空白旧字段在连接身份层解析为默认值；已保存的非空值继续使用。默认集群不计入用户已配置判定，也不单独写入 JSON；非默认已有集群仍保存。配置完整性只要求 AppID、Access Token，两个产品的成功记录继续分别按实际连接身份核验。
+
+火山分组通过 `ASRVendorGroup.platforms` 固定展示顺序：大模型流式、大模型一句话、文件极速版、传统流式、传统一句话。展示名称去掉括号，大模型作为前缀；平台 raw value 与接口映射保留。大模型配置默认版本为 2.0，版本选项按 2.0、1.0 排列。缺少 `modelVersion` 时解码为 2.0，明确保存的 1.0 仍保留；默认空配置不会仅因版本值被写入用户配置。

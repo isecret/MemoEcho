@@ -128,11 +128,7 @@ final class CloudASRValidationService {
                     try configStore.updateCloudValidationState(for: input.platform, status: .validating)
                 }
                 let validator = try validatorFactory(input)
-                do {
-                    try await validator.validateCredentials()
-                } catch let error as MemoEchoError where error == .cloudASREmptyResponse {
-                    // 鉴权成功但测试音频没有识别结果，仍视为配置验证通过。
-                }
+                try await validator.validateCredentials()
 
                 guard !Task.isCancelled else { return }
                 try await MainActor.run {
@@ -192,17 +188,35 @@ final class CloudASRValidationService {
         case .localSenseVoice:
             return input.asrConfig.tencentCloud
         case .tencentCloudSentence:
+            return input.asrConfig.tencentCloud.sentenceState
+        case .tencentCloudRealtime:
             return input.asrConfig.tencentCloud
         case .aliyunSentence:
+            return input.asrConfig.aliyun.sentenceState
+        case .aliyunRealtime:
             return input.asrConfig.aliyun
-        case .volcengineSentence:
+        case .aliyunBailianHTTPASR:
+            return input.asrConfig.aliyunBailianHTTP
+        case .aliyunBailianASR:
+            return input.asrConfig.aliyunBailian
+        case .volcengineRealtime:
             return input.asrConfig.volcengine
-        case .xunfeiSentence:
+        case .volcengineBigModelSentence:
+            return input.asrConfig.volcengine.bigModelSentenceState
+        case .volcengineSentence:
+            return input.asrConfig.volcengine.fileState
+        case .volcengineTraditionalSentence:
+            return input.asrConfig.volcengineTraditional.sentenceState
+        case .volcengineTraditionalRealtime:
+            return input.asrConfig.volcengineTraditional.realtimeState
+        case .xunfeiIAT:
+            return input.asrConfig.xunfei.iatState
+        case .xunfeiRealtime:
             return input.asrConfig.xunfei
-        case .xiaomiMiMoASR:
-            return input.asrConfig.xiaomiMiMo
-        case .xiaomiMiMoTokenPlanASR:
-            return input.asrConfig.xiaomiMiMoTokenPlan
+        case .mimoASR:
+            return input.asrConfig.mimo
+        case .openAICompatibleASR:
+            return input.asrConfig.openAICompatible
         }
     }
 
@@ -210,35 +224,21 @@ final class CloudASRValidationService {
         switch input.platform {
         case .localSenseVoice:
             throw MemoEchoError.asrPlatformNotReady(detail: "本地平台不需要云端验证")
-        case .tencentCloudSentence:
-            return TencentSentenceASRProvider(
-                secretId: input.asrConfig.tencentCloud.secretId,
-                secretKey: input.asrConfig.tencentCloud.secretKey
-            )
-        case .aliyunSentence:
-            return AliyunSentenceASRProvider(
-                accessKeyId: input.asrConfig.aliyun.accessKeyId,
-                accessKeySecret: input.asrConfig.aliyun.accessKeySecret,
-                appKey: input.asrConfig.aliyun.appKey
-            )
-        case .volcengineSentence:
-            return VolcengineSentenceASRProvider(apiKey: input.asrConfig.volcengine.apiKey)
-        case .xunfeiSentence:
-            return XunfeiSentenceASRProvider(
-                appID: input.asrConfig.xunfei.appID,
-                apiKey: input.asrConfig.xunfei.apiKey,
-                apiSecret: input.asrConfig.xunfei.apiSecret
-            )
-        case .xiaomiMiMoASR:
-            return XiaomiMiMoASRProvider(
-                apiKey: input.asrConfig.xiaomiMiMo.apiKey,
-                baseURL: XiaomiMiMoASRProvider.defaultBaseURL
-            )
-        case .xiaomiMiMoTokenPlanASR:
-            return XiaomiMiMoASRProvider(
-                apiKey: input.asrConfig.xiaomiMiMoTokenPlan.apiKey,
-                baseURL: XiaomiMiMoASRProvider.tokenPlanBaseURL
-            )
+        case .tencentCloudRealtime, .aliyunRealtime, .aliyunBailianASR, .volcengineRealtime, .volcengineBigModelSentence, .volcengineTraditionalSentence, .volcengineTraditionalRealtime, .xunfeiIAT, .xunfeiRealtime:
+            var config = input.asrConfig
+            config.selectedPlatform = input.platform
+            return RealtimeASRValidator(config: config)
+        case .tencentCloudSentence, .aliyunSentence, .aliyunBailianHTTPASR, .volcengineSentence:
+            var config = input.asrConfig
+            config.selectedPlatform = input.platform
+            guard let provider = ASRProviderFactory.makeSentenceProvider(for: config) else {
+                throw MemoEchoError.cloudASRConfigurationIncomplete
+            }
+            return provider
+        case .mimoASR:
+            return MiMoASRProvider(config: input.asrConfig.mimo)
+        case .openAICompatibleASR:
+            return OpenAICompatibleASRProvider(config: input.asrConfig.openAICompatible)
         }
     }
 
@@ -246,6 +246,7 @@ final class CloudASRValidationService {
         if let memoechoError = error as? MemoEchoError {
             return memoechoError.userMessage
         }
+        if let realtimeError = error as? RealtimeASRError { return realtimeError.localizedDescription }
         if let configError = error as? ConfigValidationError {
             return configError.errorDescription ?? error.localizedDescription
         }

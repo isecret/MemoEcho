@@ -6,6 +6,60 @@ import XCTest
 /// Real settings forms with temporary stores and stubbed permissions/providers.
 @MainActor
 final class SettingsPagesLayoutTests: XCTestCase {
+    func testBailianConnectionFieldsAndAddressHelpFitSettingsWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for connection in [AliyunBailianASRConfig(), .init(baseURL: "incomplete-address"),
+                           .init(baseURL: "wss://dashscope.aliyuncs.com/api-ws/v1/inference", apiKey: "synthetic-key")] {
+            fixture.show(.general)
+            await settle(fixture)
+            var config = fixture.config.asrConfig
+            config.selectedPlatform = .aliyunBailianASR
+            config.aliyunBailian = connection
+            try fixture.config.saveASRConfig(config)
+            fixture.show(.asr)
+            await settle(fixture)
+            assertFits(fixture, scenario: "Bailian fields and address help")
+            XCTAssertEqual(fixture.cloudValidation.status, connection.isComplete ? .ready : .incomplete)
+        }
+    }
+
+    func testOpenAITranscriptionsAndDisabledLegacyChatFitWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for format in OpenAIASRFormat.allCases {
+            for address in ["", "http://example.com/v1", "http://localhost:8000/v1"] {
+                fixture.show(.general)
+                await settle(fixture)
+                var config = fixture.config.asrConfig
+                config.selectedPlatform = .openAICompatibleASR
+                config.openAICompatible = .init(apiFormat: format, baseURL: address, model: "test-asr")
+                try fixture.config.saveASRConfig(config)
+                fixture.show(.asr)
+                await settle(fixture)
+                assertFits(fixture, scenario: "OpenAI format, optional key and address help")
+                XCTAssertEqual(fixture.cloudValidation.status, config.openAICompatible.isComplete ? .ready : .incomplete)
+            }
+        }
+    }
+
+    func testMiMoIndependentConnectionFieldsFitWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for connection in [MiMoASRConfig(), .init(baseURL: "incomplete-address"), .init(apiKey: "synthetic-key")] {
+            fixture.show(.general)
+            await settle(fixture)
+            var config = fixture.config.asrConfig
+            config.selectedPlatform = .mimoASR
+            config.mimo = connection
+            try fixture.config.saveASRConfig(config)
+            fixture.show(.asr)
+            await settle(fixture)
+            assertFits(fixture, scenario: "Independent MiMo fields and validation")
+            XCTAssertEqual(fixture.cloudValidation.status, connection.isComplete ? .ready : .incomplete)
+        }
+    }
+
     func testAllSettingsPagePairsKeepContentAtTopAndFitWindow() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }

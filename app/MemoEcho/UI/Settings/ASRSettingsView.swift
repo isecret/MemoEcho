@@ -100,6 +100,7 @@ struct ASRSettingsView: View {
 
     @State private var selectedPlatform: ASRPlatform = .localSenseVoice
 
+    @State private var tencentAppID = ""
     @State private var tencentSecretId: String = ""
     @State private var tencentSecretKey: String = ""
 
@@ -107,14 +108,32 @@ struct ASRSettingsView: View {
     @State private var aliyunAccessKeySecret: String = ""
     @State private var aliyunAppKey: String = ""
 
+    @State private var bailianHTTPBaseURL = ""
+    @State private var bailianHTTPAPIKey = ""
+    @State private var bailianHTTPModel = AliyunBailianHTTPASRConfig.defaultModel
+    @State private var bailianBaseURL = ""
+    @State private var bailianAPIKey = ""
+    @State private var bailianModel = AliyunBailianASRConfig.defaultModel
+
     @State private var volcengineAPIKey: String = ""
+    @State private var volcengineModelVersion: VolcengineASRModelVersion = .v2
+    @State private var volcengineTraditionalAppID = ""
+    @State private var volcengineTraditionalToken = ""
 
     @State private var xunfeiAppID: String = ""
     @State private var xunfeiAPIKey: String = ""
-    @State private var xunfeiAPISecret: String = ""
+    @State private var xunfeiIATAPIKey = ""
+    @State private var xunfeiIATAPISecret = ""
 
-    @State private var xiaomiMiMoAPIKey: String = ""
-    @State private var xiaomiMiMoTokenPlanAPIKey: String = ""
+
+    @State private var mimoBaseURL = MiMoASRConfig.defaultBaseURL
+    @State private var mimoKey = ""
+    @State private var mimoModel = MiMoASRConfig.defaultModel
+
+    @State private var openAIFormat: OpenAIASRFormat = .audioTranscriptions
+    @State private var openAIBaseURL = ""
+    @State private var openAIKey = ""
+    @State private var openAIModel = ""
 
     @State private var isLoaded = false
     @State private var saveTask: Task<Void, Never>?
@@ -127,10 +146,15 @@ struct ASRSettingsView: View {
             SettingsFormRow(title: "语音引擎") {
                 HStack(spacing: 4) {
                     Picker("语音引擎", selection: $selectedPlatform) {
-                        ForEach(ASRPlatform.allCases, id: \.self) { platform in
-                            Text(platform.displayName).tag(platform)
+                        ForEach(ASRVendorGroup.allCases) { group in
+                            Section(group.rawValue) {
+                                ForEach(group.platforms, id: \.self) { platform in
+                                    Text(platform.pickerTitle).tag(platform)
+                                }
+                            }
                         }
                     }
+                    .pickerStyle(.menu)
                     .labelsHidden()
                     .fixedSize()
 
@@ -152,21 +176,41 @@ struct ASRSettingsView: View {
             switch selectedPlatform {
             case .localSenseVoice:
                 localSenseVoicePanel
-            case .tencentCloudSentence:
+            case .tencentCloudSentence, .tencentCloudRealtime:
                 tencentCloudPanel
-            case .aliyunSentence:
+            case .aliyunSentence, .aliyunRealtime:
                 aliyunPanel
-            case .volcengineSentence:
+            case .aliyunBailianHTTPASR:
+                aliyunBailianHTTPPanel
+            case .aliyunBailianASR:
+                aliyunBailianPanel
+            case .volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence:
                 volcenginePanel
-            case .xunfeiSentence:
+            case .volcengineTraditionalSentence, .volcengineTraditionalRealtime:
+                volcengineTraditionalPanel
+            case .xunfeiIAT, .xunfeiRealtime:
                 xunfeiPanel
-            case .xiaomiMiMoASR:
-                xiaomiMiMoPanel(apiKey: $xiaomiMiMoAPIKey, platform: .xiaomiMiMoASR)
-            case .xiaomiMiMoTokenPlanASR:
-                xiaomiMiMoPanel(apiKey: $xiaomiMiMoTokenPlanAPIKey, platform: .xiaomiMiMoTokenPlanASR)
+            case .mimoASR:
+                mimoPanel
+            case .openAICompatibleASR:
+                openAICompatiblePanel
             }
         } footer: {
             Text(selectedPlatform.cloudConfigSummary)
+            if selectedPlatform == .aliyunBailianASR,
+               !bailianBaseURL.isEmpty, currentDraftConfig().aliyunBailian.requestURL == nil {
+                Text("地址格式不正确，请检查后再试。")
+                    .foregroundStyle(.red)
+            }
+            if selectedPlatform == .openAICompatibleASR {
+                if currentDraftConfig().openAICompatible.requestURL?.scheme?.lowercased() == "http" {
+                    Text("HTTP 未加密，仅用于可信的本机或局域网服务。")
+                }
+                if !openAIBaseURL.isEmpty, currentDraftConfig().openAICompatible.requestURL == nil {
+                    Text("地址或接口格式不匹配，请检查后再试。")
+                        .foregroundStyle(.red)
+                }
+            }
             if let saveError { Text(saveError).foregroundStyle(.red) }
         }
         .onAppear {
@@ -179,17 +223,17 @@ struct ASRSettingsView: View {
             savePlatform()
             validationService.syncFromConfig(for: currentValidationInput())
         }
-        .onChange(of: tencentSecretId) { debouncedSaveCloudConfig() }
-        .onChange(of: tencentSecretKey) { debouncedSaveCloudConfig() }
-        .onChange(of: aliyunAccessKeyId) { debouncedSaveCloudConfig() }
-        .onChange(of: aliyunAccessKeySecret) { debouncedSaveCloudConfig() }
-        .onChange(of: aliyunAppKey) { debouncedSaveCloudConfig() }
-        .onChange(of: volcengineAPIKey) { debouncedSaveCloudConfig() }
-        .onChange(of: xunfeiAppID) { debouncedSaveCloudConfig() }
-        .onChange(of: xunfeiAPIKey) { debouncedSaveCloudConfig() }
-        .onChange(of: xunfeiAPISecret) { debouncedSaveCloudConfig() }
-        .onChange(of: xiaomiMiMoAPIKey) { debouncedSaveCloudConfig() }
-        .onChange(of: xiaomiMiMoTokenPlanAPIKey) { debouncedSaveCloudConfig() }
+        .onChange(of: cloudDraftFields) { debouncedSaveCloudConfig() }
+    }
+
+    // Observe editable values only, so validation-state updates never schedule a save.
+    private var cloudDraftFields: [String] {
+        [tencentAppID, tencentSecretId, tencentSecretKey, aliyunAccessKeyId, aliyunAccessKeySecret, aliyunAppKey,
+         bailianHTTPBaseURL, bailianHTTPAPIKey, bailianHTTPModel,
+         bailianBaseURL, bailianAPIKey, bailianModel, volcengineAPIKey, volcengineModelVersion.rawValue,
+         volcengineTraditionalAppID, volcengineTraditionalToken,
+         xunfeiAppID, xunfeiAPIKey, xunfeiIATAPIKey, xunfeiIATAPISecret, mimoBaseURL, mimoKey, mimoModel,
+         openAIFormat.rawValue, openAIBaseURL, openAIKey, openAIModel]
     }
 
     // MARK: - Panels
@@ -216,9 +260,12 @@ struct ASRSettingsView: View {
 
     @ViewBuilder
     private var tencentCloudPanel: some View {
+        if selectedPlatform == .tencentCloudRealtime {
+            cloudField(title: "AppID", text: $tencentAppID)
+        }
         cloudField(title: "SecretId", text: $tencentSecretId)
         cloudSecureField(title: "SecretKey", text: $tencentSecretKey)
-        cloudStatusRow(for: .tencentCloudSentence)
+        cloudStatusRow(for: selectedPlatform)
     }
 
     @ViewBuilder
@@ -226,30 +273,81 @@ struct ASRSettingsView: View {
         cloudField(title: "AccessKey ID", text: $aliyunAccessKeyId)
         cloudSecureField(title: "AccessKey Secret", text: $aliyunAccessKeySecret)
         cloudField(title: "AppKey", text: $aliyunAppKey)
-        cloudStatusRow(for: .aliyunSentence)
+        cloudStatusRow(for: selectedPlatform)
+    }
+
+    @ViewBuilder
+    private var aliyunBailianHTTPPanel: some View {
+        cloudField(title: "Base URL", text: $bailianHTTPBaseURL)
+        cloudSecureField(title: "API Key", text: $bailianHTTPAPIKey)
+        cloudField(title: "Model", text: $bailianHTTPModel)
+        cloudStatusRow(for: .aliyunBailianHTTPASR)
+    }
+
+    @ViewBuilder
+    private var aliyunBailianPanel: some View {
+        cloudField(title: "Base URL", text: $bailianBaseURL)
+        cloudSecureField(title: "API Key", text: $bailianAPIKey)
+        cloudField(title: "Model", text: $bailianModel)
+        cloudStatusRow(for: .aliyunBailianASR)
     }
 
     @ViewBuilder
     private var volcenginePanel: some View {
         cloudSecureField(title: "API Key", text: $volcengineAPIKey)
-        cloudStatusRow(for: .volcengineSentence)
+        if selectedPlatform != .volcengineSentence {
+            SettingsFormRow(title: "模型版本") {
+                Picker("模型版本", selection: $volcengineModelVersion) {
+                    ForEach(VolcengineASRModelVersion.allCases, id: \.self) { version in
+                        Text(version.rawValue).tag(version)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: SettingsFormLayout.controlWidth, alignment: .leading)
+            }
+        }
+        cloudStatusRow(for: selectedPlatform)
+    }
+
+    @ViewBuilder
+    private var volcengineTraditionalPanel: some View {
+        cloudField(title: "AppID", text: $volcengineTraditionalAppID)
+        cloudSecureField(title: "Access Token", text: $volcengineTraditionalToken)
+        cloudStatusRow(for: selectedPlatform)
     }
 
     @ViewBuilder
     private var xunfeiPanel: some View {
         cloudField(title: "AppID", text: $xunfeiAppID)
-        cloudField(title: "API Key", text: $xunfeiAPIKey)
-        cloudSecureField(title: "API Secret", text: $xunfeiAPISecret)
-        cloudStatusRow(for: .xunfeiSentence)
+        if selectedPlatform == .xunfeiIAT {
+            cloudSecureField(title: "IAT API Key", text: $xunfeiIATAPIKey)
+            cloudSecureField(title: "API Secret", text: $xunfeiIATAPISecret)
+        } else {
+            cloudSecureField(title: "RTASR API Key", text: $xunfeiAPIKey)
+        }
+        cloudStatusRow(for: selectedPlatform)
     }
 
     @ViewBuilder
-    private func xiaomiMiMoPanel(
-        apiKey: Binding<String>,
-        platform: ASRPlatform
-    ) -> some View {
-        cloudSecureField(title: "API Key", text: apiKey)
-        cloudStatusRow(for: platform)
+    private var openAICompatiblePanel: some View {
+        if openAIFormat == .chatCompletions {
+            Text("Chat 音频识别已移至小米 MiMo，请手动配置。")
+                .foregroundStyle(.red)
+            Button("改用 Audio Transcriptions") { openAIFormat = .audioTranscriptions }
+        }
+        cloudField(title: "Base URL", text: $openAIBaseURL)
+        cloudSecureField(title: "API Key（可选）", text: $openAIKey)
+        cloudField(title: "Model", text: $openAIModel)
+        cloudStatusRow(for: .openAICompatibleASR)
+    }
+
+    @ViewBuilder
+    private var mimoPanel: some View {
+        cloudField(title: "Base URL", text: $mimoBaseURL)
+        cloudSecureField(title: "API Key", text: $mimoKey)
+        cloudField(title: "Model", text: $mimoModel)
+        cloudStatusRow(for: .mimoASR)
     }
 
     // MARK: - Shared Rows
@@ -357,6 +455,7 @@ struct ASRSettingsView: View {
         configStore.refreshLocalModelStatusFromDisk()
         selectedPlatform = configStore.asrConfig.selectedPlatform
 
+        tencentAppID = configStore.asrConfig.tencentCloud.appID
         tencentSecretId = configStore.asrConfig.tencentCloud.secretId
         tencentSecretKey = configStore.asrConfig.tencentCloud.secretKey
 
@@ -364,14 +463,30 @@ struct ASRSettingsView: View {
         aliyunAccessKeySecret = configStore.asrConfig.aliyun.accessKeySecret
         aliyunAppKey = configStore.asrConfig.aliyun.appKey
 
+        bailianHTTPBaseURL = configStore.asrConfig.aliyunBailianHTTP.baseURL
+        bailianHTTPAPIKey = configStore.asrConfig.aliyunBailianHTTP.apiKey
+        bailianHTTPModel = configStore.asrConfig.aliyunBailianHTTP.model
+        bailianBaseURL = configStore.asrConfig.aliyunBailian.baseURL
+        bailianAPIKey = configStore.asrConfig.aliyunBailian.apiKey
+        bailianModel = configStore.asrConfig.aliyunBailian.model
+
         volcengineAPIKey = configStore.asrConfig.volcengine.apiKey
+        volcengineModelVersion = configStore.asrConfig.volcengine.modelVersion
+        volcengineTraditionalAppID = configStore.asrConfig.volcengineTraditional.appID
+        volcengineTraditionalToken = configStore.asrConfig.volcengineTraditional.accessToken
 
         xunfeiAppID = configStore.asrConfig.xunfei.appID
-        xunfeiAPIKey = configStore.asrConfig.xunfei.apiKey
-        xunfeiAPISecret = configStore.asrConfig.xunfei.apiSecret
+        xunfeiAPIKey = configStore.asrConfig.xunfei.realtimeAPIKey
+        xunfeiIATAPIKey = configStore.asrConfig.xunfei.apiKey
+        xunfeiIATAPISecret = configStore.asrConfig.xunfei.apiSecret
 
-        xiaomiMiMoAPIKey = configStore.asrConfig.xiaomiMiMo.apiKey
-        xiaomiMiMoTokenPlanAPIKey = configStore.asrConfig.xiaomiMiMoTokenPlan.apiKey
+        mimoBaseURL = configStore.asrConfig.mimo.baseURL
+        mimoKey = configStore.asrConfig.mimo.apiKey
+        mimoModel = configStore.asrConfig.mimo.model
+        openAIFormat = configStore.asrConfig.openAICompatible.apiFormat
+        openAIBaseURL = configStore.asrConfig.openAICompatible.baseURL
+        openAIKey = configStore.asrConfig.openAICompatible.apiKey
+        openAIModel = configStore.asrConfig.openAICompatible.model
 
         draftTracker.loaded(currentValidationInput().fingerprint)
         validationService.syncFromConfig(for: currentValidationInput())
@@ -380,17 +495,33 @@ struct ASRSettingsView: View {
     private func currentDraftConfig() -> ASRConfig {
         var config = configStore.asrConfig
         config.selectedPlatform = selectedPlatform
+        config.tencentCloud.appID = tencentAppID.trimmingCharacters(in: .whitespacesAndNewlines)
         config.tencentCloud.secretId = tencentSecretId.trimmingCharacters(in: .whitespacesAndNewlines)
         config.tencentCloud.secretKey = tencentSecretKey.trimmingCharacters(in: .whitespacesAndNewlines)
         config.aliyun.accessKeyId = aliyunAccessKeyId.trimmingCharacters(in: .whitespacesAndNewlines)
         config.aliyun.accessKeySecret = aliyunAccessKeySecret.trimmingCharacters(in: .whitespacesAndNewlines)
         config.aliyun.appKey = aliyunAppKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailianHTTP.baseURL = bailianHTTPBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailianHTTP.apiKey = bailianHTTPAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailianHTTP.model = bailianHTTPModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailian.baseURL = bailianBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailian.apiKey = bailianAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.aliyunBailian.model = bailianModel.trimmingCharacters(in: .whitespacesAndNewlines)
         config.volcengine.apiKey = volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.volcengine.modelVersion = volcengineModelVersion
+        config.volcengineTraditional.appID = volcengineTraditionalAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.volcengineTraditional.accessToken = volcengineTraditionalToken.trimmingCharacters(in: .whitespacesAndNewlines)
         config.xunfei.appID = xunfeiAppID.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.xunfei.apiKey = xunfeiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.xunfei.apiSecret = xunfeiAPISecret.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.xiaomiMiMo.apiKey = xiaomiMiMoAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.xiaomiMiMoTokenPlan.apiKey = xiaomiMiMoTokenPlanAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.xunfei.realtimeAPIKey = xunfeiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.xunfei.apiKey = xunfeiIATAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.xunfei.apiSecret = xunfeiIATAPISecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.mimo.baseURL = mimoBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.mimo.apiKey = mimoKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.mimo.model = mimoModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.openAICompatible.apiFormat = openAIFormat
+        config.openAICompatible.baseURL = openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.openAICompatible.apiKey = openAIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.openAICompatible.model = openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
         return config
     }
 
@@ -481,17 +612,35 @@ struct ASRSettingsView: View {
         case .localSenseVoice:
             return nil
         case .tencentCloudSentence:
+            return config.tencentCloud.sentenceLastValidationError
+        case .tencentCloudRealtime:
             return config.tencentCloud.lastValidationError
         case .aliyunSentence:
+            return config.aliyun.sentenceLastValidationError
+        case .aliyunRealtime:
             return config.aliyun.lastValidationError
-        case .volcengineSentence:
+        case .aliyunBailianHTTPASR:
+            return config.aliyunBailianHTTP.lastValidationError
+        case .aliyunBailianASR:
+            return config.aliyunBailian.lastValidationError
+        case .volcengineRealtime:
             return config.volcengine.lastValidationError
-        case .xunfeiSentence:
+        case .volcengineBigModelSentence:
+            return config.volcengine.bigModelSentenceValidationError
+        case .volcengineSentence:
+            return config.volcengine.fileLastValidationError
+        case .volcengineTraditionalSentence:
+            return config.volcengineTraditional.sentenceLastValidationError
+        case .volcengineTraditionalRealtime:
+            return config.volcengineTraditional.realtimeLastValidationError
+        case .xunfeiIAT:
+            return config.xunfei.iatLastValidationError
+        case .xunfeiRealtime:
             return config.xunfei.lastValidationError
-        case .xiaomiMiMoASR:
-            return config.xiaomiMiMo.lastValidationError
-        case .xiaomiMiMoTokenPlanASR:
-            return config.xiaomiMiMoTokenPlan.lastValidationError
+        case .mimoASR:
+            return config.mimo.lastValidationError
+        case .openAICompatibleASR:
+            return config.openAICompatible.lastValidationError
         }
     }
 }

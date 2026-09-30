@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>MemoEcho 需要麦克风权限来进行语音输入</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MemoEcho 需要访问你配置的局域网语音识别或 AI 服务</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>

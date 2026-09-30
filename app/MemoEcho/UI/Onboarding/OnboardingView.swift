@@ -182,7 +182,7 @@ struct OnboardingView: View {
                 selected: !isLocalASR
             ) {
                 if isLocalASR {
-                    coordinator.selectASRPlatform(.tencentCloudSentence)
+                    coordinator.selectASRPlatform(.tencentCloudRealtime)
                 }
             }
         }

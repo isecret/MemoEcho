@@ -30,7 +30,7 @@ final class CloudASRValidationServiceTests: XCTestCase {
 
         service.validate(
             CloudASRValidationInput(
-                platform: .tencentCloudSentence,
+                platform: .tencentCloudRealtime,
                 asrConfig: ASRConfig()
             )
         )
@@ -44,7 +44,8 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testSuccessfulValidationTransitionsToReadyAndPersistsState() async throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .tencentCloudSentence
+        config.selectedPlatform = .tencentCloudRealtime
+        config.tencentCloud.appID = "123456"
         config.tencentCloud.secretId = "id"
         config.tencentCloud.secretKey = "key"
         try store.saveASRConfig(config)
@@ -58,7 +59,7 @@ final class CloudASRValidationServiceTests: XCTestCase {
             }
         )
 
-        service.validate(CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig))
+        service.validate(CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig))
 
         XCTAssertEqual(service.status, .checking)
         await waitUntil { service.status == .ready }
@@ -69,7 +70,7 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testValidationFailureExposesUserFacingErrorAndPersistsFailure() async throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .aliyunSentence
+        config.selectedPlatform = .aliyunRealtime
         config.aliyun.accessKeyId = "ak"
         config.aliyun.accessKeySecret = "secret"
         config.aliyun.appKey = "app"
@@ -84,7 +85,7 @@ final class CloudASRValidationServiceTests: XCTestCase {
             }
         )
 
-        service.validate(CloudASRValidationInput(platform: .aliyunSentence, asrConfig: store.asrConfig))
+        service.validate(CloudASRValidationInput(platform: .aliyunRealtime, asrConfig: store.asrConfig))
 
         await waitUntil { service.status == .failed }
         XCTAssertEqual(service.lastErrorMessage, "云端 ASR 认证失败，请检查当前平台凭据")
@@ -96,9 +97,9 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testLatestValidationWinsOverCancelledRequest() async throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .xunfeiSentence
+        config.selectedPlatform = .xunfeiRealtime
         config.xunfei.appID = "appid"
-        config.xunfei.apiKey = "key"
+        config.xunfei.realtimeAPIKey = "key"
         config.xunfei.apiSecret = "secret"
         try store.saveASRConfig(config)
 
@@ -106,7 +107,7 @@ final class CloudASRValidationServiceTests: XCTestCase {
             configStore: store,
             validatorFactory: { input in
                 StubCloudASRValidator {
-                    if input.asrConfig.xunfei.apiKey == "key" {
+                    if input.asrConfig.xunfei.realtimeAPIKey == "key" {
                         try await Task.sleep(for: .milliseconds(150))
                         throw MemoEchoError.cloudASRNetworkFailure(message: "old request should be cancelled")
                     }
@@ -114,12 +115,12 @@ final class CloudASRValidationServiceTests: XCTestCase {
             }
         )
 
-        service.validate(CloudASRValidationInput(platform: .xunfeiSentence, asrConfig: store.asrConfig))
+        service.validate(CloudASRValidationInput(platform: .xunfeiRealtime, asrConfig: store.asrConfig))
 
         var nextConfig = store.asrConfig
-        nextConfig.xunfei.apiKey = "new-key"
+        nextConfig.xunfei.realtimeAPIKey = "new-key"
         try store.saveASRConfig(nextConfig)
-        service.validate(CloudASRValidationInput(platform: .xunfeiSentence, asrConfig: store.asrConfig))
+        service.validate(CloudASRValidationInput(platform: .xunfeiRealtime, asrConfig: store.asrConfig))
 
         await waitUntil { service.status == .ready }
         XCTAssertNil(service.lastErrorMessage)
@@ -130,15 +131,16 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testSyncFromConfigRestoresVerifiedState() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .tencentCloudSentence
+        config.selectedPlatform = .tencentCloudRealtime
+        config.tencentCloud.appID = "123456"
         config.tencentCloud.secretId = "id"
         config.tencentCloud.secretKey = "key"
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
 
         let service = CloudASRValidationService(configStore: store)
         service.syncFromConfig(
-            for: CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+            for: CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         )
 
         XCTAssertEqual(service.status, .ready)
@@ -149,20 +151,20 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testSyncFromConfigRestoresFailedStateAndMessage() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .aliyunSentence
+        config.selectedPlatform = .aliyunRealtime
         config.aliyun.accessKeyId = "ak"
         config.aliyun.accessKeySecret = "secret"
         config.aliyun.appKey = "app"
         try store.saveASRConfig(config)
         try store.updateCloudValidationState(
-            for: .aliyunSentence,
+            for: .aliyunRealtime,
             status: .failed,
             error: "云端 ASR 认证失败，请检查当前平台凭据"
         )
 
         let service = CloudASRValidationService(configStore: store)
         service.syncFromConfig(
-            for: CloudASRValidationInput(platform: .aliyunSentence, asrConfig: store.asrConfig)
+            for: CloudASRValidationInput(platform: .aliyunRealtime, asrConfig: store.asrConfig)
         )
 
         XCTAssertEqual(service.status, .failed)
@@ -173,14 +175,14 @@ final class CloudASRValidationServiceTests: XCTestCase {
     func testSyncFromConfigDoesNotTreatOrphanedValidatingAsReady() throws {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .volcengineSentence
+        config.selectedPlatform = .volcengineRealtime
         config.volcengine.apiKey = "api-key"
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .volcengineSentence, status: .validating)
+        try store.updateCloudValidationState(for: .volcengineRealtime, status: .validating)
 
         let service = CloudASRValidationService(configStore: store)
         service.syncFromConfig(
-            for: CloudASRValidationInput(platform: .volcengineSentence, asrConfig: store.asrConfig)
+            for: CloudASRValidationInput(platform: .volcengineRealtime, asrConfig: store.asrConfig)
         )
 
         XCTAssertEqual(service.status, .incomplete)
@@ -195,10 +197,10 @@ final class CloudASRValidationServiceTests: XCTestCase {
             counter.increment()
             return StubCloudASRValidator { try await Task.sleep(for: .milliseconds(30)) }
         })
-        let input = CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+        let input = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         service.validate(input)
         await waitUntil { store.asrConfig.tencentCloud.validationStatus == .validating }
-        let updatedInput = CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+        let updatedInput = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         service.syncFromConfig(for: updatedInput)
         service.validate(updatedInput)
         service.validate(updatedInput, force: true)
@@ -213,14 +215,14 @@ final class CloudASRValidationServiceTests: XCTestCase {
         let service = CloudASRValidationService(configStore: store, validatorFactory: { _ in
             StubCloudASRValidator { try await Task.sleep(for: .milliseconds(40)) }
         })
-        service.validate(CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig))
+        service.validate(CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig))
         await waitUntil { store.asrConfig.tencentCloud.validationStatus == .validating }
         var changedConfig = store.asrConfig
         changedConfig.tencentCloud.secretKey = "different-key"
         try store.saveASRConfig(changedConfig)
         await waitUntil { service.status == .incomplete }
         XCTAssertEqual(store.asrConfig.tencentCloud.validationStatus, .unvalidated)
-        XCTAssertEqual(service.status(for: CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)), .incomplete)
+        XCTAssertEqual(service.status(for: CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)), .incomplete)
     }
 
     @MainActor
@@ -233,10 +235,10 @@ final class CloudASRValidationServiceTests: XCTestCase {
                 throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "test-key response body"])
             }
         })
-        let input = CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+        let input = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         service.validate(input)
         await waitUntil { service.status == .failed }
-        service.syncFromConfig(for: CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig))
+        service.syncFromConfig(for: CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig))
         service.validate(input)
         XCTAssertEqual(counter.currentValue(), 1)
         XCTAssertEqual(store.asrConfig.tencentCloud.lastValidationError, "云端识别验证失败，请检查配置或网络后重试")
@@ -248,22 +250,22 @@ final class CloudASRValidationServiceTests: XCTestCase {
     @MainActor
     func testCopiedVerifiedStateCannotValidateDifferentCredentials() throws {
         let store = try configuredTencentStore()
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
         let service = CloudASRValidationService(configStore: store)
-        let verified = CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+        let verified = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         service.syncFromConfig(for: verified)
         var edited = store.asrConfig
         edited.tencentCloud.secretKey = "different-key"
-        XCTAssertEqual(service.status(for: CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: edited)), .incomplete)
+        XCTAssertEqual(service.status(for: CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: edited)), .incomplete)
         XCTAssertEqual(service.status(for: verified), .ready)
     }
 
     @MainActor
     func testRuntimeInvalidationBlocksCachedVerifiedConfiguration() async throws {
         let store = try configuredTencentStore()
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
         let service = CloudASRValidationService(configStore: store, validatorFactory: { _ in StubCloudASRValidator {} })
-        let input = CloudASRValidationInput(platform: .tencentCloudSentence, asrConfig: store.asrConfig)
+        let input = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
         service.syncFromConfig(for: input)
         service.invalidateCurrentValidation()
         XCTAssertEqual(service.status(for: input), .failed)
@@ -278,105 +280,12 @@ final class CloudASRValidationServiceTests: XCTestCase {
     private func configuredTencentStore() throws -> ConfigStore {
         let store = ConfigStore(configDirectory: tempDirectory)
         var config = store.asrConfig
-        config.selectedPlatform = .tencentCloudSentence
+        config.selectedPlatform = .tencentCloudRealtime
+        config.tencentCloud.appID = "123456"
         config.tencentCloud.secretId = "test-id"
         config.tencentCloud.secretKey = "test-key"
         try store.saveASRConfig(config)
         return store
-    }
-
-    func testXiaomiMiMoValidationInputFingerprintUsesAPIKey() {
-        var config = ASRConfig()
-        config.xiaomiMiMo.apiKey = "mimo-key"
-
-        let input = CloudASRValidationInput(platform: .xiaomiMiMoASR, asrConfig: config)
-
-        XCTAssertTrue(input.isCloudPlatform)
-        XCTAssertTrue(input.isComplete)
-        XCTAssertEqual(input.fingerprint, "xiaomiMiMoASR\nmimo-key")
-    }
-
-    func testXiaomiMiMoTokenPlanValidationInputFingerprintUsesIndependentPlatform() {
-        var config = ASRConfig()
-        config.xiaomiMiMo.apiKey = "mimo-key"
-        config.xiaomiMiMoTokenPlan.apiKey = "token-plan-key"
-
-        let input = CloudASRValidationInput(platform: .xiaomiMiMoTokenPlanASR, asrConfig: config)
-
-        XCTAssertTrue(input.isCloudPlatform)
-        XCTAssertTrue(input.isComplete)
-        XCTAssertEqual(input.fingerprint, "xiaomiMiMoTokenPlanASR\ntoken-plan-key")
-    }
-
-    @MainActor
-    func testSyncFromConfigRestoresXiaomiMiMoVerifiedState() throws {
-        let store = ConfigStore(configDirectory: tempDirectory)
-        var config = store.asrConfig
-        config.selectedPlatform = .xiaomiMiMoASR
-        config.xiaomiMiMo.apiKey = "mimo-key"
-        try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .xiaomiMiMoASR, status: .verified)
-
-        let service = CloudASRValidationService(configStore: store)
-        service.syncFromConfig(
-            for: CloudASRValidationInput(platform: .xiaomiMiMoASR, asrConfig: store.asrConfig)
-        )
-
-        XCTAssertEqual(service.status, .ready)
-        XCTAssertNil(service.lastErrorMessage)
-    }
-
-    @MainActor
-    func testXiaomiMiMoValidationTransitionsToReadyAndPersistsState() async throws {
-        let store = ConfigStore(configDirectory: tempDirectory)
-        var config = store.asrConfig
-        config.selectedPlatform = .xiaomiMiMoASR
-        config.xiaomiMiMo.apiKey = "mimo-key"
-        try store.saveASRConfig(config)
-
-        let service = CloudASRValidationService(
-            configStore: store,
-            validatorFactory: { _ in
-                StubCloudASRValidator {}
-            }
-        )
-
-        service.validate(CloudASRValidationInput(platform: .xiaomiMiMoASR, asrConfig: store.asrConfig))
-
-        await waitUntil { service.status == .ready }
-        XCTAssertEqual(store.asrConfig.xiaomiMiMo.validationStatus, .verified)
-        XCTAssertNil(store.asrConfig.xiaomiMiMo.lastValidationError)
-    }
-
-    @MainActor
-    func testXiaomiMiMoTokenPlanValidationTransitionsToReadyAndPersistsIndependentState() async throws {
-        let store = ConfigStore(configDirectory: tempDirectory)
-        var config = store.asrConfig
-        config.selectedPlatform = .xiaomiMiMoTokenPlanASR
-        config.xiaomiMiMo.apiKey = "mimo-key"
-        config.xiaomiMiMoTokenPlan.apiKey = "token-plan-key"
-        try store.saveASRConfig(config)
-        try store.updateCloudValidationState(
-            for: .xiaomiMiMoASR,
-            status: .failed,
-            error: "ordinary failed"
-        )
-
-        let service = CloudASRValidationService(
-            configStore: store,
-            validatorFactory: { input in
-                XCTAssertEqual(input.platform, .xiaomiMiMoTokenPlanASR)
-                return StubCloudASRValidator {}
-            }
-        )
-
-        service.validate(CloudASRValidationInput(platform: .xiaomiMiMoTokenPlanASR, asrConfig: store.asrConfig))
-
-        await waitUntil { service.status == .ready }
-        XCTAssertEqual(store.asrConfig.xiaomiMiMoTokenPlan.validationStatus, .verified)
-        XCTAssertNil(store.asrConfig.xiaomiMiMoTokenPlan.lastValidationError)
-        XCTAssertEqual(store.asrConfig.xiaomiMiMo.validationStatus, .failed)
-        XCTAssertEqual(store.asrConfig.xiaomiMiMo.lastValidationError, "ordinary failed")
     }
 
     @MainActor

@@ -244,7 +244,7 @@ final class OnboardingViewRenderingTests: XCTestCase {
         let fixture = try OnboardingTestFixture(microphone: .denied, accessibility: .requiresManualEnable)
         defer { fixture.cleanup() }
         var asr = fixture.store.asrConfig
-        asr.selectedPlatform = .tencentCloudSentence
+        asr.selectedPlatform = .tencentCloudRealtime
         try fixture.store.saveASRConfig(asr)
         let longReason = String(repeating: "快捷键暂时不可用，请检查系统设置后重试。", count: 8)
         fixture.readinessService.hotkeyRegistrationResult = .failure(longReason)

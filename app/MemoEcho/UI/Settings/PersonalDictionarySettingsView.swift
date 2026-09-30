@@ -207,7 +207,7 @@ struct PersonalDictionarySettingsView: View {
     }
 
     private var footer: some View {
-        Text("双击标签可编辑，点击 × 删除。蓝点表示自动学习的词。")
+        Text("双击词条编辑，蓝点表示自动学习。")
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

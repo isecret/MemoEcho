@@ -29,7 +29,8 @@ final class OnboardingTestFixture {
 
     func makeReady() async throws {
         var asr = store.asrConfig
-        asr.selectedPlatform = .tencentCloudSentence
+        asr.selectedPlatform = .tencentCloudRealtime
+        asr.tencentCloud.appID = "123456"
         asr.tencentCloud.secretId = "test-id"
         asr.tencentCloud.secretKey = "test-secret"
         try store.saveASRConfig(asr)

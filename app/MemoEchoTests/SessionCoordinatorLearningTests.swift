@@ -102,12 +102,13 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             ensureAccessibilityAuthorized: {},
             configureConfigStore: { configStore in
                 var config = ASRConfig()
-                config.selectedPlatform = .tencentCloudSentence
+                config.selectedPlatform = .tencentCloudRealtime
+                config.tencentCloud.appID = "123456"
                 config.tencentCloud.secretId = "test-secret-id"
                 config.tencentCloud.secretKey = "test-secret-key"
                 try! configStore.saveASRConfig(config)
                 try! configStore.updateCloudValidationState(
-                    for: .tencentCloudSentence,
+                    for: .tencentCloudRealtime,
                     status: .verified
                 )
             }
@@ -185,11 +186,12 @@ final class SessionCoordinatorLearningTests: XCTestCase {
                         audioRecorder: recorder, ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
                         configureConfigStore: { store in
             var config = ASRConfig()
-            config.selectedPlatform = .tencentCloudSentence
+            config.selectedPlatform = .tencentCloudRealtime
+            config.tencentCloud.appID = "123456"
             config.tencentCloud.secretId = "test-id"
             config.tencentCloud.secretKey = "test-key"
             try! store.saveASRConfig(config)
-            try! store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+            try! store.updateCloudValidationState(for: .tencentCloudRealtime, status: .verified)
         })
     }
 
@@ -257,6 +259,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             insertedText: String,
             store: PersonalDictionaryStore,
             shouldContinue: @escaping @MainActor @Sendable () -> Bool,
+            onObservation: @escaping @MainActor @Sendable (PostInjectionObservationEvent) -> Void,
             onDecision: @escaping @MainActor @Sendable (PostInjectionLearningDecision) -> Void
         ) async {
             observeCallCount += 1

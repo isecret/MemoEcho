@@ -22,6 +22,7 @@ final class SessionRecoveryCheckpoint {
     let asrPlatform: ASRPlatform
     var target: TextInjectionFocus?
     var context: WindowContextSnapshot?
+    var realtimeAudio: RealtimeRecoveryAudio?
     var pendingSegments: [SealedSegment]
     var transcripts: [String]
     var polished: PolishResult?
@@ -44,7 +45,7 @@ final class SessionRecoveryCheckpoint {
     }
 
     var stage: Stage {
-        if !pendingSegments.isEmpty { return .recognition }
+        if realtimeAudio != nil || !pendingSegments.isEmpty { return .recognition }
         if polished == nil { return .polish }
         if finalText == nil { return .translation }
         return .output
@@ -61,6 +62,7 @@ final class SessionRecoveryCheckpoint {
 
     func discard() {
         discarded = true
+        realtimeAudio = nil
         pendingSegments.removeAll()
         transcripts.removeAll()
         polished = nil
@@ -76,6 +78,7 @@ struct SessionRecoveryProcessor {
     var recognize: (SealedSegment) async throws -> String
     var polish: ([String], WindowContextSnapshot?) async throws -> PolishResult
     var translate: (String, TranslationTargetLanguage, WindowContextSnapshot?) async throws -> String
+    var recognizeRealtime: ((RealtimeRecoveryAudio) async throws -> [String])? = nil
 
     func process(_ checkpoint: SessionRecoveryCheckpoint,
                  shouldContinue: () -> Bool,
@@ -84,6 +87,14 @@ struct SessionRecoveryProcessor {
             guard !Task.isCancelled, shouldContinue(), checkpoint.isValid(at: Date()) else { throw CancellationError() }
         }
         try check()
+        if let audio = checkpoint.realtimeAudio {
+            guard let recognizeRealtime else { throw RealtimeASRError.configuration }
+            onStage(.recognition)
+            let texts = try await recognizeRealtime(audio)
+            try check()
+            checkpoint.transcripts.append(contentsOf: texts)
+            checkpoint.realtimeAudio = nil
+        }
         while let segment = checkpoint.pendingSegments.first {
             onStage(.recognition)
             if segment.voicedDetected {

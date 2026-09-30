@@ -7,7 +7,7 @@ final class SessionRecoveryTests: XCTestCase {
     private func checkpoint(segments: [SealedSegment] = [], mode: TextProcessingMode = .polish,
                             target: TextInjectionFocus? = nil) -> SessionRecoveryCheckpoint {
         .init(segments: segments, transcripts: ["已有转写"], mode: mode, language: .japanese,
-              asrPlatform: .tencentCloudSentence, target: target, context: nil)
+              asrPlatform: .openAICompatibleASR, target: target, context: nil)
     }
     private func polished(_ text: String = "整理结果") -> PolishResult {
         .init(text: text, source: .llm,
@@ -340,11 +340,10 @@ final class SessionRecoveryTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
-        config.selectedPlatform = .tencentCloudSentence
-        config.tencentCloud.secretId = "synthetic-id"
-        config.tencentCloud.secretKey = "synthetic-key"
+        config.selectedPlatform = .openAICompatibleASR
+        config.openAICompatible = .init(baseURL: "http://localhost:8000/v1", apiKey: "synthetic-key", model: "test-asr")
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .openAICompatibleASR, status: .verified)
         let recorder = TailRecorder(seconds: seconds)
         let worker = SessionRecoveryProcessor(recognize: { _ in "recovered" },
             polish: { _, _ in throw MemoEchoError.llmConfigurationIncomplete },
@@ -361,11 +360,10 @@ final class SessionRecoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
-        config.selectedPlatform = .tencentCloudSentence
-        config.tencentCloud.secretId = "synthetic-id"
-        config.tencentCloud.secretKey = "synthetic-key"
+        config.selectedPlatform = .openAICompatibleASR
+        config.openAICompatible = .init(baseURL: "http://localhost:8000/v1", apiKey: "synthetic-key", model: "test-asr")
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .openAICompatibleASR, status: .verified)
         let recorder = TailRecorder()
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
                                          audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
@@ -389,11 +387,10 @@ final class SessionRecoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
-        config.selectedPlatform = .tencentCloudSentence
-        config.tencentCloud.secretId = "synthetic-id"
-        config.tencentCloud.secretKey = "synthetic-key"
+        config.selectedPlatform = .openAICompatibleASR
+        config.openAICompatible = .init(baseURL: "http://localhost:8000/v1", apiKey: "synthetic-key", model: "test-asr")
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .tencentCloudSentence, status: .verified)
+        try store.updateCloudValidationState(for: .openAICompatibleASR, status: .verified)
         let recorder = TailRecorder(seconds: 1)
         let asr = CountingASR()
         let driver = FakeInjectionDriver()
@@ -436,15 +433,15 @@ final class SessionRecoveryTests: XCTestCase {
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
                                          audioDeviceManager: AudioDeviceManager(configStore: store),
                                          asrProviderOverride: { config in
-            XCTAssertEqual(config.selectedPlatform, .tencentCloudSentence)
-            requestedKeys.append(config.tencentCloud.secretKey)
+            XCTAssertEqual(config.selectedPlatform, .openAICompatibleASR)
+            requestedKeys.append(config.openAICompatible.apiKey)
             return asr
         })
         defer { session.discardRecovery() }
         session.retainRecovery(checkpoint(segments: [segment(1)]))
         var updated = ASRConfig()
-        updated.selectedPlatform = .aliyunSentence
-        updated.tencentCloud.secretKey = "synthetic-updated"
+        updated.selectedPlatform = .aliyunRealtime
+        updated.openAICompatible = .init(baseURL: "http://localhost:8000/v1", apiKey: "synthetic-updated", model: "test-asr")
         try store.saveASRConfig(updated)
         session.retryRecovery()
         await waitUntil { !session.isRecovering }

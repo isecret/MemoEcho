@@ -31,6 +31,7 @@ final class PostInjectionDictionaryLearnerTests: XCTestCase {
     }
     private func observe(_ timeline: Timeline, original: String, before: FocusedElementTextSnapshot? = nil,
                          store: PersonalDictionaryStore? = nil,
+                         onObservation: @escaping @MainActor @Sendable (PostInjectionObservationEvent) -> Void = { _ in },
                          evaluator: @escaping @MainActor @Sendable (ProperNounLearningCandidate) async throws -> ProperNounLearningDecision) async -> [PostInjectionLearningDecision] {
         let learner = PostInjectionDictionaryLearner(
             snapshotProvider: { _, _ in timeline.current }, termEvaluator: Evaluator(call: evaluator),
@@ -38,7 +39,8 @@ final class PostInjectionDictionaryLearnerTests: XCTestCase {
         var decisions: [PostInjectionLearningDecision] = []
         await learner.observe(beforeInjection: before ?? snapshot(""), insertedText: original,
                               store: store ?? PersonalDictionaryStore(directoryURL: directory),
-                              shouldContinue: { timeline.active }, onDecision: { decisions.append($0) })
+                              shouldContinue: { timeline.active }, onObservation: onObservation,
+                              onDecision: { decisions.append($0) })
         return decisions
     }
     private func stable(_ original: String, _ updated: String) -> Timeline {
@@ -55,6 +57,45 @@ final class PostInjectionDictionaryLearnerTests: XCTestCase {
             return .accept(term: "钟世明", start: 2)
         }
         XCTAssertEqual(decisions, [.learned("钟世明")])
+    }
+
+    func testEnglishAbbreviationCorrectedToChineseProductNameCreatesLearningCandidate() async {
+        // Synthetic equivalent of a product-name correction, with punctuation intact.
+        var events: [PostInjectionObservationEvent] = []
+        let timeline = stable("打开Q-CRM系统。", "打开青岚系统。")
+        let decisions = await observe(timeline, original: "打开Q-CRM系统。",
+                                      onObservation: { events.append($0) }) { candidate in
+            XCTAssertEqual(candidate.originalSpan, "Q-CRM")
+            XCTAssertEqual(candidate.replacedSpan, "青岚")
+            XCTAssertEqual(candidate.changeStart, 2)
+            return .accept(term: "青岚", start: 2)
+        }
+        XCTAssertEqual(decisions, [.learned("青岚")])
+        XCTAssertEqual(Array(events.prefix(2)), [.started, .baselineVerified])
+        XCTAssertTrue(events.contains(.textChanged))
+        XCTAssertTrue(events.contains(.evaluating))
+    }
+
+    func testObservationReportsEarlyExitWithoutSendingCandidate() async {
+        let original = "打开Q-CRM系统。"
+        let cases: [(Timeline, PostInjectionObservationEvent)] = [
+            (Timeline([nil]), .targetUnavailable),
+            (Timeline([snapshot(original, field: "other")]), .targetChanged),
+            (Timeline([snapshot(original, selection: NSRange(location: 2, length: 0))]), .baselineSelectionMismatch),
+            (Timeline([snapshot(original, composing: true)]), .baselineCompositionActive),
+            (Timeline([snapshot("另一段文字")]), .baselineMismatch),
+            (Timeline([snapshot(original), snapshot("")]), .fieldCleared)
+        ]
+        for (timeline, expected) in cases {
+            var events: [PostInjectionObservationEvent] = []
+            let decisions = await observe(timeline, original: original,
+                                          onObservation: { events.append($0) }) { _ in
+                XCTFail("Observation ended before any candidate was ready")
+                return .reject
+            }
+            XCTAssertTrue(decisions.isEmpty)
+            XCTAssertEqual(events.last, expected)
+        }
     }
 
     func testEnglishTermSurvivesDeleteThenRetypeWithoutLearningIntermediateText() async {
