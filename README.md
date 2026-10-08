@@ -44,6 +44,14 @@
 
 需要 **macOS 14 或更新版本**。当前为 **1.0.0-beta.8** 测试版。
 
+也可以通过我们维护的 Homebrew Tap 安装：
+
+```bash
+brew install --cask isecret/tap/memoecho
+```
+
+Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-tap](https://github.com/isecret/homebrew-tap)。
+
 首次打开时，按引导配置语音识别和 AI 服务，并允许访问麦克风和辅助功能。默认按 **右 Command** 开始或结束录音。
 
 选择本地识别时，语音转文字在设备上完成，转写文字仍会发送给你配置的 AI 服务进行整理。「参考窗口上下文」默认开启，可在设置中关闭。应用不保存录音历史。
