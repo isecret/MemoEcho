@@ -30,15 +30,15 @@
 
 <table>
   <tr>
-    <td align="center"><img src="./docs/media/settings-general.png" alt="通用设置：快捷键、翻译、音效和窗口上下文" width="440" /><br />通用设置</td>
-    <td align="center"><img src="./docs/media/settings-voice.png" alt="语音设置：麦克风、输入电平与语音引擎" width="440" /><br />语音设置</td>
+    <td align="center" valign="top"><img src="./docs/media/settings-general.png" alt="通用设置：录音快捷键、单按／双按／按住、文字处理和启动与更新" width="440" /><br />通用设置</td>
+    <td align="center" valign="top"><img src="./docs/media/settings-voice.png" alt="语音设置：音频输入分组和 OpenAI 兼容语音识别配置" width="440" /><br />语音设置</td>
   </tr>
   <tr>
-    <td align="center"><img src="./docs/media/settings-model.png" alt="模型设置：连接 AI 服务，整理和翻译语音识别结果" width="440" /><br />模型设置</td>
-    <td align="center"><img src="./docs/media/settings-dictionary.png" alt="个人词典：搜索、筛选和词条管理" width="440" /><br />个人词典</td>
+    <td align="center" valign="top"><img src="./docs/media/settings-model.png" alt="模型设置：连接 AI 服务，整理和翻译语音识别结果" width="440" /><br />模型设置</td>
+    <td align="center" valign="top"><img src="./docs/media/settings-dictionary.png" alt="个人词典：搜索、筛选和词条管理" width="440" /><br />个人词典</td>
   </tr>
 </table>
-<sub>演示与截图使用示例内容。</sub>
+<sub>设置截图更新于 v1.0.0-beta.8；演示与截图均使用示例内容。</sub>
 
 ## 开始使用
 
