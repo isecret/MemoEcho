@@ -8,6 +8,7 @@ struct HotkeyRecorderView: View {
     var onPhaseChanged: ((HotkeyRecordingPhase) -> Void)?
     var onRecordingStateChanged: ((Bool) -> Void)?
     var usesProminentKeycaps = false
+    var isEnabled = true
 
     @State private var phase: HotkeyRecordingPhase = .idle
     @State private var previewCombo: HotkeyCombo?
@@ -50,6 +51,8 @@ struct HotkeyRecorderView: View {
                 )
             }
         }
+        .disabled(!isEnabled)
+        .onChange(of: isEnabled) { if !isEnabled { cancelRecording() } }
         .onDisappear {
             if phase != .idle {
                 cancelRecording()
@@ -100,7 +103,7 @@ struct HotkeyRecorderView: View {
     }
 
     private func beginRecording() {
-        guard phase == .idle else { return }
+        guard isEnabled, phase == .idle else { return }
         previewCombo = nil
         updatePhase(.waiting)
         onRecordingStateChanged?(true)
@@ -114,7 +117,7 @@ struct HotkeyRecorderView: View {
     }
 
     private func commit(_ combo: HotkeyCombo) {
-        let accepted = onCommit(combo)
+        let accepted = isEnabled && onCommit(combo.withTriggerMode(hotkey.triggerMode))
         previewCombo = nil
         updatePhase(.idle)
         onRecordingStateChanged?(false)
@@ -333,8 +336,12 @@ final class HotkeyRecorderControl: NSView {
             return
         }
 
-        let genericModifiers = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags).genericFlags
-        let physicalModifiers = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+        var physicalModifiers = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+        // Arrow/function-key events can carry .function without a physical Fn press.
+        if !CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_Function)) {
+            physicalModifiers.remove(.function)
+        }
+        let genericModifiers = physicalModifiers.genericFlags
         let combo = HotkeyCombo.standard(
             keyCode: UInt16(event.keyCode),
             modifiers: genericModifiers.rawValue,

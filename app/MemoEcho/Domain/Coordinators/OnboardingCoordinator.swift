@@ -20,6 +20,7 @@ final class OnboardingCoordinator {
     private(set) var step: SetupStep = .welcome
     private(set) var isPresented = false
     private(set) var lastErrorMessage: String?
+    var canEditHotkey = true
     var trialText = ""
     private(set) var trialPhase: OnboardingTrialPhase = .idle
     private var trialID: UUID?
@@ -242,6 +243,11 @@ final class OnboardingCoordinator {
 
     @discardableResult
     func applyHotkey(_ combo: HotkeyCombo) -> Bool {
+        if let error = HotkeyAssignmentPolicy.error(for: combo) {
+            lastErrorMessage = error
+            return false
+        }
+        guard canEditHotkey else { return false }
         let result = onApplyHotkey?(combo) ?? .failure("快捷键暂时不可用")
         guard result == .success else {
             lastErrorMessage = result.errorMessage

@@ -39,6 +39,13 @@ struct SpecialHotkeyTransition: Equatable {
     }
 }
 
+enum HotkeyInputEvent {
+    case keyDown(UInt16, modifiers: Set<HotkeyPhysicalModifier>, isRepeat: Bool)
+    case keyUp(UInt16)
+    case modifiersChanged(Set<HotkeyPhysicalModifier>)
+    case systemDefined
+}
+
 enum HotkeyRegistrationResult: Equatable {
     case success
     case failure(String)
@@ -63,6 +70,11 @@ final class HotkeyManager: @unchecked Sendable {
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var isKeyDown = false
+    private var isBlockedUntilRelease = false
+    private var recognizer = HotkeyGestureRecognizer(mode: .singlePress)
+    var onGestureAction: (@MainActor @Sendable (HotkeyGestureAction) -> Void)?
+    var isTriggerAllowed: (@MainActor @Sendable () -> Bool)?
+    var allowsTranslationShortcut: (@MainActor @Sendable () -> Bool)?
     private var specialHotkeyGestureState: SpecialHotkeyGestureState = .idle
     private(set) var registeredHotkey: HotkeyCombo?
     private var isSuspended = false
@@ -89,6 +101,8 @@ final class HotkeyManager: @unchecked Sendable {
         let result = install(hotkey)
         if case .success = result {
             registeredHotkey = hotkey
+            recognizer = HotkeyGestureRecognizer(mode: hotkey.triggerMode)
+            if testInstallHandler == nil { blockCurrentlyPressedKey(hotkey) }
         }
         return result
     }
@@ -169,6 +183,20 @@ final class HotkeyManager: @unchecked Sendable {
             return .failure("无法注册该快捷键，可能已被系统占用。")
         }
 
+        if hotkey.triggerMode != .singlePress {
+            let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .flagsChanged, .systemDefined]
+            globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+                self?.handleModeEvent(event)
+            }
+            localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+                self?.handleModeEvent(event)
+                return event
+            }
+            guard globalKeyMonitor != nil, localKeyMonitor != nil else {
+                unregister()
+                return .failure("无法监听该快捷键，请检查辅助功能权限。")
+            }
+        }
         return .success
     }
 
@@ -197,7 +225,7 @@ final class HotkeyManager: @unchecked Sendable {
     }
 
     private func installPhysicalStandardHotkey(_ hotkey: HotkeyCombo) -> HotkeyRegistrationResult {
-        let keyMask: NSEvent.EventTypeMask = [.keyDown, .keyUp]
+        let keyMask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .systemDefined]
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: keyMask) { [weak self] event in
             self?.handlePhysicalStandardEvent(event, hotkey: hotkey)
         }
@@ -222,7 +250,7 @@ final class HotkeyManager: @unchecked Sendable {
 
     /// 注销当前注册的快捷键
     func unregister() {
-        cancelPendingSpecialGesture()
+        resetGesture()
         registeredHotkey = nil
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)
@@ -249,37 +277,185 @@ final class HotkeyManager: @unchecked Sendable {
             localKeyMonitor = nil
         }
         isKeyDown = false
+        isBlockedUntilRelease = false
     }
 
     func setSuspended(_ suspended: Bool) {
         isSuspended = suspended
-        if suspended {
-            isKeyDown = false
-            cancelPendingSpecialGesture()
+        if suspended { resetGesture() }
+        else if let hotkey = registeredHotkey, testInstallHandler == nil { blockCurrentlyPressedKey(hotkey) }
+    }
+
+    /// 生命周期与会话切换不等于用户松键；未结束的按住只能取消。
+    func resetGesture() {
+        let wasHeld = isKeyDown || specialHotkeyGestureState == .armed
+        isBlockedUntilRelease = isBlockedUntilRelease || wasHeld
+        isKeyDown = false
+        cancelPendingSpecialGesture()
+        publish(recognizer.reset())
+    }
+
+    private func blockCurrentlyPressedKey(_ hotkey: HotkeyCombo) {
+        if hotkey.isPureModifier {
+            let pressed = HotkeyPhysicalModifier.pressedSet(from: NSEvent.modifierFlags)
+            isBlockedUntilRelease = isBlockedUntilRelease || containsTargetModifier(pressed, hotkey: hotkey)
+        } else if let keyCode = hotkey.keyCode {
+            isBlockedUntilRelease = isBlockedUntilRelease || CGEventSource.keyState(.combinedSessionState, key: keyCode)
         }
     }
 
-    // MARK: - Carbon Event Handling
+    private var canTrigger: Bool {
+        MainActor.assumeIsolated { isTriggerAllowed?() ?? true }
+    }
 
-    fileprivate func handlePress() {
-        guard !isSuspended else { return }
-        guard !isKeyDown else { return }
+    func handlePress(at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard !isSuspended, !isBlockedUntilRelease, !isKeyDown, canTrigger else { return }
         isKeyDown = true
-        if let callback = onKeyDown {
-            Task { @MainActor in callback() }
+        if registeredHotkey?.triggerMode != .singlePress {
+            publish(recognizer.press(at: time))
+        } else if let callback = onKeyDown {
+            MainActor.assumeIsolated { callback() }
         }
     }
 
-    fileprivate func handleRelease() {
-        guard !isSuspended else {
-            isKeyDown = false
+    func handleRelease(at time: TimeInterval = ProcessInfo.processInfo.systemUptime, primaryIsDown: Bool = false) {
+        if registeredHotkey?.triggerMode == .doublePress, primaryIsDown {
+            interruptGesture()
             return
         }
-        guard isKeyDown else { return }
+        isBlockedUntilRelease = false
+        guard !isSuspended, isKeyDown else { isKeyDown = false; return }
         isKeyDown = false
-        if let callback = onKeyUp {
-            Task { @MainActor in callback() }
+        if registeredHotkey?.triggerMode != .singlePress {
+            publish(recognizer.release(at: time))
+        } else if let callback = onKeyUp {
+            MainActor.assumeIsolated { callback() }
         }
+    }
+
+    private func publish(_ action: HotkeyGestureAction?) {
+        guard let action else { return }
+        // Carbon application handlers and NSEvent monitors deliver on the main thread.
+        // Hold begin/release must finish in event order, before another key can be handled.
+        MainActor.assumeIsolated { onGestureAction?(action) }
+    }
+
+    private func interruptGesture(blockUntilRelease: Bool = false) {
+        isBlockedUntilRelease = isBlockedUntilRelease || isKeyDown || blockUntilRelease
+        isKeyDown = false
+        publish(recognizer.reset())
+    }
+
+    private func handleModeEvent(_ event: NSEvent) {
+        let pressed = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+        let input: HotkeyInputEvent
+        switch event.type {
+        case .keyDown: input = .keyDown(event.keyCode, modifiers: pressed, isRepeat: event.isARepeat)
+        case .keyUp: input = .keyUp(event.keyCode)
+        case .flagsChanged: input = .modifiersChanged(pressed)
+        case .systemDefined: input = .systemDefined
+        default: return
+        }
+        consumeEvent(input, at: event.timestamp)
+    }
+
+    /// Carbon remains authoritative for generic ordinary-key presses/releases.
+    /// Its supplementary monitor only invalidates gestures or observes early modifier release.
+    func consumeEvent(_ event: HotkeyInputEvent, at time: TimeInterval) {
+        guard let hotkey = registeredHotkey, hotkey.triggerMode != .singlePress else { return }
+        switch event {
+        case .modifiersChanged(let pressed):
+            if hotkey.isPureModifier {
+                let targetsReleased = hotkey.triggerMode == .hold
+                    ? !containsTargetModifier(pressed, hotkey: hotkey) : pressed.isEmpty
+                if isBlockedUntilRelease {
+                    if targetsReleased { isBlockedUntilRelease = false }
+                    return
+                }
+                guard !isSuspended else { return }
+                if isKeyDown {
+                    if targetsReleased { handleRelease(at: time) }
+                    else if !hotkey.pressedModifiersAreSubsetOfRecordedSpecialModifiers(pressed)
+                        && !isTranslationModifierCandidate(pressed, hotkey: hotkey) { interruptGesture() }
+                } else if hotkey.matchesSpecialPressedModifiers(pressed) {
+                    handlePress(at: time)
+                } else if !hotkey.pressedModifiersAreSubsetOfRecordedSpecialModifiers(pressed) {
+                    interruptGesture(blockUntilRelease: !pressed.isEmpty)
+                }
+            } else {
+                guard !isSuspended else { return }
+                if isKeyDown && !requiredModifiersPresent(pressed, hotkey: hotkey) {
+                    if hotkey.triggerMode == .hold { handleRelease(at: time); isBlockedUntilRelease = true }
+                    else { interruptGesture() }
+                } else if !modifiersAreAllowed(pressed, hotkey: hotkey)
+                            && !isTranslationModifierCandidate(pressed, hotkey: hotkey) {
+                    interruptGesture()
+                }
+            }
+        case .keyDown(let code, let pressed, let isRepeat):
+            guard !isSuspended else { return }
+            if HotkeyPhysicalModifier.modifierKeyCodes.contains(code) { return }
+            if !hotkey.isPureModifier, code == hotkey.keyCode,
+               modifiersMatch(pressed, hotkey: hotkey) {
+                if hotkey.hasPhysicalStandardModifiers && !isRepeat { handlePress(at: time) }
+            } else if !isTranslationKey(code, pressed: pressed, hotkey: hotkey) {
+                interruptGesture(blockUntilRelease: hotkey.isPureModifier
+                    ? containsTargetModifier(pressed, hotkey: hotkey) : code == hotkey.keyCode)
+            }
+        case .keyUp(let code):
+            if !hotkey.isPureModifier, code == hotkey.keyCode {
+                if hotkey.hasPhysicalStandardModifiers { handleRelease(at: time) }
+                else { isBlockedUntilRelease = false }
+            }
+        case .systemDefined:
+            guard !isSuspended else { return }
+            interruptGesture()
+        }
+    }
+
+    private func containsTargetModifier(_ pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        pressed.contains { physical in
+            hotkey.specialModifiers.contains { $0.key == physical.spec.key && ($0.side == .either || $0.side == physical.spec.side) }
+        }
+    }
+
+    private func requiredModifiersPresent(_ pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        if hotkey.hasPhysicalStandardModifiers {
+            return hotkey.specialModifiers.allSatisfy { spec in
+                pressed.contains { $0.spec.key == spec.key && (spec.side == .either || $0.spec.side == spec.side) }
+            }
+        }
+        let required = NSEvent.ModifierFlags(rawValue: hotkey.modifiers).intersection([.command, .control, .option, .shift, .function])
+        return pressed.genericFlags.isSuperset(of: required)
+    }
+
+    private func modifiersAreAllowed(_ pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        if hotkey.hasPhysicalStandardModifiers {
+            return pressed.allSatisfy { physical in
+                hotkey.specialModifiers.contains { $0.key == physical.spec.key && ($0.side == .either || $0.side == physical.spec.side) }
+            }
+        }
+        let required = NSEvent.ModifierFlags(rawValue: hotkey.modifiers).intersection([.command, .control, .option, .shift, .function])
+        return pressed.genericFlags.subtracting(required).isEmpty
+    }
+
+    private func modifiersMatch(_ pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        requiredModifiersPresent(pressed, hotkey: hotkey) && modifiersAreAllowed(pressed, hotkey: hotkey)
+    }
+
+    private func isTranslationModifierCandidate(_ pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        guard hotkey.triggerMode == .hold, isKeyDown,
+              MainActor.assumeIsolated({ allowsTranslationShortcut?() ?? false }) else { return false }
+        let withoutShift = pressed.filter { $0.spec.key != .shift }
+        if hotkey.isPureModifier {
+            return hotkey.pressedModifiersAreSubsetOfRecordedSpecialModifiers(withoutShift)
+        }
+        return modifiersAreAllowed(withoutShift, hotkey: hotkey)
+    }
+
+    private func isTranslationKey(_ code: UInt16, pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) -> Bool {
+        code == UInt16(kVK_Tab) && pressed.contains { $0.spec.key == .shift }
+            && isTranslationModifierCandidate(pressed, hotkey: hotkey)
     }
 
     // MARK: - Modifier Conversion
@@ -295,6 +471,7 @@ final class HotkeyManager: @unchecked Sendable {
     }
 
     private func handleSpecialEvent(_ event: NSEvent, hotkey: HotkeyCombo) {
+        if hotkey.triggerMode != .singlePress { handleModeEvent(event); return }
         let gestureEvent: SpecialHotkeyGestureEvent
         switch event.type {
         case .flagsChanged:
@@ -317,6 +494,11 @@ final class HotkeyManager: @unchecked Sendable {
         _ gestureEvent: SpecialHotkeyGestureEvent,
         hotkey: HotkeyCombo
     ) -> Bool {
+        if isBlockedUntilRelease {
+            if case .modifierFlagsChanged(let pressed) = gestureEvent, pressed.isEmpty { isBlockedUntilRelease = false }
+            return false
+        }
+        guard canTrigger || isSuspended else { return false }
         let transition = Self.resolveSpecialGestureEvent(
             gestureEvent,
             hotkey: hotkey,
@@ -381,10 +563,12 @@ final class HotkeyManager: @unchecked Sendable {
 
     private func publishSpecialGestureAction(_ action: SpecialHotkeyGestureAction) {
         guard action != .none, let callback = onSpecialGestureAction else { return }
-        Task { @MainActor in callback(action) }
+        MainActor.assumeIsolated { callback(action) }
     }
 
     private func handlePhysicalStandardEvent(_ event: NSEvent, hotkey: HotkeyCombo) {
+        if hotkey.triggerMode != .singlePress { handleModeEvent(event); return }
+        if event.type == .keyDown && event.isARepeat { return }
         let pressed = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
 
         switch event.type {
@@ -425,9 +609,11 @@ private func carbonHotkeyCallback(
 
     switch GetEventKind(event) {
     case UInt32(kEventHotKeyPressed):
-        manager.handlePress()
+        manager.handlePress(at: GetEventTime(event))
     case UInt32(kEventHotKeyReleased):
-        manager.handleRelease()
+        manager.handleRelease(at: GetEventTime(event), primaryIsDown: manager.registeredHotkey?.keyCode.map {
+            CGEventSource.keyState(.combinedSessionState, key: $0)
+        } ?? false)
     default:
         return OSStatus(eventNotHandledErr)
     }

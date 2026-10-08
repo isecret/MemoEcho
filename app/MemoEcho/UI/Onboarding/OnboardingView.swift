@@ -101,6 +101,10 @@ struct OnboardingView: View {
             Text(pageTitle)
                 .font(.system(size: 28, weight: .semibold))
                 .accessibilityAddTraits(.isHeader)
+            if coordinator.step == .hotkey {
+                HotkeyTriggerModePicker(hotkey: hotkey, onCommit: coordinator.applyHotkey,
+                                        isEnabled: coordinator.canEditHotkey && !isRecordingHotkey)
+            }
             if !pageSubtitle.isEmpty {
                 Text(pageSubtitle)
                     .font(.system(size: 14))
@@ -137,6 +141,7 @@ struct OnboardingView: View {
         if coordinator.step == .tryIt, !coordinator.readiness.isReady {
             return "先完成下面的设置，再试着说一句。"
         }
+        if coordinator.step == .hotkey { return hotkey.triggerMode.instruction }
         return coordinator.step.subtitle
     }
 
@@ -312,14 +317,22 @@ struct OnboardingView: View {
         .accessibilityElement(children: .combine)
     }
 
+    @State private var isRecordingHotkey = false
+
     private var hotkeyVisual: some View {
         OnboardingDemoStage(background: .hotkey) {
-            HotkeyRecorderView(
-                hotkey: hotkey,
-                onCommit: coordinator.applyHotkey,
-                onRecordingStateChanged: coordinator.setHotkeyCaptureSuspended,
-                usesProminentKeycaps: true
-            )
+            VStack(spacing: 24) {
+                HotkeyRecorderView(
+                    hotkey: hotkey,
+                    onCommit: coordinator.applyHotkey,
+                    onRecordingStateChanged: { isRecording in
+                        isRecordingHotkey = isRecording
+                        coordinator.setHotkeyCaptureSuspended(isRecording)
+                    },
+                    usesProminentKeycaps: true,
+                    isEnabled: coordinator.canEditHotkey
+                )
+            }
         }
     }
 
@@ -340,9 +353,9 @@ struct OnboardingView: View {
                     .focused($trialEditorFocused)
                     .disabled(!coordinator.readiness.isReady)
                     .accessibilityLabel("语音试用文本框")
-                    .accessibilityHint("按下快捷键 \(HotkeyPresentation(combo: hotkey).accessibilityDescription)，开始说话，再按一次结束。文字会填在这里。")
+                    .accessibilityHint(hotkey.triggerMode.startInstruction(key: HotkeyPresentation(combo: hotkey).accessibilityDescription) + hotkey.triggerMode.instruction + "文字会填在这里。")
                 if coordinator.trialText.isEmpty {
-                    Text("按下快捷键 \(HotkeyPresentation(combo: hotkey).compactDescription)，开始说话…")
+                    Text(hotkey.triggerMode.startInstruction(key: HotkeyPresentation(combo: hotkey).compactDescription))
                         .font(.system(size: 17))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 21)
@@ -421,7 +434,7 @@ struct OnboardingView: View {
                     readinessLabel(coordinator.readiness.hotkey)
                 } else if hotkey.specialModifiers.contains(where: { $0.key == .function }) {
                     HStack(spacing: 6) {
-                        Text("将系统“按下 🌐 键时”设为“无操作”。")
+                        Text(HotkeySystemConflict.functionKeyInstruction(for: hotkey))
                         Button("键盘设置…", action: openKeyboardSettings).buttonStyle(.link)
                     }
                     .font(.caption).foregroundStyle(.secondary)

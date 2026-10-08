@@ -123,6 +123,69 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.driver.axWrites, 0)
     }
 
+    func testReleaseBeforeAsynchronousCaptureStartsLeavesNoRecordingOrRequests() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startRecording()
+        XCTAssertEqual(fixture.coordinator.state, .recording)
+        fixture.coordinator.finishRecording()
+        XCTAssertEqual(fixture.coordinator.state, .idle)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(fixture.recorder.retainFullAudioArguments.isEmpty)
+        XCTAssertEqual(fixture.factory.creationCount, 0)
+        XCTAssertEqual(fixture.probe.polishCalls, 0)
+        XCTAssertEqual(fixture.driver.pastes, 0)
+        XCTAssertNil(fixture.coordinator.recovery)
+    }
+
+    func testReleaseDuringCaptureStartupCancelsPendingStartAndIgnoresLateReturn() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        fixture.recorder.pauseStartup = true
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.coordinator.finishRecording()
+        XCTAssertEqual(fixture.coordinator.state, .idle)
+        await fixture.recorder.releaseStartup.open()
+        await fixture.recorder.startReturned.wait()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(fixture.recorder.completedStarts, 0)
+        XCTAssertEqual(fixture.coordinator.state, .idle)
+        XCTAssertEqual(fixture.factory.creationCount, 0)
+        XCTAssertEqual(fixture.probe.polishCalls, 0)
+        XCTAssertEqual(fixture.driver.pastes, 0)
+        XCTAssertNil(fixture.coordinator.currentError)
+    }
+
+    func testHoldReleaseUsesExistingFiveHundredMillisecondSubmissionBoundary() async throws {
+        for samples in [7_984, 8_000] {
+            let fixture = try makeFixture()
+            defer { fixture.cleanup() }
+            fixture.recorder.pauseStartup = true
+            let manager = HotkeyManager()
+            manager.testInstallHandler = { _ in .success }
+            _ = manager.register(hotkey: .default.withTriggerMode(.hold))
+            let binding = CoordinatorHoldBinding(coordinator: fixture.coordinator)
+            manager.onGestureAction = { binding.handle($0) }
+            manager.consumeEvent(.modifiersChanged([.rightCommand]), at: 0)
+            await fixture.recorder.started.wait()
+            fixture.recorder.emit(samples: samples)
+            manager.consumeEvent(.modifiersChanged([]), at: 1)
+            await fixture.recorder.releaseStartup.open()
+            if samples < 8_000 {
+                XCTAssertEqual(fixture.coordinator.state, .idle)
+                XCTAssertEqual(fixture.factory.creationCount, 0)
+            } else {
+                await fixture.service.finishEntered.wait()
+                XCTAssertEqual(fixture.coordinator.state, .transcribing)
+            }
+            XCTAssertEqual(fixture.probe.polishCalls, 0)
+            XCTAssertEqual(fixture.driver.pastes, 0)
+            fixture.coordinator.cancel()
+            await fixture.service.releaseFinal.open()
+        }
+    }
+
     private func makeFixture(sendError: RealtimeASRError? = nil) throws -> CoordinatorRealtimeFixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
@@ -198,6 +261,10 @@ private final class CoordinatorRealtimeProbe {
 private final class CoordinatorRealtimeRecorder: AudioRecording {
     var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
     let started = CoordinatorRealtimeGate()
+    let releaseStartup = CoordinatorRealtimeGate()
+    let startReturned = CoordinatorRealtimeGate()
+    var pauseStartup = false
+    private(set) var completedStarts = 0
     private var callback: (@Sendable (Data) -> Void)?
     private var sampleCount = 0
     private(set) var retainFullAudioArguments: [Bool] = []
@@ -214,6 +281,15 @@ private final class CoordinatorRealtimeRecorder: AudioRecording {
         retainFullAudioArguments.append(retainFullAudio)
         callback = onPCMChunk
         await started.open()
+        if pauseStartup { await releaseStartup.wait() }
+        do {
+            try Task.checkCancellation()
+            completedStarts += 1
+            await startReturned.open()
+        } catch {
+            await startReturned.open()
+            throw error
+        }
     }
     func emit(samples: Int) {
         sampleCount += samples
@@ -294,5 +370,26 @@ private final class CoordinatorRealtimeFactory: @unchecked Sendable {
     func makeSession() -> any RealtimeASRSession {
         lock.withLock { count += 1 }
         return session
+    }
+}
+
+@MainActor
+private final class CoordinatorHoldBinding {
+    let coordinator: SessionCoordinator
+    private var ownership = HoldHotkeyInteraction()
+    init(coordinator: SessionCoordinator) { self.coordinator = coordinator }
+    func handle(_ action: HotkeyGestureAction) {
+        switch action {
+        case .holdBegan(let id):
+            guard coordinator.state.allowsRecordingStart else { return }
+            coordinator.startRecording()
+            if coordinator.state == .recording { ownership.began(gesture: id, session: coordinator.currentSessionID) }
+        case .holdEnded(let id), .holdCancelled(let id):
+            if ownership.consume(gesture: id, session: coordinator.currentSessionID, state: coordinator.state) {
+                if case .holdEnded = action { coordinator.finishRecording() }
+                else { coordinator.cancel() }
+            }
+        case .toggle: break
+        }
     }
 }

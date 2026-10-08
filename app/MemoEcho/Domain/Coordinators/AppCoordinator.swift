@@ -63,6 +63,7 @@ final class AppCoordinator {
     let readinessService: VoiceInputReadinessService
     let onboardingCoordinator: OnboardingCoordinator
     let microphoneLevelController = MicrophoneLevelController()
+    let windowPresence = ApplicationWindowPresence()
     let updateService: AppUpdateService
 
     var selectedSettingsTab: SettingsTab = .general {
@@ -77,6 +78,8 @@ final class AppCoordinator {
     private var settingsToolbarCoordinator: SettingsToolbarCoordinator?
     private let settingsWindowLayout = SettingsWindowLayout()
     private var specialHotkeyInteraction = SpecialHotkeyInteraction()
+    private var holdHotkeyInteraction = HoldHotkeyInteraction()
+    var canEditHotkey: Bool { !sessionCoordinator.state.isProcessing && !sessionCoordinator.isRecovering }
     private let microphoneFocusRestorer = MicrophoneAuthorizationFocusRestorer()
     private let recordingStartGate = RecordingStartGate()
     private var onboardingWindowController: NSWindowController?
@@ -135,6 +138,13 @@ final class AppCoordinator {
 
         let hud = HUDFeedbackController()
         hudFeedbackController = hud
+        sessionCoordinator.onStateChanged = { [weak self] oldState, state in
+            guard let self else { return }
+            self.onboardingCoordinator.canEditHotkey = !state.isProcessing
+            if (state.isProcessing && state != .recording) || (oldState == .recording && state != .recording) {
+                self.clearHotkeyInteraction()
+            }
+        }
         sessionCoordinator.onFeedbackEvent = { [weak self] event in
             if let self {
                 if case .recordingStarted = event { self.microphoneLevelController.stop() }
@@ -216,6 +226,17 @@ final class AppCoordinator {
                 }
             }
         ]
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            lifecycleObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.clearHotkeyInteraction()
+                    if self.sessionCoordinator.state == .recording { self.sessionCoordinator.cancel() }
+                }
+            })
+        }
     }
 
     /// 应用启动后注册快捷键并检查首次配置
@@ -243,6 +264,10 @@ final class AppCoordinator {
             onboardingWindowDelegate = delegate
             window.delegate = delegate
             onboardingWindowController = NSWindowController(window: window)
+        }
+        if let window = onboardingWindowController?.window {
+            windowPresence.windowOpened(window)
+            if window.isMiniaturized { window.deminiaturize(nil) }
         }
         onboardingWindowController?.showWindow(nil)
         onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
@@ -327,6 +352,10 @@ final class AppCoordinator {
 
         settingsWindowController?.window?.toolbar?.selectedItemIdentifier = .settingsTab(selectedSettingsTab)
 
+        if let window = settingsWindowController?.window {
+            windowPresence.windowOpened(window)
+            if window.isMiniaturized { window.deminiaturize(nil) }
+        }
         settingsWindowController?.showWindow(nil)
         settingsWindowController?.window?.makeKeyAndOrderFront(nil)
         isSettingsWindowVisible = true
@@ -396,6 +425,7 @@ final class AppCoordinator {
     /// 尝试启用新快捷键；失败时保留原配置和原监听。
     @discardableResult
     func applyHotkey(_ hotkey: HotkeyCombo) -> HotkeyRegistrationResult {
+        guard canEditHotkey else { return .failure("录音或处理结束后再修改。") }
         let result = Self.applyHotkey(hotkey, manager: hotkeyManager, configStore: configStore)
         readinessService.hotkeyRegistrationResult = hotkeyManager.registeredHotkey == configStore.generalConfig.hotkey
             ? .success : .failure("快捷键未能注册，请重新设置。")
@@ -405,6 +435,7 @@ final class AppCoordinator {
 
     /// 注册和保存是一笔事务，落盘失败时恢复此前的实际监听。
     static func applyHotkey(_ hotkey: HotkeyCombo, manager: HotkeyManager, configStore: ConfigStore) -> HotkeyRegistrationResult {
+        if let error = HotkeyAssignmentPolicy.error(for: hotkey) { return .failure(error) }
         let previousHotkey = configStore.generalConfig.hotkey
         let result = manager.replace(with: hotkey)
         guard case .success = result else { return result }
@@ -431,6 +462,13 @@ final class AppCoordinator {
     }
 
     private func bindHotkeyCallbacks() {
+        hotkeyManager.isTriggerAllowed = { [weak self] in
+            guard let self else { return false }
+            return !self.sessionCoordinator.isRecovering
+                && (self.sessionCoordinator.state.allowsRecordingStart || self.sessionCoordinator.state == .recording)
+        }
+        hotkeyManager.allowsTranslationShortcut = { [weak self] in self?.sessionCoordinator.state == .recording }
+        hotkeyManager.onGestureAction = { [weak self] action in self?.handleGestureAction(action) }
         hotkeyManager.onKeyDown = { [weak self] in
             self?.handleHotkeyEvent()
         }
@@ -458,6 +496,32 @@ final class AppCoordinator {
         step: SetupStep
     ) -> Bool {
         isSetupComplete && isOnboardingPresented && isOnboardingWindowKey && step == .tryIt
+    }
+
+    private func clearHotkeyInteraction() {
+        hotkeyManager.resetGesture()
+        holdHotkeyInteraction.reset()
+        _ = specialHotkeyInteraction.handle(.cancelled, sessionState: sessionCoordinator.state)
+        hudFeedbackController.dismissHotkeyCandidate()
+    }
+
+    private func handleGestureAction(_ action: HotkeyGestureAction) {
+        switch action {
+        case .toggle:
+            handleHotkeyEvent()
+        case .holdBegan(let gesture):
+            guard sessionCoordinator.state.allowsRecordingStart else { return }
+            let previousID = sessionCoordinator.currentSessionID
+            performHotkeyAction(.startRecording)
+            if sessionCoordinator.state == .recording, sessionCoordinator.currentSessionID != previousID {
+                holdHotkeyInteraction.began(gesture: gesture, session: sessionCoordinator.currentSessionID)
+            }
+        case .holdEnded(let gesture), .holdCancelled(let gesture):
+            guard holdHotkeyInteraction.consume(gesture: gesture, session: sessionCoordinator.currentSessionID,
+                                               state: sessionCoordinator.state) else { return }
+            if case .holdEnded = action { sessionCoordinator.finishRecording() }
+            else { sessionCoordinator.cancel() }
+        }
     }
 
     private func handleHotkeyEvent() {

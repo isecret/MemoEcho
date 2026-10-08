@@ -358,6 +358,23 @@ final class OnboardingViewRenderingTests: XCTestCase {
         }
     }
 
+    func testRecordingModeSelectorAndModeSpecificTrialFitOnboarding() async throws {
+        let fixture = try OnboardingTestFixture()
+        defer { fixture.cleanup() }
+        try await fixture.makeReady()
+        try fixture.store.saveGeneralConfig(fixture.store.generalConfig, confirmingHotkey: true)
+        for mode in HotkeyTriggerMode.allCases {
+            var general = fixture.store.generalConfig
+            general.hotkey = .default.withTriggerMode(mode)
+            try fixture.store.saveGeneralConfig(general, confirmingHotkey: true)
+            for step in [SetupStep.hotkey, .tryIt] {
+                fixture.coordinator.go(to: step)
+                try capture(OnboardingView(coordinator: fixture.coordinator), appearanceName: .aqua,
+                            name: "recording-mode-\(mode.rawValue)-\(step.rawValue)", size: NSSize(width: 760, height: 660))
+            }
+        }
+    }
+
     func testReadyTrialFocusesEditorWhenEnteredAndReopened() async throws {
         let fixture = try OnboardingTestFixture()
         defer { fixture.cleanup() }

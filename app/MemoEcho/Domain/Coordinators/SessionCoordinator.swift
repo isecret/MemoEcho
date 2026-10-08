@@ -27,7 +27,10 @@ enum SessionTextOutput: Sendable {
 @MainActor
 @Observable
 final class SessionCoordinator {
-    private(set) var state: SessionState = .idle
+    private(set) var state: SessionState = .idle {
+        didSet { if state != oldValue { onStateChanged?(oldValue, state) } }
+    }
+    var onStateChanged: (@MainActor @Sendable (SessionState, SessionState) -> Void)?
     private(set) var lastRecordedAudio: Data?
     private(set) var currentError: MemoEchoError?
     private(set) var lastResult: SessionResult?
@@ -73,7 +76,7 @@ final class SessionCoordinator {
     private var soundCueTask: Task<Void, Never>?
     private var recordingStopTask: Task<Void, Never>?
     private var sessionGeneration: UInt64 = 0
-    private var currentSessionID: String = ""
+    private(set) var currentSessionID: String = ""
     private var processingMode: TextProcessingMode = .polish
     private var textOutput: SessionTextOutput = .focusedApplication
     var isOnboardingTrial: Bool { textOutput.isOnboardingTrial }
@@ -300,7 +303,7 @@ final class SessionCoordinator {
             soundCueTask = Task { [weak self] in
                 await Task.yield()
                 guard !Task.isCancelled, let self, self.state == .recording,
-                      self.sessionGeneration == generation else { return }
+                      self.sessionGeneration == generation, self.recordingStopRequestedAt == nil else { return }
                 self.diagnostics.log(sessionID: sessionID, event: "start_sound_cue_requested")
                 self.onFeedbackEvent?(.startSoundCue(delayMs: startSoundDelay))
             }
@@ -388,14 +391,15 @@ final class SessionCoordinator {
         recordingStopRequestedAt = Date()
         diagnostics.log(sessionID: currentSessionID, event: "recording_stop_requested")
 
-        recordingStartTask?.cancel()
-        recordingStartTask = nil
+        let pendingStart = recordingStartTask
         soundCueTask?.cancel()
         soundCueTask = nil
 
         // Short captures remain silent and close immediately. Valid captures
         // play End first and keep input open for 100ms, matching Typeless.
         guard audioRecorder.currentDurationMs >= 500 else {
+            recordingStartTask?.cancel()
+            recordingStartTask = nil
             completeRecordingStop(audioRecorder.stopRecording())
             return
         }
@@ -404,6 +408,9 @@ final class SessionCoordinator {
         recordingStopTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(100)) }
             catch { return }
+            // Samples can arrive before startRecording returns. Keep that start alive
+            // for a valid capture, so it installs the ASR consumer before we seal input.
+            await pendingStart?.value
             guard !Task.isCancelled, let self, self.sessionGeneration == generation,
                   self.state == .recording else { return }
             self.recordingStopTask = nil

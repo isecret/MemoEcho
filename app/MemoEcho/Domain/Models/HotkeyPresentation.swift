@@ -210,7 +210,18 @@ struct HotkeyPresentation: Equatable, Sendable {
 }
 
 enum HotkeySystemConflict {
+    static func functionKeyInstruction(for combo: HotkeyCombo) -> String {
+        if combo.triggerMode == .doublePress {
+            return "将系统“按下 🌐 键时”设为“无操作”，并检查双按 Fn 的听写快捷键。"
+        }
+        return "将系统“按下 🌐 键时”设为“无操作”。"
+    }
+
     static func warning(for combo: HotkeyCombo) -> String? {
+        if combo.triggerMode == .doublePress, combo.isPureModifier,
+           combo.specialModifiers.count == 1, combo.specialModifiers[0].key == .command {
+            return "双按 Command 可能触发“通过键入使用 Siri”，请检查系统快捷键。"
+        }
         guard combo.kind == .standard, let keyCode = combo.keyCode else { return nil }
         let flags = NSEvent.ModifierFlags(rawValue: combo.modifiers)
             .intersection([.command, .option, .control, .shift])
@@ -232,4 +243,22 @@ enum HotkeyRecordingPhase: Equatable {
     case idle
     case waiting
     case previewingModifiers
+}
+
+/// Only validates newly assigned shortcuts; loading historical settings is unchanged.
+enum HotkeyAssignmentPolicy {
+    static func error(for combo: HotkeyCombo) -> String? {
+        if combo.isPureModifier {
+            return combo.specialModifiers.isEmpty ? "请录制快捷键。" : nil
+        }
+        guard let keyCode = combo.keyCode else { return "请录制快捷键。" }
+        if keyCode == UInt16(kVK_Escape) { return "Esc 用于取消，请选择其他快捷键。" }
+        // Physical modifier specs are authoritative for side-specific shortcuts.
+        let flags = combo.hasPhysicalStandardModifiers
+            ? combo.specialModifiers.reduce(into: NSEvent.ModifierFlags()) { $0.formUnion($1.key.genericFlags) }
+            : NSEvent.ModifierFlags(rawValue: combo.modifiers)
+        let allowed: NSEvent.ModifierFlags = [.command, .option, .control, HotkeyModifierKey.functionFlag]
+        return flags.intersection(allowed).isEmpty
+            ? "请搭配 Command、Option、Control 或 Fn 使用。" : nil
+    }
 }

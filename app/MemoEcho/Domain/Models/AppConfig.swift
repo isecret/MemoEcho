@@ -699,6 +699,7 @@ struct HotkeyModifierSpec: Codable, Equatable, Hashable, Sendable {
 }
 
 struct HotkeyCombo: Codable, Equatable, Sendable {
+    var triggerMode: HotkeyTriggerMode
     var kind: HotkeyKind
     var keyCode: UInt16?
     var modifiers: UInt
@@ -710,8 +711,10 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         keyCode: UInt16?,
         modifiers: UInt,
         specialModifiers: [HotkeyModifierSpec] = [],
-        displayString: String
+        displayString: String,
+        triggerMode: HotkeyTriggerMode = .singlePress
     ) {
+        self.triggerMode = triggerMode
         self.kind = kind
         self.keyCode = keyCode
         self.modifiers = modifiers
@@ -763,6 +766,12 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         )
     }
 
+    func withTriggerMode(_ mode: HotkeyTriggerMode) -> HotkeyCombo {
+        var copy = self
+        copy.triggerMode = mode
+        return copy
+    }
+
     var isPureModifier: Bool {
         kind == .special
     }
@@ -772,6 +781,7 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
     )
 
     private enum CodingKeys: String, CodingKey {
+        case triggerMode
         case kind
         case keyCode
         case modifiers
@@ -784,6 +794,7 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
         let decodedSpecialModifiers = try container.decodeIfPresent([HotkeyModifierSpec].self, forKey: .specialModifiers) ?? []
         let decodedModifiers = try container.decode(UInt.self, forKey: .modifiers)
 
+        triggerMode = try container.decodeIfPresent(HotkeyTriggerMode.self, forKey: .triggerMode) ?? .singlePress
         kind = decodedKind
         modifiers = decodedModifiers
         specialModifiers = decodedSpecialModifiers.sorted(by: Self.compareModifierSpecs)
@@ -806,6 +817,7 @@ struct HotkeyCombo: Codable, Equatable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        if triggerMode != .singlePress { try container.encode(triggerMode, forKey: .triggerMode) }
         try container.encode(kind, forKey: .kind)
         try container.encode(modifiers, forKey: .modifiers)
         if !specialModifiers.isEmpty {

@@ -141,77 +141,85 @@ struct ASRSettingsView: View {
     @State private var saveError: String?
 
     var body: some View {
-        SettingsPaneSection {
-            if let microphoneControls { microphoneControls }
-            SettingsFormRow(title: "语音引擎") {
-                HStack(spacing: 4) {
-                    Picker("语音引擎", selection: $selectedPlatform) {
-                        ForEach(ASRVendorGroup.allCases) { group in
-                            Section(group.rawValue) {
-                                ForEach(group.platforms, id: \.self) { platform in
-                                    Text(platform.pickerTitle).tag(platform)
+        VStack(alignment: .leading, spacing: 0) {
+            if let microphoneControls {
+                SettingsFormGroup(title: "音频输入") {
+                    microphoneControls.padding(.vertical, SettingsFormLayout.groupedSectionVerticalPadding)
+                }
+            }
+            SettingsFormGroup(title: "语音识别") {
+                SettingsPaneSection {
+                    SettingsFormRow(title: "语音引擎") {
+                        HStack(spacing: 4) {
+                            Picker("语音引擎", selection: $selectedPlatform) {
+                                ForEach(ASRVendorGroup.allCases) { group in
+                                    Section(group.rawValue) {
+                                        ForEach(group.platforms, id: \.self) { platform in
+                                            Text(platform.pickerTitle).tag(platform)
+                                        }
+                                    }
                                 }
                             }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .fixedSize()
+
+                            Link(destination: selectedPlatform.documentationURL) {
+                                Image(systemName: "arrow.up.forward.square")
+                                    .font(.system(size: 14, weight: .regular))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18, height: 18)
+                            .accessibilityLabel("查看 \(selectedPlatform.displayName) 的使用文档")
+                            .help("查看 \(selectedPlatform.displayName) 的使用文档")
+
+                            Spacer(minLength: 0)
+                        }
+                        .frame(width: SettingsFormLayout.controlWidth, alignment: .leading)
+                    }
+
+                    switch selectedPlatform {
+                    case .localSenseVoice:
+                        localSenseVoicePanel
+                    case .tencentCloudSentence, .tencentCloudRealtime:
+                        tencentCloudPanel
+                    case .aliyunSentence, .aliyunRealtime:
+                        aliyunPanel
+                    case .aliyunBailianHTTPASR:
+                        aliyunBailianHTTPPanel
+                    case .aliyunBailianASR:
+                        aliyunBailianPanel
+                    case .volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence:
+                        volcenginePanel
+                    case .volcengineTraditionalSentence, .volcengineTraditionalRealtime:
+                        volcengineTraditionalPanel
+                    case .xunfeiIAT, .xunfeiRealtime:
+                        xunfeiPanel
+                    case .mimoASR:
+                        mimoPanel
+                    case .openAICompatibleASR:
+                        openAICompatiblePanel
+                    }
+                } footer: {
+                    Text(selectedPlatform.cloudConfigSummary)
+                    if selectedPlatform == .aliyunBailianASR,
+                       !bailianBaseURL.isEmpty, currentDraftConfig().aliyunBailian.requestURL == nil {
+                        Text("地址格式不正确，请检查后再试。")
+                            .foregroundStyle(.red)
+                    }
+                    if selectedPlatform == .openAICompatibleASR {
+                        if currentDraftConfig().openAICompatible.requestURL?.scheme?.lowercased() == "http" {
+                            Text("HTTP 未加密，仅用于可信的本机或局域网服务。")
+                        }
+                        if !openAIBaseURL.isEmpty, currentDraftConfig().openAICompatible.requestURL == nil {
+                            Text("地址或接口格式不匹配，请检查后再试。")
+                                .foregroundStyle(.red)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .fixedSize()
-
-                    Link(destination: selectedPlatform.documentationURL) {
-                        Image(systemName: "arrow.up.forward.square")
-                            .font(.system(size: 14, weight: .regular))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .accessibilityLabel("查看 \(selectedPlatform.displayName) 的使用文档")
-                    .help("查看 \(selectedPlatform.displayName) 的使用文档")
-
-                    Spacer(minLength: 0)
-                }
-                .frame(width: SettingsFormLayout.controlWidth, alignment: .leading)
-            }
-
-            switch selectedPlatform {
-            case .localSenseVoice:
-                localSenseVoicePanel
-            case .tencentCloudSentence, .tencentCloudRealtime:
-                tencentCloudPanel
-            case .aliyunSentence, .aliyunRealtime:
-                aliyunPanel
-            case .aliyunBailianHTTPASR:
-                aliyunBailianHTTPPanel
-            case .aliyunBailianASR:
-                aliyunBailianPanel
-            case .volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence:
-                volcenginePanel
-            case .volcengineTraditionalSentence, .volcengineTraditionalRealtime:
-                volcengineTraditionalPanel
-            case .xunfeiIAT, .xunfeiRealtime:
-                xunfeiPanel
-            case .mimoASR:
-                mimoPanel
-            case .openAICompatibleASR:
-                openAICompatiblePanel
-            }
-        } footer: {
-            Text(selectedPlatform.cloudConfigSummary)
-            if selectedPlatform == .aliyunBailianASR,
-               !bailianBaseURL.isEmpty, currentDraftConfig().aliyunBailian.requestURL == nil {
-                Text("地址格式不正确，请检查后再试。")
-                    .foregroundStyle(.red)
-            }
-            if selectedPlatform == .openAICompatibleASR {
-                if currentDraftConfig().openAICompatible.requestURL?.scheme?.lowercased() == "http" {
-                    Text("HTTP 未加密，仅用于可信的本机或局域网服务。")
-                }
-                if !openAIBaseURL.isEmpty, currentDraftConfig().openAICompatible.requestURL == nil {
-                    Text("地址或接口格式不匹配，请检查后再试。")
-                        .foregroundStyle(.red)
+                    if let saveError { Text(saveError).foregroundStyle(.red) }
                 }
             }
-            if let saveError { Text(saveError).foregroundStyle(.red) }
         }
         .onAppear {
             loadDraft()

@@ -60,6 +60,48 @@ final class SettingsPagesLayoutTests: XCTestCase {
         }
     }
 
+    func testAllRecordingModesAndSystemConflictHintsFitGeneralSettings() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for mode in HotkeyTriggerMode.allCases {
+            for keys in [HotkeyCombo.default, .special(modifiers: [.init(key: .function)])] {
+                fixture.show(.permissions)
+                await settle(fixture)
+                var general = fixture.config.generalConfig
+                general.hotkey = keys.withTriggerMode(mode)
+                try fixture.config.saveGeneralConfig(general)
+                fixture.show(.general)
+                await settle(fixture)
+                assertFits(fixture, scenario: "Recording mode \(mode) and system hint")
+
+            }
+        }
+    }
+
+    func testChangingRecordingModeInPlaceKeepsTitlebarInsideWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        fixture.show(.general)
+        await settle(fixture)
+        let top = fixture.window.frame.maxY
+        let height = fixture.window.frame.height
+        for mode in [HotkeyTriggerMode.doublePress, .hold, .singlePress, .doublePress] {
+            var general = fixture.config.generalConfig
+            general.hotkey = HotkeyCombo.default.withTriggerMode(mode)
+            try fixture.config.saveGeneralConfig(general)
+            await settle(fixture)
+            assertFits(fixture, scenario: "In-place mode change \(mode)")
+            XCTAssertEqual(fixture.window.frame.maxY, top, accuracy: 0.5)
+            XCTAssertEqual(fixture.window.frame.height, height, accuracy: 0.5)
+            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                let button = try XCTUnwrap(fixture.window.standardWindowButton(kind))
+                let frame = button.convert(button.bounds, to: nil)
+                XCTAssertGreaterThanOrEqual(frame.minY, 0)
+                XCTAssertLessThanOrEqual(frame.maxY, fixture.window.frame.height + 0.5)
+            }
+        }
+    }
+
     func testAllSettingsPagePairsKeepContentAtTopAndFitWindow() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -76,7 +118,7 @@ final class SettingsPagesLayoutTests: XCTestCase {
         }
     }
 
-    func testGeneralFunctionKeyHelpExpandsAndShrinksWindow() async throws {
+    func testGeneralFunctionKeySummaryKeepsWindowHeightStable() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         fixture.show(.general)
@@ -90,7 +132,7 @@ final class SettingsPagesLayoutTests: XCTestCase {
         fixture.show(.general)
         await settle(fixture)
         assertFits(fixture, scenario: "Fn help shown")
-        XCTAssertGreaterThan(fixture.window.contentLayoutRect.height, normalHeight)
+        XCTAssertEqual(fixture.window.contentLayoutRect.height, normalHeight, accuracy: 0.5)
         fixture.show(.dictionary)
         await settle(fixture)
         general.hotkey = .default

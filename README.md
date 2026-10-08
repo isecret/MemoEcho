@@ -42,7 +42,7 @@
 
 ## 开始使用
 
-需要 **macOS 14 或更新版本**。当前为 **1.0.0-beta.7** 测试版。
+需要 **macOS 14 或更新版本**。当前为 **1.0.0-beta.8** 测试版。
 
 首次打开时，按引导配置语音识别和 AI 服务，并允许访问麦克风和辅助功能。默认按 **右 Command** 开始或结束录音。
 
@@ -51,6 +51,8 @@
 ---
 
 [开发与发布](./docs/DEVELOPMENT.md) · [产品说明](./docs/PRD.md) · [技术设计](./docs/TDD.md)
+
+快捷键方案：[单按、双按与按住录音](./docs/plans/hotkey-recording-modes.md)（Issue #8）
 
 开发方案：[OpenAI 兼容语音识别与小米入口移除](./docs/plans/openai-compatible-asr.md)
 

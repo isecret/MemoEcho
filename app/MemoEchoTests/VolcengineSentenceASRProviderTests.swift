@@ -130,15 +130,11 @@ final class VolcengineSentenceASRProviderTests: XCTestCase {
     }
 
     func testCancellationDiscardsLateSuccessfulResponse() async throws {
-        let client = FileFlashDelayedClient()
+        let requestStarted = expectation(description: "HTTP request started")
+        let client = FileFlashDelayedClient(onStart: { requestStarted.fulfill() })
         let provider = VolcengineSentenceASRProvider(apiKey: "synthetic", httpClient: client)
         let task = Task { try await provider.recognize(audioData: Data([1])) }
-        for _ in 0..<1000 {
-            if await client.started { break }
-            await Task.yield()
-        }
-        let started = await client.started
-        XCTAssertTrue(started)
+        await fulfillment(of: [requestStarted], timeout: 3)
         task.cancel()
         await client.release()
         do { _ = try await task.value; XCTFail("Cancelled results must not be returned") }
@@ -171,12 +167,13 @@ private actor FileFlashTestClient: OpenAIASRHTTPClient {
 }
 
 private actor FileFlashDelayedClient: OpenAIASRHTTPClient {
-    var started = false
+    private let onStart: @Sendable () -> Void
+    init(onStart: @escaping @Sendable () -> Void) { self.onStart = onStart }
     private var continuation: CheckedContinuation<Void, Never>?
     private var released = false
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        started = true
+        onStart()
         if !released { await withCheckedContinuation { continuation = $0 } }
         return (Data(#"{"result":{"text":"late result"}}"#.utf8),
                 HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)

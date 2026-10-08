@@ -81,7 +81,8 @@ struct SettingsView: View {
                         },
                         onHotkeyRecordingChanged: { isRecording in
                             appCoordinator.setHotkeyCaptureSuspended(isRecording)
-                        }
+                        },
+                        canEditHotkey: appCoordinator.canEditHotkey
                     )
                 case .asr:
                     ASRSettingsView(
@@ -118,6 +119,7 @@ enum SettingsFormLayout {
     static let footerWidth: CGFloat = controlWidth
     static let sectionSpacing: CGFloat = 0
     static let sectionVerticalPadding: CGFloat = 9
+    static let groupedSectionVerticalPadding: CGFloat = 6
 }
 
 struct SettingsFormRow<Content: View>: View {
@@ -152,7 +154,46 @@ struct SettingsPaneContainer<Content: View>: View {
     }
 }
 
+private struct SettingsFormGroupedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var isSettingsFormGrouped: Bool {
+        get { self[SettingsFormGroupedKey.self] }
+        set { self[SettingsFormGroupedKey.self] = newValue }
+    }
+}
+
+/// Quiet group headings follow the same two-column grid as the fields.
+struct SettingsFormGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: SettingsFormLayout.rowSpacing) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: SettingsFormLayout.labelWidth, alignment: .trailing)
+                    .accessibilityAddTraits(.isHeader)
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                    .frame(height: 0.5)
+                    .accessibilityHidden(true)
+            }
+            .padding(.bottom, 6)
+            content()
+                .environment(\.isSettingsFormGrouped, true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 10)
+    }
+}
+
 struct SettingsPaneSection<Content: View, Footer: View>: View {
+    @Environment(\.isSettingsFormGrouped) private var isGrouped
     @ViewBuilder let content: () -> Content
     @ViewBuilder let footer: () -> Footer
 
@@ -170,7 +211,7 @@ struct SettingsPaneSection<Content: View, Footer: View>: View {
                 )
                 .padding(.leading, SettingsFormLayout.labelWidth + SettingsFormLayout.rowSpacing)
         }
-        .padding(.vertical, SettingsFormLayout.sectionVerticalPadding)
+        .padding(.vertical, isGrouped ? SettingsFormLayout.groupedSectionVerticalPadding : SettingsFormLayout.sectionVerticalPadding)
     }
 }
 
