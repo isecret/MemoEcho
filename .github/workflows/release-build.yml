@@ -237,7 +237,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          TITLE="${TAG}"
+          TITLE="MemoEcho ${TAG#v}"
           NOTES="Automated macOS release artifact for ${TAG}."
           PRERELEASE=false
           if [[ "$TAG" == *-beta.* ]]; then
@@ -246,7 +246,7 @@ jobs:
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" "$DMG_PATH" "$ZIP_PATH" --clobber
-            gh release edit "${TAG}" --prerelease="$PRERELEASE"
+            gh release edit "${TAG}" --title "$TITLE" --prerelease="$PRERELEASE"
           else
             gh release create "${TAG}" "$DMG_PATH" "$ZIP_PATH" --title "$TITLE" --notes "$NOTES" --prerelease="$PRERELEASE"
           fi
