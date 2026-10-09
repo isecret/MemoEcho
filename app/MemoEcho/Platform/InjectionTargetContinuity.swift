@@ -9,6 +9,9 @@ final class InjectionTargetContinuity {
     private var check: (() -> Bool)?
     private let observation = WindowObservation()
 
+    /// Read cached invalidation for menu presentation without performing AX queries.
+    var isInvalidated: Bool { !valid }
+
     var isValid: Bool {
         if valid, let check, !check() { invalidate() }
         return valid

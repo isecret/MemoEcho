@@ -15,6 +15,7 @@ final class LLMValidationService {
 
     private(set) var status: LLMModelStatus = .incomplete
     private(set) var lastErrorMessage: String?
+    private(set) var isTransientRuntimeFailure = false
 
     init(
         onThinkingUnsupported: @escaping @MainActor @Sendable (LLMValidationInput) -> Void = { _ in },
@@ -33,7 +34,8 @@ final class LLMValidationService {
     }
 
     /// 主链路已确认当前配置失效时，不能继续复用先前的成功结果。
-    func invalidateCurrentValidation() {
+    func invalidateCurrentValidation(isTransient: Bool = false) {
+        isTransientRuntimeFailure = isTransient
         let fingerprint = activeFingerprint ?? lastCompletedFingerprint
         cancelOngoingValidation()
         lastCompletedFingerprint = fingerprint
@@ -65,6 +67,7 @@ final class LLMValidationService {
         let requestID = UUID()
         activeRequestID = requestID
         activeFingerprint = fingerprint
+        isTransientRuntimeFailure = false
         status = .checking
         lastErrorMessage = nil
 

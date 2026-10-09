@@ -15,6 +15,7 @@ final class CloudASRValidationService {
 
     private(set) var status: CloudASRValidationDisplayStatus = .incomplete
     private(set) var lastErrorMessage: String?
+    private(set) var isTransientRuntimeFailure = false
 
     init(
         configStore: ConfigStore,
@@ -25,6 +26,7 @@ final class CloudASRValidationService {
     }
 
     func syncFromConfig(for input: CloudASRValidationInput) {
+        if lastCompletedFingerprint != input.fingerprint { isTransientRuntimeFailure = false }
         guard input.isCloudPlatform else {
             cancelOngoingValidation()
             status = .incomplete
@@ -76,7 +78,8 @@ final class CloudASRValidationService {
         }
     }
 
-    func invalidateCurrentValidation() {
+    func invalidateCurrentValidation(isTransient: Bool = false) {
+        isTransientRuntimeFailure = isTransient
         let input = CloudASRValidationInput(platform: configStore.asrConfig.selectedPlatform, asrConfig: configStore.asrConfig)
         guard input.isCloudPlatform else { return }
         cancelOngoingValidation()
@@ -113,6 +116,7 @@ final class CloudASRValidationService {
         let requestID = UUID()
         activeRequestID = requestID
         activeFingerprint = fingerprint
+        isTransientRuntimeFailure = false
         status = .checking
         lastErrorMessage = nil
 

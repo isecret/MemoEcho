@@ -59,7 +59,7 @@ struct HUDContentView: View {
                         }
                         .buttonStyle(HUDRecoveryButtonStyle())
                         .disabled(controller.recoveryActionPerformed)
-                        .accessibilityLabel(action)
+                        .accessibilityLabel("\(reason.shortLabel)，\(action)")
                         .accessibilityFocused($actionFocused)
                     }
                 }

@@ -92,6 +92,16 @@ struct VoiceInputReadiness: Equatable {
         return nil
     }
 
+    /// Cached status only: a pending validation must not masquerade as a confirmed failure.
+    var confirmedBlockerTab: SettingsTab? {
+        if case .blocked = asr { return .asr }
+        if case .blocked = llm { return .ai }
+        if case .blocked = microphone { return .permissions }
+        if case .blocked = accessibility { return .permissions }
+        if case .blocked = hotkey { return .general }
+        return nil
+    }
+
     static func make(
         hotkeyResult: HotkeyRegistrationResult,
         hasConfirmedHotkey: Bool,

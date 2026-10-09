@@ -3,81 +3,49 @@ import SwiftUI
 struct MenuBarView: View {
     let appCoordinator: AppCoordinator
     @Environment(\.openWindow) private var openWindow
-    @State private var learningUndoError: String?
 
     private var state: SessionState {
         appCoordinator.sessionCoordinator.state
     }
 
-    private var lastInjectionFailureText: String? {
-        appCoordinator.sessionCoordinator.lastInjectionFailureText
-    }
-
     var body: some View {
-        if let error = appCoordinator.sessionCoordinator.currentError {
-            Label(error.userMessage, systemImage: "exclamationmark.triangle.fill")
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-
-            Divider()
-        }
-
-        if let warning = appCoordinator.sessionCoordinator.recordingWarning {
-            Label(warning, systemImage: "mic.slash")
-            Divider()
-        }
-        if let failureText = lastInjectionFailureText {
-            let preview = failureText.count > 20
-                ? String(failureText.prefix(20)) + "…"
-                : failureText
-            Button(preview) {
-                appCoordinator.copyLastFailureTextToClipboard()
-            }
-
-            Divider()
-        }
-
-        if let recovery = appCoordinator.sessionCoordinator.recovery {
-            if recovery.canRetry {
-                Button(appCoordinator.sessionCoordinator.recoveryActionTitle ?? recovery.stage.retryTitle) { appCoordinator.retryFailedSession() }
-                    .disabled(!appCoordinator.sessionCoordinator.canRetryRecovery)
-            }
-            if recovery.outputAttempted {
-                Text("请先检查原输入框，避免重复粘贴")
-            }
-            Button("检查设置") { appCoordinator.openFailedSessionSettings() }
-                .disabled(state.isProcessing)
-            Button("丢弃上次结果") { appCoordinator.sessionCoordinator.discardRecovery() }
-                .disabled(state.isProcessing && !appCoordinator.sessionCoordinator.isRecovering)
-            Text("仅临时保留 10 分钟，退出后清除")
-                .font(.caption)
-            Divider()
-        }
-
         if state.isCancellable {
-            Button("取消当前任务") {
-                appCoordinator.sessionCoordinator.cancel()
+            Button("取消当前任务") { appCoordinator.sessionCoordinator.cancel() }
+            Divider()
+        } else if !state.isProcessing, let recovery = appCoordinator.recoveryPresentation {
+            Menu("恢复上次输入") {
+                Text(recovery.reason)
+                Divider()
+                if recovery.settingsTab != nil, appCoordinator.configStore.canOpenSettings {
+                    Button("检查设置…") { appCoordinator.openFailedSessionSettings(expectedID: recovery.id) }
+                }
+                if let title = recovery.retryTitle {
+                    Button(title) { appCoordinator.retryFailedSession(expectedID: recovery.id) }
+                }
+                if recovery.canCopy {
+                    Button("复制结果") { appCoordinator.copyLastFailureTextToClipboard(expectedID: recovery.id) }
+                }
+                if recovery.outputAttempted { Text("请先检查原输入框，避免重复粘贴") }
+                Button("查看原因…") { appCoordinator.showRecoveryReason(id: recovery.id) }
+                Divider()
+                Button("丢弃本次结果") { appCoordinator.discardFailedSession(id: recovery.id) }
+                Text("临时保留，退出后清除")
+            }
+            Divider()
+        } else if let tab = appCoordinator.menuSettingsBlocker {
+            Button("检查设置…") {
+                guard appCoordinator.menuSettingsBlocker == tab else { return }
+                appCoordinator.openSettingsWindow(tab: tab)
             }
             Divider()
         }
-
-        if let entry = appCoordinator.dictionaryStore.latestLearnedEntry {
-            Button("撤销学习「\(entry.term)」") {
-                do {
-                    try appCoordinator.dictionaryStore.removeEntry(id: entry.id)
-                    learningUndoError = nil
-                } catch { learningUndoError = "撤销失败，请在词典设置中重试" }
-            }
-            Divider()
-        }
-        if let learningUndoError { Text(learningUndoError) }
 
         microphonePicker
 
         Divider()
 
         if appCoordinator.configStore.canOpenSettings {
-            Button("设置") {
+            Button("设置…") {
                 appCoordinator.openSettingsWindow()
             }
             .keyboardShortcut(",", modifiers: .command)

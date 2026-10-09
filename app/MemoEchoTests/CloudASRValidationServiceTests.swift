@@ -17,6 +17,49 @@ final class CloudASRValidationServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testMenuSnapshotDoesNotValidateAndSeparatesTransientFromConfirmedFailure() async throws {
+        let store = try configuredTencentStore()
+        try store.saveLLMConfig(.init(baseURL: "https://example.test/v1", model: "synthetic"), apiKey: "synthetic")
+        let counter = ValidationCounter()
+        let cloud = CloudASRValidationService(configStore: store, validatorFactory: { _ in
+            counter.increment()
+            return StubCloudASRValidator {}
+        })
+        let llm = LLMValidationService(validator: { _, _ in })
+        let readiness = VoiceInputReadinessService(configStore: store, permissionsManager: PermissionsManager(),
+            llmValidationService: llm, cloudASRValidationService: cloud)
+        for _ in 0..<3 {
+            if case .pending = readiness.menuSnapshot.asr {} else { XCTFail("Untested credentials are pending") }
+            if case .pending = readiness.menuSnapshot.llm {} else { XCTFail("Untested credentials are pending") }
+        }
+        XCTAssertEqual(counter.currentValue(), 0)
+        let input = CloudASRValidationInput(platform: .tencentCloudRealtime, asrConfig: store.asrConfig)
+        let llmInput = LLMValidationInput(baseURL: store.llmConfig.baseURL, apiKey: store.openAIAPIKey,
+            model: store.llmConfig.model, omitThinkingParameter: false)
+        cloud.validate(input)
+        llm.validate(llmInput)
+        await waitUntil { cloud.status == .ready && llm.status == .ready }
+        cloud.invalidateCurrentValidation(isTransient: true)
+        llm.invalidateCurrentValidation(isTransient: true)
+        if case .pending = readiness.menuSnapshot.asr {} else { XCTFail("Transient errors must not leave a menu blocker") }
+        if case .pending = readiness.menuSnapshot.llm {} else { XCTFail("Transient errors must not leave a menu blocker") }
+        XCTAssertFalse(readiness.snapshot.asr.isReady, "Runtime safety validation still applies")
+        XCTAssertFalse(readiness.snapshot.llm.isReady)
+        cloud.invalidateCurrentValidation()
+        llm.invalidateCurrentValidation()
+        if case .blocked = readiness.menuSnapshot.asr {} else { XCTFail("Confirmed failures require settings") }
+        if case .blocked = readiness.menuSnapshot.llm {} else { XCTFail("Confirmed failures require settings") }
+        cloud.invalidateCurrentValidation(isTransient: true)
+        llm.invalidateCurrentValidation(isTransient: true)
+        cloud.validate(input, force: true)
+        llm.validate(llmInput, force: true)
+        XCTAssertFalse(cloud.isTransientRuntimeFailure)
+        XCTAssertFalse(llm.isTransientRuntimeFailure)
+        await waitUntil { cloud.status == .ready && llm.status == .ready }
+        XCTAssertEqual(counter.currentValue(), 2)
+    }
+
+    @MainActor
     func testIncompleteInputDoesNotRunValidator() async {
         let store = ConfigStore(configDirectory: tempDirectory)
         let counter = ValidationCounter()

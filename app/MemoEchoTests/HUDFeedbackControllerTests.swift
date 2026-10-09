@@ -12,6 +12,27 @@ final class HUDFeedbackControllerTests: XCTestCase {
         func playStop() { stopCount += 1 }
     }
 
+    func testCheckpointInvalidationClearsOnlyMatchingFailurePresentation() {
+        let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
+        controller.recoveryActionTitle = "复制结果"
+        controller.onRecoveryAction = { XCTFail("Invalidated action") }
+        controller.handleEvent(.processingFailed(.injectionFailed))
+        let generation = controller.presentationGeneration
+        controller.invalidateRecoveryFeedback(expectedGeneration: generation)
+        XCTAssertNil(controller.recoveryActionTitle)
+        XCTAssertNil(controller.onRecoveryAction)
+        controller.performRecoveryAction(expectedGeneration: generation)
+        controller.handleEvent(.recordingStarted)
+        controller.invalidateRecoveryFeedback(expectedGeneration: generation)
+        XCTAssertEqual(controller.hudState, .recording)
+        controller.recoveryActionTitle = "重试识别"
+        controller.handleEvent(.processingFailed(.recognitionFailed))
+        controller.invalidateRecoveryFeedback(expectedGeneration: generation)
+        XCTAssertEqual(controller.hudState, .failure(.recognitionFailed))
+        XCTAssertEqual(controller.recoveryActionTitle, "重试识别")
+        controller.handleEvent(.processingCancelled)
+    }
+
     func testMissingSignalKeepsRecordingControlsAndDoesNotPlaySounds() {
         let sounds = MockFeedbackSoundPlayer()
         let controller = HUDFeedbackController(soundPlayer: sounds)
@@ -549,8 +570,10 @@ final class HUDFeedbackControllerTests: XCTestCase {
         let samples: [(String, SessionFeedbackEvent, String?)] = [
             ("long-term", .dictionaryTermLearned("跨区域企业级知识管理与智能语音交互平台的多语言协同工作流解决方案"), nil),
             ("truncated-term", .dictionaryTermLearned(String(repeating: "Accessibility语音协作👨‍👩‍👧‍👦", count: 8)), nil),
-            ("short-recovery", .processingFailed(.injectionFailed), "重试写入"),
-            ("recovery", .processingFailed(.recordingInterrupted), "继续处理已录内容"),
+            ("short-recovery", .processingFailed(.injectionFailed), "重试"),
+            ("recovery", .processingFailed(.recordingInterrupted), "继续"),
+            ("settings", .processingFailed(.permissionDenied), "设置"),
+            ("copy", .processingFailed(.injectionFailed), "复制"),
             ("missing-signal", .recordingStarted, nil)
         ]
         for (name, event, action) in samples {

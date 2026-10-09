@@ -149,25 +149,32 @@ final class AppCoordinator {
             if let self {
                 if case .recordingStarted = event { self.microphoneLevelController.stop() }
                 if case .processingFailed = event {
-                    let session = self.sessionCoordinator
-                    let title = session.recoveryNeedsSettings ? "检查设置"
-                        : (session.canRetryRecovery ? session.recoveryActionTitle
-                           : (session.lastInjectionFailureText != nil ? "复制结果" : nil))
-                    self.hudFeedbackController.recoveryActionTitle = title
+                    self.invalidateFailedConfiguration()
+                    let presentation = self.recoveryPresentation.flatMap {
+                        $0.id == self.sessionCoordinator.currentErrorRecoveryID ? $0 : nil
+                    }
+                    let offersSettings = presentation?.settingsTab != nil && self.configStore.canOpenSettings
+                    self.hudFeedbackController.recoveryActionTitle = presentation.map {
+                        offersSettings ? "设置"
+                            : ($0.hudRetryTitle ?? ($0.canCopy ? "复制" : nil))
+                    } ?? nil
                     self.hudFeedbackController.onRecoveryAction = { [weak self] in
-                        guard let self else { return }
-                        if self.sessionCoordinator.recoveryNeedsSettings { self.openFailedSessionSettings() }
-                        else if self.sessionCoordinator.canRetryRecovery { self.retryFailedSession() }
-                        else if self.sessionCoordinator.lastInjectionFailureText != nil {
-                            if self.copyLastFailureTextToClipboard() {
-                                self.hudFeedbackController.showCopyConfirmation()
-                            }
-                        }
+                        guard let self, let presentation else { return }
+                        if offersSettings { self.openFailedSessionSettings(expectedID: presentation.id) }
+                        else if presentation.retryTitle != nil { self.retryFailedSession(expectedID: presentation.id) }
+                        else if presentation.canCopy { self.copyLastFailureTextToClipboard(expectedID: presentation.id) }
                     }
                 }
                 self.hudFeedbackController.handleEvent(event)
+                if case .processingFailed = event, let id = self.recoveryPresentation?.id,
+                   id == self.sessionCoordinator.currentErrorRecoveryID {
+                    let generation = self.hudFeedbackController.presentationGeneration
+                    self.sessionCoordinator.onRecoveryInvalidated = { [weak self] invalidatedID in
+                        guard invalidatedID == id else { return }
+                        self?.hudFeedbackController.invalidateRecoveryFeedback(expectedGeneration: generation)
+                    }
+                }
             }
-            if case .processingFailed = event { self?.invalidateFailedConfiguration() }
             if let self, self.sessionCoordinator.isOnboardingTrial {
                 self.onboardingCoordinator.handleTrialFeedback(event, error: self.sessionCoordinator.currentError)
             }
@@ -296,10 +303,20 @@ final class AppCoordinator {
         case .llmConfigurationIncomplete, .invalidLLMConfiguration, .llmNetworkFailure,
              .llmEmptyResponse, .llmInvalidResponse:
             guard recordingValidationIdentity?.llm == currentValidationIdentity.llm else { return }
-            llmValidationService.invalidateCurrentValidation()
+            let transient: Bool
+            switch error {
+            case .llmNetworkFailure, .llmEmptyResponse, .llmInvalidResponse: transient = true
+            default: transient = false
+            }
+            llmValidationService.invalidateCurrentValidation(isTransient: transient)
         case .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure, .cloudASRNetworkFailure, .cloudASRInvalidResponse:
             guard recordingValidationIdentity?.asr == currentValidationIdentity.asr else { return }
-            cloudASRValidationService.invalidateCurrentValidation()
+            let transient: Bool
+            switch error {
+            case .cloudASRNetworkFailure, .cloudASRInvalidResponse: transient = true
+            default: transient = false
+            }
+            cloudASRValidationService.invalidateCurrentValidation(isTransient: transient)
         default: break
         }
     }
@@ -381,8 +398,23 @@ final class AppCoordinator {
         settingsWindowLayout.measure(.init(tab: tab, size: size))
     }
 
-    func retryFailedSession() {
-        guard sessionCoordinator.canRetryRecovery else { return }
+    var recoveryPresentation: RecoveryPresentation? {
+        guard let checkpoint = sessionCoordinator.recovery,
+              sessionCoordinator.actionableRecovery(id: checkpoint.id) != nil else { return nil }
+        let readiness = readinessService.snapshot(asrPlatform: checkpoint.asrPlatform)
+        return RecoveryPresentation(checkpoint: checkpoint, readiness: readiness)
+    }
+
+    var menuSettingsBlocker: SettingsTab? {
+        guard configStore.canOpenSettings, !sessionCoordinator.state.isProcessing,
+              recoveryPresentation == nil else { return nil }
+        return readinessService.menuSnapshot.confirmedBlockerTab
+    }
+
+    func retryFailedSession(expectedID: UUID? = nil) {
+        guard let presentation = recoveryPresentation,
+              expectedID == nil || presentation.id == expectedID,
+              presentation.retryTitle != nil, sessionCoordinator.canRetryRecovery else { return }
         let identity = currentValidationIdentity
         let platform = sessionCoordinator.recovery?.asrPlatform ?? configStore.asrConfig.selectedPlatform
         let asrIdentity = CloudASRValidationInput(platform: platform, asrConfig: configStore.asrConfig).fingerprint
@@ -390,28 +422,43 @@ final class AppCoordinator {
         sessionCoordinator.retryRecovery()
     }
 
-    func openFailedSessionSettings() {
-        let tab: SettingsTab
-        switch sessionCoordinator.currentError {
-        case .accessibilityPermissionDenied, .microphonePermissionDenied: tab = .permissions
-        case .asrModelMissing, .asrBinaryNotFound, .asrRuntimeMissing, .asrPlatformNotReady,
-             .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure: tab = .asr
-        default:
-            switch sessionCoordinator.recovery?.stage {
-            case .recognition: tab = .asr
-            case .output: tab = .permissions
-            default: tab = .ai
-            }
-        }
+    func openFailedSessionSettings(expectedID: UUID? = nil) {
+        guard let presentation = recoveryPresentation,
+              expectedID == nil || presentation.id == expectedID,
+              let tab = presentation.settingsTab else { return }
         openSettingsWindow(tab: tab)
     }
 
-    /// 将最近一次注入失败文本复制到系统剪贴板
+    func showRecoveryReason(id: UUID) {
+        guard let presentation = recoveryPresentation, presentation.id == id else { return }
+        showRecoveryAlert(title: presentation.reason, message: presentation.detail)
+    }
+
+    private func showRecoveryAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    func discardFailedSession(id: UUID) {
+        guard sessionCoordinator.actionableRecovery(id: id) != nil else { return }
+        sessionCoordinator.discardRecovery()
+    }
+
     @discardableResult
-    func copyLastFailureTextToClipboard() -> Bool {
-        guard let text = sessionCoordinator.lastInjectionFailureText else { return false }
-        NSPasteboard.general.clearContents()
-        return NSPasteboard.general.setString(text, forType: .string)
+    func copyLastFailureTextToClipboard(expectedID: UUID? = nil) -> Bool {
+        guard let presentation = recoveryPresentation, presentation.canCopy,
+              expectedID == nil || expectedID == presentation.id else { return false }
+        let copied = sessionCoordinator.copyRecovery(id: presentation.id) { text in
+            NSPasteboard.general.clearContents()
+            return NSPasteboard.general.setString(text, forType: .string)
+        }
+        if copied { hudFeedbackController.showCopyConfirmation() }
+        else { showRecoveryAlert(title: "复制失败", message: "无法写入剪贴板，结果仍保留，请重试复制。") }
+        return copied
     }
 
     // MARK: - 快捷键

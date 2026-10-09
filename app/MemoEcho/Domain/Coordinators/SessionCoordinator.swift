@@ -40,7 +40,32 @@ final class SessionCoordinator {
     /// 最近一次注入失败的文本，仅内存态，供菜单栏复制使用
     private(set) var lastInjectionFailureText: String?
 
-    /// 反馈事件回调，由 HUDFeedbackController 设置
+    /// Invalidates only UI owned by the released checkpoint.
+    var onRecoveryInvalidated: (@MainActor (UUID) -> Void)?
+    private var recoveryOwnerGeneration: UInt64?
+    private(set) var currentErrorRecoveryID: UUID?
+
+    /// Revalidate captured menu/HUD actions, including when an open menu outlives its result.
+    func actionableRecovery(id: UUID) -> SessionRecoveryCheckpoint? {
+        guard state.allowsRecordingStart, !isRecovering, let recovery,
+              recovery.id == id, recovery.isValid(at: Date()) else { return nil }
+        return recovery
+    }
+
+    @discardableResult
+    func copyRecovery(id: UUID, write: (String) -> Bool) -> Bool {
+        guard let text = actionableRecovery(id: id)?.finalText, !text.isEmpty else { return false }
+        return write(text)
+    }
+
+    private func invalidateRecoveryPresentation(_ id: UUID) {
+        if currentErrorRecoveryID == id {
+            currentError = nil
+            currentErrorRecoveryID = nil
+        }
+        onRecoveryInvalidated?(id)
+    }
+
     var onFeedbackEvent: (@MainActor @Sendable (SessionFeedbackEvent) -> Void)?
 
     /// 返回当前音频录制电平（0-1），供 HUD 声波动画使用
@@ -166,6 +191,7 @@ final class SessionCoordinator {
         }
 
         currentError = nil
+        currentErrorRecoveryID = nil
         recordingStoppedAt = nil
         recordingStopRequestedAt = nil
         recordingWarning = nil
@@ -817,7 +843,7 @@ final class SessionCoordinator {
 
     var recoveryNeedsSettings: Bool {
         guard recovery != nil else { return false }
-        switch currentError {
+        switch recovery?.failure {
         case .llmConfigurationIncomplete, .invalidLLMConfiguration, .cloudASRConfigurationIncomplete,
              .cloudASRAuthenticationFailure, .asrModelMissing, .asrBinaryNotFound, .asrRuntimeMissing,
              .asrPlatformNotReady, .accessibilityPermissionDenied:
@@ -834,10 +860,12 @@ final class SessionCoordinator {
     func retainRecovery(_ checkpoint: SessionRecoveryCheckpoint) {
         if recovery?.id != checkpoint.id {
             if lastInjectionFailureText == recovery?.finalText { lastInjectionFailureText = nil }
+            if let id = recovery?.id { invalidateRecoveryPresentation(id) }
             recovery?.discard()
         }
         checkpoint.retainUntilExpiration(now: Date(), lifetime: recoveryLifetime)
         recovery = checkpoint
+        recoveryOwnerGeneration = sessionGeneration
         recoveryExpiryTask?.cancel()
         let delay = max(0, checkpoint.expiresAt?.timeIntervalSinceNow ?? 0)
         let id = checkpoint.id
@@ -851,6 +879,8 @@ final class SessionCoordinator {
     func discardRecovery() {
         recoveryExpiryTask?.cancel()
         recoveryExpiryTask = nil
+        if let id = recovery?.id { invalidateRecoveryPresentation(id) }
+        recoveryOwnerGeneration = nil
         let finalText = recovery?.finalText
         recovery?.discard()
         recovery = nil
@@ -875,10 +905,12 @@ final class SessionCoordinator {
         cancelPostInjectionLearning()
         sessionGeneration &+= 1
         let generation = sessionGeneration
+        recoveryOwnerGeneration = generation
         currentSessionID = Self.generateSessionID()
         let sessionID = currentSessionID
         textOutput = .focusedApplication
         currentError = nil
+        currentErrorRecoveryID = nil
         isRecovering = true
         state = checkpoint.stage == .recognition ? .transcribing : .polishing
         onFeedbackEvent?(.recoveryStarted)
@@ -1067,6 +1099,12 @@ final class SessionCoordinator {
         state = .error
         let reason: HUDFailureReason = failedStage == .translation && error.hudFailureReason == .polishFailed
             ? .translationFailed : error.hudFailureReason
+        currentErrorRecoveryID = nil
+        if recoveryOwnerGeneration == sessionGeneration, let recovery {
+            recovery.failure = error
+            recovery.failureReason = reason
+            currentErrorRecoveryID = recovery.id
+        }
         onFeedbackEvent?(.processingFailed(reason))
         scheduleResetToIdle()
     }

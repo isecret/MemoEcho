@@ -22,17 +22,38 @@ final class VoiceInputReadinessService {
         self.cloudASRValidationService = cloudASRValidationService
     }
 
-    var snapshot: VoiceInputReadiness {
-        VoiceInputReadiness.make(
+    var snapshot: VoiceInputReadiness { snapshot(asrPlatform: configStore.asrConfig.selectedPlatform) }
+
+    func snapshot(asrPlatform: ASRPlatform) -> VoiceInputReadiness {
+        var asr = configStore.asrConfig
+        asr.selectedPlatform = asrPlatform
+        return VoiceInputReadiness.make(
             hotkeyResult: hotkeyRegistrationResult,
             hasConfirmedHotkey: configStore.onboardingProgress.hasConfirmedHotkey,
             microphone: permissionsManager.microphoneStatus,
             accessibility: permissionsManager.accessibilityStatus,
-            asrConfig: configStore.asrConfig,
+            asrConfig: asr,
             localModelsAvailable: ConfigStore.localModelsAvailable(),
-            cloudStatus: cloudASRValidationService.status(for: cloudInput),
+            cloudStatus: cloudASRValidationService.status(for: CloudASRValidationInput(platform: asrPlatform, asrConfig: asr)),
             llmStatus: llmValidationService.status(for: llmInput)
         )
+    }
+
+    /// Opening the menu must not validate connections or treat untested complete credentials as failures.
+    var menuSnapshot: VoiceInputReadiness {
+        var value = snapshot
+        let cloudStatus = cloudASRValidationService.status(for: cloudInput)
+        let llmStatus = llmValidationService.status(for: llmInput)
+        if cloudInput.isComplete,
+           cloudStatus == .incomplete || (cloudStatus == .failed && cloudASRValidationService.isTransientRuntimeFailure),
+           configStore.asrConfig.selectedPlatform != .localSenseVoice {
+            value.asr = .pending("尚未验证")
+        }
+        if configStore.isLLMConfigured,
+           llmStatus == .incomplete || (llmStatus == .failed && llmValidationService.isTransientRuntimeFailure) {
+            value.llm = .pending("尚未验证")
+        }
+        return value
     }
 
     /// 权限和文件重新检查；验证服务合并进行中的请求并记住当前配置的验证结果。

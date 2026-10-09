@@ -27,6 +27,8 @@ final class SessionRecoveryCheckpoint {
     var transcripts: [String]
     var polished: PolishResult?
     var finalText: String?
+    var failure: MemoEchoError?
+    var failureReason: HUDFailureReason?
     var outputAttempted = false
     var isPartialRecording = false
     private(set) var expiresAt: Date?
@@ -51,7 +53,12 @@ final class SessionRecoveryCheckpoint {
         return .output
     }
 
-    var canRetry: Bool { !discarded && (stage != .output || (!outputAttempted && target != nil)) }
+    var canRetry: Bool {
+        guard !discarded else { return false }
+        guard stage == .output else { return true }
+        guard !outputAttempted, let target else { return false }
+        return target.scope != .window || (target.continuity != nil && target.continuity?.isInvalidated == false)
+    }
 
     func retainUntilExpiration(now: Date, lifetime: TimeInterval) {
         // A failed retry must not extend the original privacy deadline.
@@ -62,6 +69,8 @@ final class SessionRecoveryCheckpoint {
 
     func discard() {
         discarded = true
+        failure = nil
+        failureReason = nil
         realtimeAudio = nil
         pendingSegments.removeAll()
         transcripts.removeAll()
@@ -138,5 +147,58 @@ struct SessionRecoveryProcessor {
     private func validateTranscriptLength(_ transcripts: [String]) throws {
         let count = transcripts.reduce(0) { $0 + $1.count }
         if count > 8000 { throw MemoEchoError.transcriptTooLong(charCount: count) }
+    }
+}
+
+/// Immutable action identity shared by the native menu and failure HUD.
+struct RecoveryPresentation {
+    let id: UUID
+    let reason: String
+    let detail: String
+    let retryTitle: String?
+    let hudRetryTitle: String?
+    let settingsTab: SettingsTab?
+    let canCopy: Bool
+    let outputAttempted: Bool
+
+    @MainActor
+    init(checkpoint: SessionRecoveryCheckpoint, readiness: VoiceInputReadiness) {
+        id = checkpoint.id
+        reason = checkpoint.failureReason?.shortLabel ?? (checkpoint.isPartialRecording ? "录音中断" : "处理未完成")
+        detail = checkpoint.failure?.recoveryUserMessage ?? "上次输入尚未完成，可以继续处理或丢弃。"
+        let requiredTab: SettingsTab?
+        switch checkpoint.failure {
+        case .llmConfigurationIncomplete, .invalidLLMConfiguration:
+            requiredTab = readiness.llm.isReady ? nil : .ai
+        case .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure,
+             .asrModelMissing, .asrBinaryNotFound, .asrRuntimeMissing, .asrPlatformNotReady:
+            requiredTab = readiness.asr.isReady ? nil : .asr
+        case .accessibilityPermissionDenied:
+            requiredTab = readiness.accessibility.isReady ? nil : .permissions
+        case .microphonePermissionDenied:
+            requiredTab = readiness.microphone.isReady ? nil : .permissions
+        default: requiredTab = nil
+        }
+        settingsTab = requiredTab
+        retryTitle = checkpoint.canRetry && requiredTab == nil
+            ? (checkpoint.isPartialRecording ? "继续处理已录内容" : checkpoint.stage.retryTitle) : nil
+        hudRetryTitle = retryTitle == nil ? nil : (checkpoint.isPartialRecording ? "继续" : "重试")
+        canCopy = checkpoint.finalText.map { !$0.isEmpty } ?? false
+        outputAttempted = checkpoint.outputAttempted
+    }
+}
+
+private extension MemoEchoError {
+    /// Details may contain provider payloads or diagnostics; recovery UI never echoes those fields.
+    var recoveryUserMessage: String {
+        switch self {
+        case .asrPlatformNotReady: "语音识别未就绪，请检查语音设置。"
+        case .asrProcessFailure: "本地语音识别失败，请检查模型后重试。"
+        case .audioPreprocessFailure: "音频预处理失败，请重试处理已录内容。"
+        case .cloudASRInvalidResponse: "云端识别响应异常，请重试或检查语音服务配置。"
+        case .invalidLLMConfiguration: "AI 模型配置异常，请检查模型设置。"
+        case .textInjectionFailure: "未能确认文字已写入原输入框，请先检查原输入框。可复制结果后手动粘贴。"
+        default: userMessage
+        }
     }
 }

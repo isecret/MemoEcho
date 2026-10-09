@@ -109,7 +109,7 @@ final class HUDLayoutTests: XCTestCase {
     }
 
     func testRecoveryLabelsRemainWholeOnNarrowScreens() {
-        for action in ["检查设置", "重试识别", "重试整理", "重试翻译", "重试写入", "复制结果", "继续处理已录内容"] {
+        for action in ["设置", "重试", "复制", "继续", "继续处理已录内容"] {
             for screenWidth: CGFloat in [1440, 300, 240] {
                 let layout = HUDLayout.measure(state: .failure(.recordingInterrupted), action: action, screenWidth: screenWidth)
                 XCTAssertEqual(layout.lines.joined(), "录音中断")
@@ -147,7 +147,7 @@ final class HUDLayoutTests: XCTestCase {
     func testEveryFailureAndRecoveryActionStaysSingleLineOnDesktop() {
         let reasons: [HUDFailureReason] = [.recordingInterrupted, .permissionDenied, .resourceMissing,
             .notHeard, .recognitionFailed, .polishFailed, .translationFailed, .injectionFailed]
-        let actions = ["检查设置", "重试识别", "重试整理", "重试翻译", "重试写入", "复制结果", "继续处理已录内容"]
+        let actions = ["设置", "重试", "复制", "继续", "继续处理已录内容"]
         for reason in reasons {
             let plain = HUDLayout.measure(state: .failure(reason))
             XCTAssertEqual(plain.lines, [reason.shortLabel])

@@ -571,6 +571,174 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertTrue(session.recovery?.outputAttempted == true)
     }
 
+    func testNewNonrecoverableFailureDoesNotReplaceOldReasonOrGetClearedByDiscard() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = ConfigStore(configDirectory: directory)
+        let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
+            audioDeviceManager: AudioDeviceManager(configStore: store),
+            ensureMicrophoneAuthorized: { throw MemoEchoError.microphonePermissionDenied },
+            ensureAccessibilityAuthorized: {})
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        let cp = checkpoint()
+        cp.failure = .llmEmptyResponse
+        cp.failureReason = .polishFailed
+        session.retainRecovery(cp)
+        let expiry = cp.expiresAt
+        session.startRecording()
+        XCTAssertEqual(session.currentError, .microphonePermissionDenied)
+        XCTAssertNil(session.currentErrorRecoveryID)
+        XCTAssertEqual(cp.failure, .llmEmptyResponse)
+        XCTAssertEqual(cp.expiresAt, expiry)
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).reason, "润色失败")
+        session.discardRecovery()
+        XCTAssertEqual(session.currentError, .microphonePermissionDenied)
+    }
+
+    func testOutputRetryRemovedAfterAttemptWithoutLosingCopy() {
+        let driver = FakeInjectionDriver()
+        let cp = checkpoint(target: driver.current)
+        cp.polished = polished()
+        cp.finalText = "最终结果"
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试写入")
+        cp.outputAttempted = true
+        XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle)
+        XCTAssertTrue(RecoveryPresentation(checkpoint: cp, readiness: ready).canCopy)
+    }
+
+    func testKnownLostWindowOffersCopyWithoutAXQueryOrRetry() {
+        let driver = FakeInjectionDriver()
+        var target = driver.current
+        target?.scope = .window
+        target?.continuity = driver.continuity
+        let cp = checkpoint(target: target)
+        cp.polished = polished()
+        cp.finalText = "最终结果"
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试写入")
+        driver.continuity.invalidate()
+        XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle)
+        XCTAssertTrue(RecoveryPresentation(checkpoint: cp, readiness: ready).canCopy)
+    }
+
+    private var ready: VoiceInputReadiness {
+        .init(hotkey: .ready, microphone: .ready, accessibility: .ready, asr: .ready, llm: .ready)
+    }
+
+    func testRecoveryPresentationStagesPartialAndCopyBoundaries() {
+        let cp = checkpoint(segments: [segment(0)], mode: .translate)
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试识别")
+        cp.isPartialRecording = true
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "继续处理已录内容")
+        cp.isPartialRecording = false
+        cp.pendingSegments = []
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试整理")
+        cp.polished = polished()
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试翻译")
+        XCTAssertFalse(RecoveryPresentation(checkpoint: cp, readiness: ready).canCopy)
+        cp.finalText = "最终结果"
+        let output = RecoveryPresentation(checkpoint: cp, readiness: ready)
+        XCTAssertTrue(output.canCopy)
+        XCTAssertNil(output.retryTitle, "A missing original target must never offer another write")
+        cp.outputAttempted = true
+        XCTAssertTrue(RecoveryPresentation(checkpoint: cp, readiness: ready).outputAttempted)
+        XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle)
+    }
+
+    func testRecoverySettingsOnlyBlocksUntilRelevantReadinessIsRepaired() {
+        let cp = checkpoint()
+        cp.failure = .llmConfigurationIncomplete
+        cp.failureReason = .polishFailed
+        var readiness = ready
+        readiness.llm = .blocked("missing")
+        var presentation = RecoveryPresentation(checkpoint: cp, readiness: readiness)
+        XCTAssertEqual(presentation.settingsTab, .ai)
+        XCTAssertNil(presentation.retryTitle)
+        readiness.llm = .pending("checking")
+        XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: readiness).retryTitle)
+        presentation = RecoveryPresentation(checkpoint: cp, readiness: ready)
+        XCTAssertNil(presentation.settingsTab)
+        XCTAssertEqual(presentation.retryTitle, "重试整理")
+        cp.failure = .llmNetworkFailure(message: "synthetic")
+        XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: readiness).settingsTab)
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: readiness).retryTitle, "重试整理")
+    }
+
+    func testRecoveryDetailsDoNotExposeProviderPayload() {
+        let cp = checkpoint()
+        for error in [MemoEchoError.cloudASRInvalidResponse(detail: "private-payload"),
+                      .asrProcessFailure(message: "private-payload"),
+                      .invalidLLMConfiguration(detail: "private-payload"),
+                      .textInjectionFailure(detail: "private-payload")] {
+            cp.failure = error
+            XCTAssertFalse(RecoveryPresentation(checkpoint: cp, readiness: ready).detail.contains("private-payload"))
+        }
+    }
+
+    func testCopyRevalidatesIdentityAndExpirationAndDoesNotRenewOrDiscard() {
+        let (session, directory) = makeCoordinator(worker: processor())
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        let cp = checkpoint()
+        cp.finalText = "最终结果"
+        session.retainRecovery(cp)
+        let expiry = cp.expiresAt
+        var writes = 0
+        XCTAssertFalse(session.copyRecovery(id: cp.id) { text in
+            writes += 1; XCTAssertEqual(text, "最终结果"); return false
+        })
+        XCTAssertTrue(session.copyRecovery(id: cp.id) { _ in writes += 1; return true })
+        XCTAssertEqual(cp.expiresAt, expiry)
+        XCTAssertEqual(session.recovery?.id, cp.id)
+        let next = checkpoint()
+        next.finalText = "新结果"
+        session.retainRecovery(next)
+        XCTAssertFalse(session.copyRecovery(id: cp.id) { _ in XCTFail("Stale action"); return true })
+        XCTAssertEqual(writes, 2)
+        next.retainUntilExpiration(now: Date(), lifetime: 600)
+        session.discardRecovery()
+        XCTAssertFalse(session.copyRecovery(id: next.id) { _ in XCTFail("Discarded action"); return true })
+        let expired = checkpoint()
+        expired.finalText = "过期结果"
+        expired.retainUntilExpiration(now: Date().addingTimeInterval(-700), lifetime: 600)
+        session.retainRecovery(expired)
+        XCTAssertFalse(session.copyRecovery(id: expired.id) { _ in XCTFail("Expired action"); return true })
+    }
+
+    func testFailureIsBoundToCheckpointAndDiscardClearsMatchingError() async {
+        var worker = processor()
+        worker.polish = { _, _ in throw MemoEchoError.llmEmptyResponse }
+        let (session, directory) = makeCoordinator(worker: worker)
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        let cp = checkpoint()
+        session.retainRecovery(cp)
+        var invalidated: [UUID] = []
+        session.onRecoveryInvalidated = { invalidated.append($0) }
+        session.retryRecovery()
+        XCTAssertNil(session.actionableRecovery(id: cp.id))
+        XCTAssertFalse(session.copyRecovery(id: cp.id) { _ in XCTFail("Busy action"); return true })
+        await waitUntil { !session.isRecovering }
+        XCTAssertEqual(cp.failure, .llmEmptyResponse)
+        XCTAssertEqual(cp.failureReason, .polishFailed)
+        XCTAssertEqual(session.currentErrorRecoveryID, cp.id)
+        XCTAssertEqual(session.currentError, .llmEmptyResponse)
+        session.discardRecovery()
+        XCTAssertNil(session.currentError)
+        XCTAssertEqual(invalidated, [cp.id])
+    }
+
+    func testExpiredFailureClearsItsErrorAndInvalidatesAction() async {
+        var worker = processor()
+        worker.polish = { _, _ in throw MemoEchoError.llmEmptyResponse }
+        let (session, directory) = makeCoordinator(worker: worker, lifetime: 0.1)
+        defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        let cp = checkpoint()
+        session.retainRecovery(cp)
+        session.retryRecovery()
+        await waitUntil { !session.isRecovering }
+        XCTAssertEqual(cp.failure, .llmEmptyResponse)
+        await waitUntil { session.recovery == nil }
+        XCTAssertNil(session.currentError)
+        XCTAssertNil(session.currentErrorRecoveryID)
+    }
+
     private func makeCoordinator(driver: FakeInjectionDriver = FakeInjectionDriver(), worker: SessionRecoveryProcessor,
                                  lifetime: TimeInterval = 600) -> (SessionCoordinator, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

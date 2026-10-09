@@ -41,6 +41,12 @@ final class HUDFeedbackController {
         action()
     }
 
+    func invalidateRecoveryFeedback(expectedGeneration: UInt64) {
+        guard presentationGeneration == expectedGeneration, case .failure = hudState else { return }
+        clearRecoveryAction()
+        dismissHUD()
+    }
+
     func showCopyConfirmation() {
         guard !sessionBusy else { return }
         beginPresentation()

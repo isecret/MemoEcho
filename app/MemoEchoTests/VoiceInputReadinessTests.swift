@@ -2,6 +2,19 @@ import XCTest
 @testable import MemoEcho
 
 final class VoiceInputReadinessTests: XCTestCase {
+    func testMenuBlockerUsesConfirmedStatesAndSelectsRelevantSettings() {
+        var readiness = VoiceInputReadiness(hotkey: .ready, microphone: .ready,
+                                           accessibility: .pending("unchecked"), asr: .pending("checking"), llm: .ready)
+        XCTAssertNil(readiness.confirmedBlockerTab)
+        readiness.llm = .blocked("missing")
+        XCTAssertEqual(readiness.confirmedBlockerTab, .ai)
+        readiness.llm = .ready
+        readiness.accessibility = .blocked("denied")
+        XCTAssertEqual(readiness.confirmedBlockerTab, .permissions)
+        readiness.asr = .blocked("missing")
+        XCTAssertEqual(readiness.confirmedBlockerTab, .asr)
+    }
+
     func testEveryCombinationRoutesToFirstRequiredStep() {
         for mask in 0..<32 {
             let statuses = (0..<5).map { mask & (1 << $0) != 0 ? ReadinessStatus.ready : .blocked("未就绪") }
