@@ -4,6 +4,104 @@ import XCTest
 
 @MainActor
 final class TextInjectorTests: XCTestCase {
+    func testBackupDeadlineDoesNotBlockMainActorOrAccumulateReads() async throws {
+        let worker = ClipboardBackupWorker()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let started = Date()
+        await assertBackupThrows({
+            try await worker.snapshot(timeout: 0.05) { _ in
+                XCTAssertFalse(Thread.isMainThread)
+                release.wait()
+                return [[.string: Data("late snapshot".utf8)]]
+            }
+        }) { error in
+            XCTAssertEqual(error as? MemoEchoError,
+                           .textInjectionFailure(detail: "剪贴板备份超时，请重试或手动复制文本"))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        await assertBackupThrows({
+            try await worker.snapshot { _ in
+                XCTFail("A timed-out system read must not allow more queued reads")
+                return []
+            }
+        }) { error in
+            XCTAssertEqual(error as? MemoEchoError,
+                           .textInjectionFailure(detail: "剪贴板备份仍在等待，请稍后重试"))
+        }
+    }
+
+    func testBackupCancellationReturnsWithoutWaitingForSystemRead() async throws {
+        let worker = ClipboardBackupWorker()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let entered = expectation(description: "Background read entered")
+        let task = Task {
+            try await worker.snapshot(timeout: 5) { _ in
+                entered.fulfill()
+                release.wait()
+                return []
+            }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        let started = Date()
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+    }
+
+    func testLateBackupCannotWriteAfterTimeoutAXFallback() async throws {
+        let worker = ClipboardBackupWorker()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let returned = expectation(description: "Late read returned")
+        let driver = FakeInjectionDriver()
+        driver.board.asyncSnapshot = {
+            try await worker.snapshot(timeout: 0.05) { _ in
+                release.wait()
+                returned.fulfill()
+                return [[.string: Data("late".utf8)]]
+            }
+        }
+        driver.axUpdatesValue = true
+        let original = driver.board.items
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.path, .axFallback)
+        release.signal()
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertEqual(driver.axWrites, 1)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.board.restores, 0)
+        XCTAssertEqual(driver.board.items, original)
+    }
+
+    func testStateChangesWhileAwaitingBackupPreventAllWrites() async {
+        for mode in 0..<3 {
+            let driver = FakeInjectionDriver()
+            var active = true
+            driver.board.asyncSnapshot = {
+                await Task.yield()
+                switch mode {
+                case 0: active = false
+                case 1: driver.current = FakeInjectionDriver.focus(identity: "other")
+                default: driver.board.userCopy("newer")
+                }
+                return [[.string: Data("original".utf8)]]
+            }
+            do {
+                _ = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current,
+                                                                shouldContinue: { active })
+                XCTFail("Expected invalidated backup")
+            } catch {}
+            XCTAssertEqual(driver.board.writes, 0)
+            XCTAssertEqual(driver.board.restores, 0)
+            XCTAssertEqual(driver.pastes, 0)
+            XCTAssertEqual(driver.axWrites, 0)
+        }
+    }
+
     func testDelayedPasteIsConfirmedWithoutAXRetryAndClipboardRestored() async throws {
         let driver = FakeInjectionDriver()
         let original = driver.board.items
@@ -406,10 +504,10 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.board.restores, 1)
     }
 
-    func testLeaseRestoresAllItemsOnceAndDoesNotOverwriteLaterCopy() throws {
+    func testLeaseRestoresAllItemsOnceAndDoesNotOverwriteLaterCopy() async throws {
         let board = FakeInjectionPasteboard()
         let original = board.items
-        let lease = try InjectionPasteboardLease(pasteboard: board)
+        let lease = try await InjectionPasteboardLease(pasteboard: board)
         XCTAssertTrue(lease.write("transient"))
         lease.restore()
         XCTAssertEqual(board.items, original)
@@ -419,7 +517,7 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(board.items, [[.string: Data("later".utf8)]])
     }
 
-    func testNativePasteboardMarksTemporaryTextForClipboardHistoryExclusion() throws {
+    func testNativePasteboardMarksTemporaryTextForClipboardHistoryExclusion() async throws {
         let board = NSPasteboard(name: NSPasteboard.Name("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let adapter = NativeInjectionPasteboard(board: board)
@@ -433,18 +531,19 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(item.types.contains(.init("org.nspasteboard.AutoGeneratedType")))
     }
 
-    func testNativePasteboardRestoresInitiallyEmptyClipboard() throws {
+    func testNativePasteboardRestoresInitiallyEmptyClipboard() async throws {
         let board = NSPasteboard(name: NSPasteboard.Name("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let adapter = NativeInjectionPasteboard(board: board)
-        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        let lease = try await InjectionPasteboardLease(pasteboard: adapter)
         XCTAssertTrue(lease.write("transient"))
         lease.restore()
-        XCTAssertEqual(try adapter.snapshot(), [])
+        let snapshotResult442 = try await adapter.snapshot()
+        XCTAssertEqual(snapshotResult442, [])
         XCTAssertNil(board.string(forType: .string))
     }
 
-    func testNativePasteboardRestoresMultipleItemsAndFormats() throws {
+    func testNativePasteboardRestoresMultipleItemsAndFormats() async throws {
         let board = NSPasteboard(name: NSPasteboard.Name("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let original = [NSPasteboardItem(), NSPasteboardItem()]
@@ -460,19 +559,20 @@ final class TextInjectorTests: XCTestCase {
         original[1].setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
         XCTAssertTrue(board.writeObjects(original))
         let adapter = NativeInjectionPasteboard(board: board)
-        let snapshot = try adapter.snapshot()
-        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        let snapshot = try await adapter.snapshot()
+        let lease = try await InjectionPasteboardLease(pasteboard: adapter)
         XCTAssertTrue(lease.write("transient"))
         lease.restore()
-        XCTAssertEqual(try adapter.snapshot(), snapshot)
+        let snapshotResult466 = try await adapter.snapshot()
+        XCTAssertEqual(snapshotResult466, snapshot)
         XCTAssertEqual(board.pasteboardItems?.count, 2)
     }
 
-    func testNativePasteboardPreservesExternalWrite() throws {
+    func testNativePasteboardPreservesExternalWrite() async throws {
         let board = NSPasteboard(name: NSPasteboard.Name("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         board.setString("original", forType: .string)
-        let lease = try InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board))
+        let lease = try await InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board))
         XCTAssertTrue(lease.write("transient"))
         board.clearContents()
         board.setString("external", forType: .string)
@@ -503,7 +603,7 @@ final class TextInjectorTests: XCTestCase {
         }
     }
 
-    func testNativeClipboardEmptyMarkersAreReadableAndRoundTrip() throws {
+    func testNativeClipboardEmptyMarkersAreReadableAndRoundTrip() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let item = NSPasteboardItem()
@@ -515,15 +615,16 @@ final class TextInjectorTests: XCTestCase {
         for type in markers { XCTAssertTrue(item.setData(Data(), forType: type)) }
         XCTAssertTrue(board.writeObjects([item]))
         let adapter = NativeInjectionPasteboard(board: board)
-        let original = try adapter.snapshot()
+        let original = try await adapter.snapshot()
         for type in markers { XCTAssertEqual(original.first?[type], Data()) }
-        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        let lease = try await InjectionPasteboardLease(pasteboard: adapter)
         XCTAssertTrue(lease.write("synthetic output"))
         lease.restore()
-        XCTAssertEqual(try adapter.snapshot(), original)
+        let snapshotResult522 = try await adapter.snapshot()
+        XCTAssertEqual(snapshotResult522, original)
     }
 
-    func testNativeClipboardOpaquePrivateHTMLAndPNGBytesCanBeBackedUp() throws {
+    func testNativeClipboardOpaquePrivateHTMLAndPNGBytesCanBeBackedUp() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let item = NSPasteboardItem()
@@ -531,11 +632,11 @@ final class TextInjectorTests: XCTestCase {
         let invalidPayload = Data([0xff, 0x00, 0xfe])
         for type in types { XCTAssertTrue(item.setData(invalidPayload, forType: type)) }
         XCTAssertTrue(board.writeObjects([item]))
-        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        let snapshot = try await NativeInjectionPasteboard(board: board).snapshot()
         for type in types { XCTAssertEqual(snapshot.first?[type], invalidPayload) }
     }
 
-    func testNativeClipboardMalformedRTFExposesUnreadableSystemDerivedTextFormats() throws {
+    func testNativeClipboardMalformedRTFExposesUnreadableSystemDerivedTextFormats() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let item = NSPasteboardItem()
@@ -549,13 +650,13 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(published.types.contains(.string))
         XCTAssertNil(published.data(forType: .string))
         let adapter = NativeInjectionPasteboard(board: board)
-        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        let lease = try await InjectionPasteboardLease(pasteboard: adapter)
         XCTAssertTrue(lease.write("synthetic output"))
         lease.restore()
         XCTAssertEqual(board.data(forType: .rtf), invalidRTF)
     }
 
-    func testNativeClipboardHistoryStyleNilSetDataCreatesReadableEmptyRepresentation() throws {
+    func testNativeClipboardHistoryStyleNilSetDataCreatesReadableEmptyRepresentation() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         board.clearContents()
@@ -563,12 +664,12 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(board.setData(nil, forType: .html))
         XCTAssertTrue(board.setString("", forType: .init("org.p0deje.Maccy")))
         XCTAssertTrue(board.setString("com.memoecho.test.source", forType: .init("org.nspasteboard.source")))
-        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        let snapshot = try await NativeInjectionPasteboard(board: board).snapshot()
         XCTAssertEqual(snapshot.first?[.html], Data())
         XCTAssertEqual(snapshot.first?[.init("org.p0deje.Maccy")], Data())
     }
 
-    func testNativeClipboardPromisedDataProvidedOnDemandBacksUp() throws {
+    func testNativeClipboardPromisedDataProvidedOnDemandBacksUp() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let provider = SyntheticClipboardDataProvider { _, item, type in
@@ -579,12 +680,12 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(item.setDataProvider(provider, forTypes: [.html]))
         XCTAssertTrue(board.writeObjects([item]))
         XCTAssertEqual(provider.calls, 0)
-        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        let snapshot = try await NativeInjectionPasteboard(board: board).snapshot()
         XCTAssertEqual(provider.calls, 1)
         XCTAssertEqual(snapshot.first?[.html], Data("<b>synthetic</b>".utf8))
     }
 
-    func testNativeClipboardUnfulfilledPromiseInSecondItemFailsWithoutChangingClipboard() throws {
+    func testNativeClipboardUnfulfilledPromiseInSecondItemFailsWithoutChangingClipboard() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let provider = SyntheticClipboardDataProvider { _, _, _ in }
@@ -594,7 +695,7 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(second.setDataProvider(provider, forTypes: [.png]))
         XCTAssertTrue(board.writeObjects([first, second]))
         let changeCount = board.changeCount
-        XCTAssertThrowsError(try NativeInjectionPasteboard(board: board).snapshot()) { error in
+        await assertBackupThrows({ try await NativeInjectionPasteboard(board: board).snapshot() }) { error in
             XCTAssertEqual(error as? MemoEchoError,
                            .textInjectionFailure(detail: "无法备份当前剪贴板，请手动复制文本"))
         }
@@ -604,7 +705,7 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(board.string(forType: .string), "synthetic original")
     }
 
-    func testNativeClipboardReplacementDuringPromisedReadPreservesNewCopy() throws {
+    func testNativeClipboardReplacementDuringPromisedReadPreservesNewCopy() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let provider = SyntheticClipboardDataProvider { _, _, _ in
@@ -616,7 +717,7 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(item.setDataProvider(provider, forTypes: [.html]))
         XCTAssertTrue(board.writeObjects([item]))
         let changeCount = board.changeCount
-        XCTAssertThrowsError(try InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board))) { error in
+        await assertBackupThrows({ try await InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board)) }) { error in
             XCTAssertEqual(error as? MemoEchoError,
                            .textInjectionFailure(detail: "剪贴板正在变化，请重试"))
         }
@@ -625,7 +726,7 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(board.string(forType: .string), "synthetic newer copy")
     }
 
-    func testNativeClipboardMarkersAloneDoNotMakeMissingContentRecoverable() throws {
+    func testNativeClipboardMarkersAloneDoNotMakeMissingContentRecoverable() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let provider = SyntheticClipboardDataProvider { _, _, _ in }
@@ -635,11 +736,11 @@ final class TextInjectorTests: XCTestCase {
         item.setDataProvider(provider, forTypes: [.html])
         XCTAssertTrue(board.writeObjects([item]))
         let count = board.changeCount
-        XCTAssertThrowsError(try InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board)))
+        await assertBackupThrows({ try await InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board)) })
         XCTAssertEqual(board.changeCount, count)
     }
 
-    func testNativeClipboardEmptyContentAndPrivateFormatsRoundTrip() throws {
+    func testNativeClipboardEmptyContentAndPrivateFormatsRoundTrip() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         let first = NSPasteboardItem()
@@ -651,10 +752,10 @@ final class TextInjectorTests: XCTestCase {
         second.setDataProvider(provider, forTypes: [.html])
         XCTAssertTrue(board.writeObjects([first, second]))
         let adapter = NativeInjectionPasteboard(board: board)
-        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        let lease = try await InjectionPasteboardLease(pasteboard: adapter)
         XCTAssertTrue(lease.write("synthetic output"))
         lease.restore()
-        let restored = try adapter.snapshot()
+        let restored = try await adapter.snapshot()
         XCTAssertEqual(restored.count, 2)
         XCTAssertEqual(restored.first?[.string], Data())
         XCTAssertEqual(restored.last?[custom], Data([0xff, 0x00]))
@@ -679,20 +780,21 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(board.string(forType: .string), "synthetic newer copy")
     }
 
-    func testNativeClipboardRetriesFailUntilMissingDataIsReplaced() throws {
+    func testNativeClipboardRetriesFailUntilMissingDataIsReplaced() async throws {
         let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
         board.declareTypes([.html], owner: nil)
         let adapter = NativeInjectionPasteboard(board: board)
         for _ in 0..<3 {
-            XCTAssertThrowsError(try adapter.snapshot()) { error in
+            await assertBackupThrows({ try await adapter.snapshot() }) { error in
                 XCTAssertEqual(error as? MemoEchoError,
                                .textInjectionFailure(detail: "无法备份当前剪贴板，请手动复制文本"))
             }
         }
         board.clearContents()
         board.setString("synthetic new plain text", forType: .string)
-        XCTAssertEqual(try adapter.snapshot(), [[.string: Data("synthetic new plain text".utf8)]])
+        let snapshotResult694 = try await adapter.snapshot()
+        XCTAssertEqual(snapshotResult694, [[.string: Data("synthetic new plain text".utf8)]])
     }
 
     func testCancellationAfterDispatchWaitsBeforeRestoringClipboard() async {
@@ -727,6 +829,15 @@ final class TextInjectorTests: XCTestCase {
         await fails(driver)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
+    }
+
+    private func assertBackupThrows<T>(_ operation: () async throws -> T,
+                                      verify: (Error) -> Void = { _ in },
+                                      file: StaticString = #filePath, line: UInt = #line) async {
+        do {
+            _ = try await operation()
+            XCTFail("Expected backup failure", file: file, line: line)
+        } catch { verify(error) }
     }
 
     private func fails(_ driver: FakeInjectionDriver, target: TextInjectionFocus? = nil) async {
@@ -769,7 +880,9 @@ final class FakeInjectionPasteboard: InjectionPasteboard {
     var restores = 0
     var snapshotError: MemoEchoError?
     var onSnapshot: (() -> Void)?
-    func snapshot() throws -> InjectionPasteboardSnapshot {
+    var asyncSnapshot: (() async throws -> InjectionPasteboardSnapshot)?
+    func snapshot() async throws -> InjectionPasteboardSnapshot {
+        if let asyncSnapshot { return try await asyncSnapshot() }
         onSnapshot?()
         if let snapshotError { throw snapshotError }
         return items
