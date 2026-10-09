@@ -131,6 +131,98 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.board.restores, 1)
     }
 
+    func testBackupFailureUsesVerifiedAXWithoutTouchingClipboard() async throws {
+        let driver = FakeInjectionDriver()
+        driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
+        driver.axUpdatesValue = true
+        let original = driver.board.items
+        var attempts = 0
+        let result = try await TextInjector(driver: driver).inject(
+            text: "hello", target: driver.current, onOutputAttempt: { attempts += 1 })
+        XCTAssertEqual(result.path, .axFallback)
+        XCTAssertEqual(result.confirmation, .verified)
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(driver.axWrites, 1)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.board.restores, 0)
+        XCTAssertEqual(driver.board.items, original)
+    }
+
+    func testBackupFailureAXStillRequiresObservedTextChange() async {
+        let driver = FakeInjectionDriver()
+        driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
+        await fails(driver)
+        XCTAssertEqual(driver.axWrites, 1)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.board.restores, 0)
+    }
+
+    func testBackupFailureCannotBypassTargetOrClipboardChanges() async {
+        for change in 0..<4 {
+            let driver = FakeInjectionDriver()
+            driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
+            driver.axUpdatesValue = true
+            driver.board.onSnapshot = {
+                switch change {
+                case 0: driver.current = FakeInjectionDriver.focus(identity: "other")
+                case 1: driver.current = FakeInjectionDriver.focus(selection: NSRange(location: 0, length: 0))
+                case 2: driver.current = FakeInjectionDriver.focus(composing: true)
+                default: driver.board.userCopy("newer copy")
+                }
+            }
+            await fails(driver)
+            XCTAssertEqual(driver.axWrites, 0)
+            XCTAssertEqual(driver.pastes, 0)
+            XCTAssertEqual(driver.board.writes, 0)
+            XCTAssertEqual(driver.board.restores, 0)
+        }
+    }
+
+    func testBackupFailureDoesNotWriteUnreadableTargets() async {
+        for window in [false, true] {
+            let driver = FakeInjectionDriver()
+            driver.current = window ? FakeInjectionDriver.window() : FakeInjectionDriver.focus(readable: false)
+            driver.current?.continuity = driver.continuity
+            driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
+            await fails(driver)
+            XCTAssertEqual(driver.axWrites, 0)
+            XCTAssertEqual(driver.pastes, 0)
+            XCTAssertEqual(driver.board.writes, 0)
+        }
+    }
+
+    func testBackupFailureRespectsSessionCancellationBeforeAX() async {
+        let driver = FakeInjectionDriver()
+        var active = true
+        driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
+        driver.board.onSnapshot = { active = false }
+        do {
+            _ = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current,
+                                                            shouldContinue: { active })
+            XCTFail("Expected cancellation")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+    }
+
+    func testNativeUnreadableClipboardCanUseAXWithoutReplacingOriginal() async throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.declareTypes([.html], owner: nil)
+        let count = board.changeCount
+        let driver = FakeInjectionDriver()
+        driver.pasteboardOverride = NativeInjectionPasteboard(board: board)
+        driver.axUpdatesValue = true
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.path, .axFallback)
+        XCTAssertEqual(driver.axWrites, 1)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(board.changeCount, count)
+        XCTAssertTrue(board.types?.contains(.html) == true)
+    }
+
     func testAXSuccessCodeWithoutTextChangeDoesNotReportSuccess() async {
         let driver = FakeInjectionDriver()
         driver.canPost = false
@@ -388,6 +480,221 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(board.string(forType: .string), "external")
     }
 
+    func testNativeClipboardMissingFormatsAllowInjectionAndRestoreReadableContent() async throws {
+        let missingTypes: [NSPasteboard.PasteboardType] = [
+            .html, .rtf, .png, .fileURL,
+            .init("org.nspasteboard.source"),
+            .init("com.memoecho.test.private-format")
+        ]
+        for type in missingTypes {
+            let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+            defer { board.releaseGlobally() }
+            board.declareTypes([.string, type], owner: nil)
+            XCTAssertTrue(board.setString("synthetic original", forType: .string))
+            XCTAssertTrue(try XCTUnwrap(board.pasteboardItems?.first).types.contains(type))
+            let driver = FakeInjectionDriver()
+            driver.pasteboardOverride = NativeInjectionPasteboard(board: board)
+            driver.onWait = { tick in if tick == 2 { driver.apply("synthetic output") } }
+            _ = try await TextInjector(driver: driver).inject(text: "synthetic output", target: driver.current)
+            XCTAssertEqual(driver.pastes, 1)
+            XCTAssertEqual(driver.axWrites, 0)
+            XCTAssertFalse(driver.isInjecting)
+            XCTAssertEqual(board.string(forType: .string), "synthetic original")
+        }
+    }
+
+    func testNativeClipboardEmptyMarkersAreReadableAndRoundTrip() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let item = NSPasteboardItem()
+        item.setString("synthetic original", forType: .string)
+        let markers: [NSPasteboard.PasteboardType] = [
+            .init("org.nspasteboard.TransientType"), .init("org.nspasteboard.AutoGeneratedType"),
+            .init("org.nspasteboard.source"), .init("org.p0deje.Maccy")
+        ]
+        for type in markers { XCTAssertTrue(item.setData(Data(), forType: type)) }
+        XCTAssertTrue(board.writeObjects([item]))
+        let adapter = NativeInjectionPasteboard(board: board)
+        let original = try adapter.snapshot()
+        for type in markers { XCTAssertEqual(original.first?[type], Data()) }
+        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        XCTAssertTrue(lease.write("synthetic output"))
+        lease.restore()
+        XCTAssertEqual(try adapter.snapshot(), original)
+    }
+
+    func testNativeClipboardOpaquePrivateHTMLAndPNGBytesCanBeBackedUp() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let item = NSPasteboardItem()
+        let types: [NSPasteboard.PasteboardType] = [.html, .png, .init("com.memoecho.test.private-format")]
+        let invalidPayload = Data([0xff, 0x00, 0xfe])
+        for type in types { XCTAssertTrue(item.setData(invalidPayload, forType: type)) }
+        XCTAssertTrue(board.writeObjects([item]))
+        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        for type in types { XCTAssertEqual(snapshot.first?[type], invalidPayload) }
+    }
+
+    func testNativeClipboardMalformedRTFExposesUnreadableSystemDerivedTextFormats() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let item = NSPasteboardItem()
+        let invalidRTF = Data([0xff, 0x00, 0xfe])
+        XCTAssertTrue(item.setData(invalidRTF, forType: .rtf))
+        XCTAssertEqual(item.types, [.rtf])
+        XCTAssertTrue(board.writeObjects([item]))
+        let published = try XCTUnwrap(board.pasteboardItems?.first)
+        XCTAssertEqual(published.data(forType: .rtf), invalidRTF)
+        // AppKit advertises derived plain-text types even when RTF conversion fails.
+        XCTAssertTrue(published.types.contains(.string))
+        XCTAssertNil(published.data(forType: .string))
+        let adapter = NativeInjectionPasteboard(board: board)
+        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        XCTAssertTrue(lease.write("synthetic output"))
+        lease.restore()
+        XCTAssertEqual(board.data(forType: .rtf), invalidRTF)
+    }
+
+    func testNativeClipboardHistoryStyleNilSetDataCreatesReadableEmptyRepresentation() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        XCTAssertTrue(board.setData(Data("synthetic original".utf8), forType: .string))
+        XCTAssertTrue(board.setData(nil, forType: .html))
+        XCTAssertTrue(board.setString("", forType: .init("org.p0deje.Maccy")))
+        XCTAssertTrue(board.setString("com.memoecho.test.source", forType: .init("org.nspasteboard.source")))
+        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        XCTAssertEqual(snapshot.first?[.html], Data())
+        XCTAssertEqual(snapshot.first?[.init("org.p0deje.Maccy")], Data())
+    }
+
+    func testNativeClipboardPromisedDataProvidedOnDemandBacksUp() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let provider = SyntheticClipboardDataProvider { _, item, type in
+            item.setData(Data("<b>synthetic</b>".utf8), forType: type)
+        }
+        let item = NSPasteboardItem()
+        item.setString("synthetic", forType: .string)
+        XCTAssertTrue(item.setDataProvider(provider, forTypes: [.html]))
+        XCTAssertTrue(board.writeObjects([item]))
+        XCTAssertEqual(provider.calls, 0)
+        let snapshot = try NativeInjectionPasteboard(board: board).snapshot()
+        XCTAssertEqual(provider.calls, 1)
+        XCTAssertEqual(snapshot.first?[.html], Data("<b>synthetic</b>".utf8))
+    }
+
+    func testNativeClipboardUnfulfilledPromiseInSecondItemFailsWithoutChangingClipboard() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let provider = SyntheticClipboardDataProvider { _, _, _ in }
+        let first = NSPasteboardItem()
+        first.setString("synthetic original", forType: .string)
+        let second = NSPasteboardItem()
+        XCTAssertTrue(second.setDataProvider(provider, forTypes: [.png]))
+        XCTAssertTrue(board.writeObjects([first, second]))
+        let changeCount = board.changeCount
+        XCTAssertThrowsError(try NativeInjectionPasteboard(board: board).snapshot()) { error in
+            XCTAssertEqual(error as? MemoEchoError,
+                           .textInjectionFailure(detail: "无法备份当前剪贴板，请手动复制文本"))
+        }
+        XCTAssertEqual(provider.calls, 1)
+        XCTAssertEqual(board.changeCount, changeCount)
+        XCTAssertEqual(board.pasteboardItems?.count, 2)
+        XCTAssertEqual(board.string(forType: .string), "synthetic original")
+    }
+
+    func testNativeClipboardReplacementDuringPromisedReadPreservesNewCopy() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let provider = SyntheticClipboardDataProvider { _, _, _ in
+            board.clearContents()
+            board.setString("synthetic newer copy", forType: .string)
+        }
+        let item = NSPasteboardItem()
+        item.setString("synthetic original", forType: .string)
+        XCTAssertTrue(item.setDataProvider(provider, forTypes: [.html]))
+        XCTAssertTrue(board.writeObjects([item]))
+        let changeCount = board.changeCount
+        XCTAssertThrowsError(try InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board))) { error in
+            XCTAssertEqual(error as? MemoEchoError,
+                           .textInjectionFailure(detail: "剪贴板正在变化，请重试"))
+        }
+        XCTAssertEqual(provider.calls, 1)
+        XCTAssertNotEqual(board.changeCount, changeCount)
+        XCTAssertEqual(board.string(forType: .string), "synthetic newer copy")
+    }
+
+    func testNativeClipboardMarkersAloneDoNotMakeMissingContentRecoverable() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let provider = SyntheticClipboardDataProvider { _, _, _ in }
+        let item = NSPasteboardItem()
+        item.setData(Data(), forType: .init("org.nspasteboard.TransientType"))
+        item.setString("synthetic source", forType: .init("org.nspasteboard.source"))
+        item.setDataProvider(provider, forTypes: [.html])
+        XCTAssertTrue(board.writeObjects([item]))
+        let count = board.changeCount
+        XCTAssertThrowsError(try InjectionPasteboardLease(pasteboard: NativeInjectionPasteboard(board: board)))
+        XCTAssertEqual(board.changeCount, count)
+    }
+
+    func testNativeClipboardEmptyContentAndPrivateFormatsRoundTrip() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let first = NSPasteboardItem()
+        first.setData(Data(), forType: .string)
+        let second = NSPasteboardItem()
+        let custom = NSPasteboard.PasteboardType("com.memoecho.test.opaque")
+        second.setData(Data([0xff, 0x00]), forType: custom)
+        let provider = SyntheticClipboardDataProvider { _, _, _ in }
+        second.setDataProvider(provider, forTypes: [.html])
+        XCTAssertTrue(board.writeObjects([first, second]))
+        let adapter = NativeInjectionPasteboard(board: board)
+        let lease = try InjectionPasteboardLease(pasteboard: adapter)
+        XCTAssertTrue(lease.write("synthetic output"))
+        lease.restore()
+        let restored = try adapter.snapshot()
+        XCTAssertEqual(restored.count, 2)
+        XCTAssertEqual(restored.first?[.string], Data())
+        XCTAssertEqual(restored.last?[custom], Data([0xff, 0x00]))
+    }
+
+    func testNativePartialBackupPreservesNewCopyDuringInjection() async throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.declareTypes([.string, .html], owner: nil)
+        board.setString("synthetic original", forType: .string)
+        let driver = FakeInjectionDriver()
+        driver.pasteboardOverride = NativeInjectionPasteboard(board: board)
+        driver.onWait = { tick in
+            if tick == 2 {
+                driver.apply("synthetic output")
+                board.clearContents()
+                board.setString("synthetic newer copy", forType: .string)
+            }
+        }
+        _ = try await TextInjector(driver: driver).inject(text: "synthetic output", target: driver.current)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(board.string(forType: .string), "synthetic newer copy")
+    }
+
+    func testNativeClipboardRetriesFailUntilMissingDataIsReplaced() throws {
+        let board = NSPasteboard(name: .init("MemoEcho-output-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.declareTypes([.html], owner: nil)
+        let adapter = NativeInjectionPasteboard(board: board)
+        for _ in 0..<3 {
+            XCTAssertThrowsError(try adapter.snapshot()) { error in
+                XCTAssertEqual(error as? MemoEchoError,
+                               .textInjectionFailure(detail: "无法备份当前剪贴板，请手动复制文本"))
+            }
+        }
+        board.clearContents()
+        board.setString("synthetic new plain text", forType: .string)
+        XCTAssertEqual(try adapter.snapshot(), [[.string: Data("synthetic new plain text".utf8)]])
+    }
+
     func testCancellationAfterDispatchWaitsBeforeRestoringClipboard() async {
         let driver = FakeInjectionDriver()
         let work = Task { try await TextInjector(driver: driver).inject(text: "hello", target: driver.current) }
@@ -434,6 +741,22 @@ final class TextInjectorTests: XCTestCase {
     }
 }
 
+/// Supplies synthetic promised data on an isolated, named pasteboard only.
+private final class SyntheticClipboardDataProvider: NSObject, NSPasteboardItemDataProvider {
+    var calls = 0
+    let provide: (NSPasteboard?, NSPasteboardItem, NSPasteboard.PasteboardType) -> Void
+
+    init(provide: @escaping (NSPasteboard?, NSPasteboardItem, NSPasteboard.PasteboardType) -> Void) {
+        self.provide = provide
+    }
+
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
+                    provideDataForType type: NSPasteboard.PasteboardType) {
+        calls += 1
+        provide(pasteboard, item, type)
+    }
+}
+
 @MainActor
 final class FakeInjectionPasteboard: InjectionPasteboard {
     var changeCount = 0
@@ -444,7 +767,13 @@ final class FakeInjectionPasteboard: InjectionPasteboard {
     var canWrite = true
     var writes = 0
     var restores = 0
-    func snapshot() -> InjectionPasteboardSnapshot { items }
+    var snapshotError: MemoEchoError?
+    var onSnapshot: (() -> Void)?
+    func snapshot() throws -> InjectionPasteboardSnapshot {
+        onSnapshot?()
+        if let snapshotError { throw snapshotError }
+        return items
+    }
     func write(_ text: String) -> Bool {
         writes += 1
         changeCount += 1
@@ -460,7 +789,8 @@ final class FakeInjectionDriver: TextInjectionDriver {
     var authorized = true
     var isInjecting = false
     let board = FakeInjectionPasteboard()
-    var pasteboard: any InjectionPasteboard { board }
+    var pasteboardOverride: (any InjectionPasteboard)?
+    var pasteboard: any InjectionPasteboard { pasteboardOverride ?? board }
     var activations = 0
     var canMonitor = true
     let continuity = InjectionTargetContinuity()
