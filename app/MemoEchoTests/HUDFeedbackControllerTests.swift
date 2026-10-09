@@ -470,7 +470,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
         controller.handleEvent(.dictionaryTermLearned(" \n "))
         XCTAssertEqual(controller.hudState, .notice("原始词条"))
         XCTAssertEqual(controller.presentationGeneration, generation)
-        try await Task.sleep(for: .milliseconds(650))
+        await waitForHUDToHide(controller)
         XCTAssertFalse(controller.isHUDPresented)
     }
 
@@ -671,7 +671,10 @@ final class HUDFeedbackControllerTests: XCTestCase {
     }
 
     private func waitForHUDToHide(_ controller: HUDFeedbackController) async {
-        for _ in 0..<20 {
+        // Fade-in, dwell and fade-out are separate tasks; CI scheduling can delay each frame.
+        // Wait for the observable outcome, with a bound that still catches a cancelled dismissal.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
             if controller.hudState == .hidden, controller.isHUDPresented == false { return }
             try? await Task.sleep(for: .milliseconds(25))
         }
