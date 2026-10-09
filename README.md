@@ -58,7 +58,7 @@ Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-ta
 
 ---
 
-[开发与发布](./docs/DEVELOPMENT.md) · [产品说明](./docs/PRD.md) · [技术设计](./docs/TDD.md)
+[开发与发布](./docs/DEVELOPMENT.md) · [产品说明](./docs/PRD.md) · [技术设计](./docs/TDD.md) · [HUD 样式预览](./docs/hud-prototype.html)
 
 快捷键方案：[单按、双按与按住录音](./docs/plans/hotkey-recording-modes.md)（Issue #8）
 
@@ -67,3 +67,5 @@ Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-ta
 后续方案：[云端实时 ASR 与 MiMo 独立适配](./docs/plans/realtime-asr.md)
 
 验证记录：[实时 ASR 实施检查与待验收范围](./docs/validation-realtime-asr.md)
+
+界面方案：[HUD 展示优化](./docs/plans/hud-display-refinement.md)（[Issue #12](https://github.com/isecret/MemoEcho/issues/12)，长词、失败动作与动态窗口，代码已调整、待实机验收）

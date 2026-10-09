@@ -3,12 +3,27 @@ import SwiftUI
 
 /// 悬浮 HUD 窗口 — 透明面板，承载胶囊条 SwiftUI 内容
 final class HUDWindow: NSPanel {
-    /// 窗口尺寸需大于任何状态的胶囊条内容，由 SwiftUI 内容自适应
-    private static let windowSize = HUDLayout.windowSize
+    private var selectedScreenID: NSNumber?
+    var onScreenChanged: (() -> Void)?
+    var onInteractionHover: ((Bool) -> Void)?
+    private var interactionSize: NSSize?
+    // NSEvent tokens are created/used on the main actor; deinit only removes registrations.
+    nonisolated(unsafe) private var localMouseMonitor: Any?
+    nonisolated(unsafe) private var globalMouseMonitor: Any?
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    var presentationScreen: NSScreen? {
+        NSScreen.screens.first { $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber == selectedScreenID }
+            ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    var availableWidth: CGFloat { presentationScreen?.visibleFrame.width ?? 1440 }
 
     init(contentView: NSView) {
         super.init(
-            contentRect: NSRect(origin: .zero, size: Self.windowSize),
+            contentRect: NSRect(origin: .zero, size: HUDLayout.windowSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
@@ -25,20 +40,71 @@ final class HUDWindow: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         // 默认不拦截鼠标事件，录音态由 controller 动态切换
         ignoresMouseEvents = true
+        NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
+                                              name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
-    /// 定位到当前活跃屏幕（光标所在屏幕）的底部中间
+    deinit {
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+    }
+
+    /// Only the painted rounded rectangle accepts clicks; transparent panel padding passes through.
+    func setInteractionRegion(_ size: NSSize?) {
+        interactionSize = size
+        if size != nil, localMouseMonitor == nil {
+            localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
+                MainActor.assumeIsolated { self?.updatePointerInteraction() }
+                return event
+            }
+            globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updatePointerInteraction() }
+            }
+        } else if size == nil {
+            if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+            if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+            localMouseMonitor = nil
+            globalMouseMonitor = nil
+        }
+        updatePointerInteraction()
+    }
+
+    private func updatePointerInteraction() {
+        let inside: Bool
+        if let size = interactionSize {
+            let point = NSPoint(x: NSEvent.mouseLocation.x - frame.minX, y: NSEvent.mouseLocation.y - frame.minY)
+            inside = Self.isInsideCapsule(point, panelSize: frame.size, capsuleSize: size)
+        } else { inside = false }
+        ignoresMouseEvents = !inside
+        onInteractionHover?(inside)
+    }
+
+    static func isInsideCapsule(_ point: NSPoint, panelSize: NSSize, capsuleSize: NSSize) -> Bool {
+        let rect = NSRect(x: (panelSize.width - capsuleSize.width) / 2, y: HUDLayout.panelPadding.height,
+                          width: capsuleSize.width, height: capsuleSize.height)
+        let radius = min(17, capsuleSize.height / 2)
+        return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).contains(point)
+    }
+
+    @objc private func screenParametersChanged() {
+        selectedScreenID = presentationScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        onScreenChanged?()
+    }
+
+    /// Select once for a presentation/session; resizes never follow the mouse.
     func positionOnActiveScreen() {
         let screen = Self.screenContainingMouse() ?? NSScreen.main ?? NSScreen.screens.first
-        guard let screen else { return }
+        selectedScreenID = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        resize(to: frame.size)
+    }
 
-        setFrameOrigin(
-            Self.frameOrigin(
-                windowSize: Self.windowSize,
-                screenFrame: screen.frame,
-                visibleFrame: screen.visibleFrame
-            )
-        )
+    func resize(to size: NSSize) {
+        guard let screen = presentationScreen else { return }
+        let safeSize = NSSize(width: min(size.width, screen.visibleFrame.width),
+                              height: min(size.height, screen.visibleFrame.height))
+        setFrame(NSRect(origin: Self.frameOrigin(windowSize: safeSize, screenFrame: screen.frame,
+                                                visibleFrame: screen.visibleFrame), size: safeSize), display: true)
+        updatePointerInteraction()
     }
 
     static func frameOrigin(
@@ -47,12 +113,13 @@ final class HUDWindow: NSPanel {
         visibleFrame: NSRect
     ) -> NSPoint {
         let x = visibleFrame.midX - windowSize.width / 2
-        let y = screenFrame.minY + HUDLayout.baseBottomMargin + bottomReservedHeight(
+        let desiredY = screenFrame.minY + HUDLayout.baseBottomMargin + bottomReservedHeight(
             screenFrame: screenFrame,
             visibleFrame: visibleFrame
         )
 
-        return NSPoint(x: x, y: y)
+        return NSPoint(x: max(visibleFrame.minX, x),
+                       y: max(visibleFrame.minY, min(desiredY, visibleFrame.maxY - windowSize.height)))
     }
 
     static func bottomReservedHeight(screenFrame: NSRect, visibleFrame: NSRect) -> CGFloat {

@@ -1,39 +1,51 @@
 import AppKit
-import os
 import SwiftUI
 
 /// HUD 反馈控制器，统一驱动 HUD 窗口、状态转换、声波动画和音效播放
 @MainActor
 @Observable
 final class HUDFeedbackController {
-    private static let logger = Logger(subsystem: "me.wangmao.memoecho", category: "HUDFeedback")
-    private static let learnedTermDisplayLimit = 4
-    static let defaultLearnedTermNoticeDismissSeconds = 1.8
+    static let defaultLearnedTermNoticeDismissSeconds = 2.4
 
     // MARK: - Observable State (HUDContentView 读取)
 
-    private(set) var hudState: HUDState = .hidden
-    private(set) var recordingSignalMissing = false
-    private(set) var modeCueLabel: String?
+    private(set) var hudState: HUDState = .hidden { didSet { refreshLayout() } }
+    private(set) var recordingSignalMissing = false { didSet { refreshLayout() } }
+    private(set) var modeCueLabel: String? { didSet { refreshLayout() } }
     private(set) var barHeights: [CGFloat] = Array(repeating: HUDLayout.resetBarHeight, count: 7)
     private(set) var isHUDPresented = false
+
+    private(set) var presentation = HUDLayout.measure(state: .hidden)
+    private(set) var presentationGeneration: UInt64 = 0
+    private(set) var recoveryActionPerformed = false
+    private(set) var isCopyConfirmation = false
 
     // MARK: - Callbacks (由 AppCoordinator 注入)
 
     var onCancelRecording: (() -> Void)?
     var onConfirmRecording: (() -> Void)?
     var onToggleProcessingMode: (() -> Void)?
-    var recoveryActionTitle: String?
+    var recoveryActionTitle: String? { didSet { refreshLayout() } }
     var onRecoveryAction: (() -> Void)?
 
-    func performRecoveryAction() {
-        guard case .failure = hudState, recoveryActionTitle != nil else { return }
-        onRecoveryAction?()
+    func performRecoveryAction(expectedGeneration: UInt64? = nil) {
+        guard case .failure = hudState, recoveryActionTitle != nil,
+              !recoveryActionPerformed,
+              expectedGeneration == nil || expectedGeneration == presentationGeneration,
+              let action = onRecoveryAction else { return }
+        recoveryActionPerformed = true
+        // Consume before invoking: the callback may synchronously publish the next state.
+        onRecoveryAction = nil
+        setRecoveryHover(false, generation: presentationGeneration)
+        setRecoveryAccessibilityFocus(false, generation: presentationGeneration)
+        action()
     }
 
     func showCopyConfirmation() {
-        dismissTask?.cancel()
+        guard !sessionBusy else { return }
+        beginPresentation()
         clearRecoveryAction()
+        isCopyConfirmation = true
         hudState = .notice("已复制")
         showHUD()
         scheduleDismiss(after: 1.2)
@@ -57,6 +69,14 @@ final class HUDFeedbackController {
     private var hudWindow: HUDWindow?
     private var hostingView: NSHostingView<HUDContentView>?
     private var dismissTask: Task<Void, Never>?
+    private var resizeTask: Task<Void, Never>?
+    private var sessionBusy = false
+    private var isDismissing = false
+    private var countdown = HUDDismissCountdown()
+    private var recoveryHovered = false
+    private var recoveryFocused = false
+    private var countdownReady = false
+
     private var opacityTask: Task<Void, Never>?
     private var modeCueTask: Task<Void, Never>?
     private var levelPollingTask: Task<Void, Never>?
@@ -86,8 +106,9 @@ final class HUDFeedbackController {
 
     /// 纯修饰键按下后的候选反馈。此时只显示 HUD，不启动录音相关副作用。
     func presentHotkeyCandidate() {
-        dismissTask?.cancel()
-        dismissTask = nil
+        beginPresentation()
+        sessionBusy = true
+        clearRecoveryAction()
         cancelPendingStartSound()
         clearModeCue()
         stopLevelPolling()
@@ -95,14 +116,14 @@ final class HUDFeedbackController {
         resetBars()
         hudState = .hotkeyPending
 
-        showHUD()
+        showHUD(selectScreen: true)
     }
 
     /// 仅关闭仍处于候选态的 HUD，避免组合键误伤已经开始的录音。
     func dismissHotkeyCandidate() {
         guard hudState == .hotkeyPending else { return }
-        dismissTask?.cancel()
-        dismissTask = nil
+        beginPresentation()
+        sessionBusy = false
         cancelPendingStartSound()
         clearModeCue()
         stopLevelPolling()
@@ -113,9 +134,18 @@ final class HUDFeedbackController {
 
     /// 处理来自 SessionCoordinator 的反馈事件
     func handleEvent(_ event: SessionFeedbackEvent) {
-        Self.logger.info("handleEvent | \(String(describing: event))")
-        dismissTask?.cancel()
-        dismissTask = nil
+        // Dictionary text is private input; do not interpolate event payloads into logs.
+        switch event {
+        case .dictionaryTermLearned(let term):
+            guard !sessionBusy, !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if case .failure = hudState { return }
+        case .recordingSignalChanged, .startSoundCue, .modeSwitched: break
+        default: break
+        }
+        switch event {
+        case .recordingSignalChanged, .startSoundCue, .modeSwitched: break
+        default: beginPresentation()
+        }
 
         switch event {
         case .recordingSignalChanged, .startSoundCue, .modeSwitched: break
@@ -126,10 +156,13 @@ final class HUDFeedbackController {
             guard hudState == .recording else { return }
             recordingSignalMissing = missing
         case .recordingStarted:
+            let selectScreen = hudState != .hotkeyPending
+            sessionBusy = true
+            clearRecoveryAction()
             cancelPendingStartSound()
             clearModeCue()
             hudState = .recording
-            showHUD()
+            showHUD(selectScreen: selectScreen)
             startLevelPolling()
             startEscMonitor()
 
@@ -156,13 +189,15 @@ final class HUDFeedbackController {
             let duration = modeCueDuration
             modeCueTask = Task { [weak self] in
                 try? await Task.sleep(for: duration)
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 guard self.hudState == .recording, self.modeCueLabel == label else { return }
                 self.modeCueLabel = nil
                 self.modeCueTask = nil
             }
 
         case .recoveryStarted:
+            sessionBusy = true
+            clearRecoveryAction()
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
@@ -172,15 +207,18 @@ final class HUDFeedbackController {
             showHUD()
 
         case .outputDispatched:
+            sessionBusy = false
+            clearRecoveryAction()
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
             stopEscMonitor()
             resetBars()
-            clearRecoveryAction()
             dismissHUD()
 
         case .processingFinished:
+            sessionBusy = false
+            clearRecoveryAction()
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
@@ -193,11 +231,13 @@ final class HUDFeedbackController {
             stopLevelPolling()
             stopEscMonitor()
             resetBars()
-            hudState = .notice(Self.learnedTermNoticeText(term))
+            clearRecoveryAction()
+            hudState = .notice(term.trimmingCharacters(in: .whitespacesAndNewlines))
             showHUD()
-            scheduleDismiss(after: learnedTermNoticeDismissSeconds)
+            scheduleDismiss(after: presentation.lines.count > 1 ? learnedTermNoticeDismissSeconds * 4 / 2.4 : learnedTermNoticeDismissSeconds)
 
         case .processingFailed(let reason):
+            sessionBusy = false
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
@@ -205,9 +245,11 @@ final class HUDFeedbackController {
             resetBars()
             hudState = .failure(reason)
             showHUD()
-            scheduleDismiss(after: recoveryActionTitle == nil ? 1.2 : 5)
+            scheduleDismiss(after: presentation.dismissSeconds ?? 2.4)
 
         case .processingCancelled:
+            sessionBusy = false
+            clearRecoveryAction()
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
@@ -399,12 +441,12 @@ final class HUDFeedbackController {
 
     // MARK: - Window Management
 
-    private func showHUD() {
+    private func showHUD(selectScreen: Bool = false) {
         ensureWindow()
-        if !isHUDPresented {
-            hudWindow?.positionOnActiveScreen()
-            hudWindow?.alphaValue = 0
-        }
+        isDismissing = false
+        if selectScreen || !isHUDPresented { hudWindow?.positionOnActiveScreen() }
+        if !isHUDPresented { hudWindow?.alphaValue = 0 }
+        refreshLayout()
         updateMouseInteraction()
         hudWindow?.orderFrontRegardless()
         isHUDPresented = true
@@ -413,6 +455,8 @@ final class HUDFeedbackController {
     }
 
     private func dismissHUD() {
+        isDismissing = true
+        dismissTask?.cancel()
         clearModeCue()
         stopLevelPolling()
         stopEscMonitor()
@@ -445,19 +489,85 @@ final class HUDFeedbackController {
             self.opacityTask = nil
             if hideWhenFinished {
                 self.hudWindow?.orderOut(nil)
-                self.hudWindow?.ignoresMouseEvents = true
+                self.hudWindow?.setInteractionRegion(nil)
                 self.hudState = .hidden
                 self.isHUDPresented = false
+                self.isDismissing = false
+                self.clearRecoveryAction()
+            } else {
+                self.countdownReady = true
+                self.resumeCountdownIfNeeded()
             }
         }
     }
 
+    private func beginPresentation() {
+        presentationGeneration &+= 1
+        dismissTask?.cancel()
+        dismissTask = nil
+        countdown = HUDDismissCountdown()
+        countdownReady = false
+        recoveryHovered = false
+        recoveryFocused = false
+        recoveryActionPerformed = false
+        isCopyConfirmation = false
+    }
+
     private func scheduleDismiss(after seconds: Double) {
-        dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard !Task.isCancelled else { return }
-            self?.dismissHUD()
+        countdown = HUDDismissCountdown(remaining: seconds)
+        resumeCountdownIfNeeded()
+    }
+
+    func setRecoveryHover(_ hovered: Bool, generation: UInt64) {
+        guard generation == presentationGeneration, case .failure = hudState,
+              recoveryActionTitle != nil else { return }
+        recoveryHovered = hovered
+        resumeCountdownIfNeeded()
+    }
+
+    func setRecoveryAccessibilityFocus(_ focused: Bool, generation: UInt64) {
+        guard generation == presentationGeneration, case .failure = hudState,
+              recoveryActionTitle != nil else { return }
+        recoveryFocused = focused
+        resumeCountdownIfNeeded()
+    }
+
+    private func resumeCountdownIfNeeded() {
+        guard countdownReady, !isDismissing else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if (recoveryHovered || recoveryFocused) && !recoveryActionPerformed {
+            countdown.pause(at: now)
+            dismissTask?.cancel()
+            dismissTask = nil
+            return
         }
+        guard dismissTask == nil, let seconds = countdown.resume(at: now) else { return }
+        let generation = presentationGeneration
+        dismissTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+            guard let self, self.presentationGeneration == generation else { return }
+            self.dismissTask = nil
+            self.dismissHUD()
+        }
+    }
+
+    /// Grow the panel before publishing larger content; contract after SwiftUI has laid out.
+    private func refreshLayout() {
+        let next = HUDLayout.measure(state: hudState, action: recoveryActionTitle,
+                                     signalMissing: recordingSignalMissing, modeLabel: modeCueLabel,
+                                     isCopyConfirmation: isCopyConfirmation, screenWidth: hudWindow?.availableWidth ?? 1440)
+        resizeTask?.cancel()
+        if let window = hudWindow {
+            window.resize(to: NSSize(width: max(window.frame.width, next.panelSize.width),
+                                     height: max(window.frame.height, next.panelSize.height)))
+        }
+        presentation = next
+        resizeTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+            guard let self else { return }
+            self.hudWindow?.resize(to: self.presentation.panelSize)
+        }
+        updateMouseInteraction()
     }
 
     /// 录音态需要响应鼠标（X/✓ 按钮），其他态不拦截鼠标事件
@@ -465,7 +575,7 @@ final class HUDFeedbackController {
         let hasRecoveryAction: Bool
         if case .failure = hudState { hasRecoveryAction = recoveryActionTitle != nil }
         else { hasRecoveryAction = false }
-        hudWindow?.ignoresMouseEvents = hudState != .recording && !hasRecoveryAction
+        hudWindow?.setInteractionRegion(hudState == .recording || hasRecoveryAction ? presentation.capsuleSize : nil)
     }
 
     private func ensureWindow() {
@@ -477,23 +587,36 @@ final class HUDFeedbackController {
             onConfirm: { [weak self] in self?.onConfirmRecording?() }
         )
         let hosting = NSHostingView(rootView: contentView)
-        hosting.frame = NSRect(origin: .zero, size: NSSize(width: 200, height: 44))
+        hosting.frame = NSRect(origin: .zero, size: presentation.panelSize)
+        hosting.sizingOptions = []
 
         hostingView = hosting
         hudWindow = HUDWindow(contentView: hosting)
+        hudWindow?.onScreenChanged = { [weak self] in self?.refreshLayout() }
+        hudWindow?.onInteractionHover = { [weak self] inside in
+            guard let self else { return }
+            self.setRecoveryHover(inside, generation: self.presentationGeneration)
+        }
     }
 
-    private static func learnedTermNoticeText(_ term: String) -> String {
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "-" }
+}
 
-        let glyphs = Array(trimmed)
-        let displayTerm: String
-        if glyphs.count <= learnedTermDisplayLimit {
-            displayTerm = String(glyphs)
-        } else {
-            displayTerm = String(glyphs.prefix(learnedTermDisplayLimit)) + "…"
-        }
-        return displayTerm
+/// Monotonic countdown with independent hover/focus ownership in the controller.
+struct HUDDismissCountdown {
+    private(set) var remaining: Double?
+    private var deadline: Double?
+
+    init(remaining: Double? = nil) { self.remaining = remaining }
+
+    mutating func pause(at now: Double) {
+        if let deadline { remaining = max(0, deadline - now) }
+        deadline = nil
+    }
+
+    mutating func resume(at now: Double) -> Double? {
+        guard let remaining else { return nil }
+        if let deadline { return max(0, deadline - now) }
+        deadline = now + remaining
+        return remaining
     }
 }

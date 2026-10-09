@@ -164,7 +164,7 @@ final class AppCoordinator {
                             }
                         }
                     }
-                } else { self.hudFeedbackController.clearRecoveryAction() }
+                }
                 self.hudFeedbackController.handleEvent(event)
             }
             if case .processingFailed = event { self?.invalidateFailedConfiguration() }

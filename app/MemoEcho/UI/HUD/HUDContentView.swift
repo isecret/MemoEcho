@@ -1,345 +1,111 @@
 import SwiftUI
 
-struct HUDLayerState: Equatable {
-    var recordingOpacity: Double
-    var processingOpacity: Double
-    var resultOpacity: Double
-    var recordingControlsOpacity: Double
-    var recordingWaveOpacity: Double
-
-    static let hidden = HUDLayerState(
-        recordingOpacity: 0,
-        processingOpacity: 0,
-        resultOpacity: 0,
-        recordingControlsOpacity: 0,
-        recordingWaveOpacity: 0
-    )
-
-    /// 结果态可能在上一段异步转场完成前到达，必须先清掉录音层以避免声波残影。
-    mutating func prepareForTransition(to state: HUDState) {
-        guard state.isResult else { return }
-        recordingOpacity = 0
-        recordingControlsOpacity = 0
-        recordingWaveOpacity = 0
-    }
-}
-
-/// HUD 内容视图 — 极简胶囊条
-///
-/// 快捷键候选态：静态声波；录音态：`X + 声波 + ✓`
-/// 处理态：Thinking 黑白灰渐变动画
-/// 结果态：失败短文案或新词提示
+/// State and size are published together by the controller after the panel can contain them.
 struct HUDContentView: View {
     let controller: HUDFeedbackController
     var onCancel: () -> Void = {}
     var onConfirm: () -> Void = {}
-
-    @State private var phase: VisualPhase = .hidden
-    @State private var capsuleWidth: CGFloat = HUDLayout.hiddenWidth
-    @State private var capsuleScale: CGFloat = 1
-    @State private var capsuleYOffset: CGFloat = 0
-    @State private var layers = HUDLayerState.hidden
-    @State private var resultOffsetY: CGFloat = HUDLayout.resultOffset
-    @State private var resultState: HUDState?
-    @State private var transitionTask: Task<Void, Never>?
-
-    private let capsuleHeight: CGFloat = HUDLayout.capsuleHeight
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var actionFocused: Bool
 
     var body: some View {
+        let layout = controller.presentation
+        let generation = controller.presentationGeneration
         Group {
-            if phase != .hidden {
-                ZStack {
-                    recordingCapsule
-                        .opacity(controller.modeCueLabel == nil ? layers.recordingOpacity : 0)
-                    thinkingCapsule
-                        .opacity(layers.processingOpacity)
-                    if let label = controller.modeCueLabel, controller.hudState == .recording {
-                        modeCueCapsule(label: label)
-                            .opacity(layers.recordingOpacity)
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    }
-                    if let resultState {
-                        resultCapsule(for: resultState)
-                            .opacity(layers.resultOpacity)
-                            .offset(y: resultOffsetY)
+            switch controller.hudState {
+            case .hidden: Color.clear
+            case .hotkeyPending, .recording:
+                if let label = controller.modeCueLabel {
+                    Text(label)
+                        .font(.system(size: HUDLayout.textSize, weight: .semibold))
+                        .tracking(HUDLayout.modeTracking)
+                } else {
+                    HUDRecordingContent(
+                        barHeights: reduceMotion ? [2, 5, 8, 12, 8, 5, 2] : controller.barHeights,
+                        signalMissing: controller.recordingSignalMissing,
+                        controlsOpacity: controller.hudState == .hotkeyPending ? 0 : 1,
+                        waveformOpacity: controller.hudState == .hotkeyPending ? 0.45 : 1,
+                        onCancel: onCancel, onConfirm: onConfirm
+                    )
+                }
+            case .processing: HUDThinkingContent()
+            case .notice(let text):
+                HStack(spacing: HUDLayout.noticeSpacing) {
+                    icon(controller.isCopyConfirmation ? "check" : "dictionary")
+                    measuredText(layout.lines, width: layout.textWidth, tracking: HUDLayout.noticeTracking)
+                }
+                .padding(.leading, HUDLayout.noticeLeadingPadding)
+                .padding(.trailing, HUDLayout.noticeTrailingPadding)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(text)
+            case .failure(let reason):
+                HStack(spacing: 0) {
+                    icon("warn").padding(.trailing, HUDLayout.compactHorizontalPadding)
+                    measuredText(layout.lines, width: layout.textWidth, tracking: HUDLayout.resultTracking)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(reason.shortLabel)
+                    if let action = controller.recoveryActionTitle {
+                        Rectangle().fill(.white.opacity(0.2)).frame(width: 1, height: 16)
+                            .padding(.horizontal, HUDLayout.actionSpacing)
+                            .accessibilityHidden(true)
+                        Button {
+                            controller.performRecoveryAction(expectedGeneration: generation)
+                        } label: {
+                            measuredText(layout.actionLines, width: layout.actionWidth,
+                                         tracking: HUDLayout.noticeTracking)
+                                .padding(.horizontal, HUDLayout.actionPadding)
+                                .frame(minHeight: 28)
+                                .contentShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(HUDRecoveryButtonStyle())
+                        .disabled(controller.recoveryActionPerformed)
+                        .accessibilityLabel(action)
+                        .accessibilityFocused($actionFocused)
                     }
                 }
-                .frame(width: capsuleWidth, height: capsuleHeight)
-                .background(capsuleBackground)
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-                .scaleEffect(capsuleScale)
-                .offset(y: capsuleYOffset)
-                .animation(.easeOut(duration: 0.12), value: controller.modeCueLabel)
+                .padding(.horizontal, HUDLayout.regularHorizontalPadding)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .onAppear { syncImmediately(to: controller.hudState) }
-        .onChange(of: controller.hudState) { oldValue, newValue in
-            transitionTask?.cancel()
-            transitionTask = Task { @MainActor in
-                await animateStateHandoff(from: oldValue, to: newValue)
+        .foregroundStyle(Color(nsColor: HUDLayout.secondaryForegroundColor))
+        .frame(width: layout.capsuleSize.width, height: layout.capsuleSize.height)
+        .background {
+            HUDCapsuleBackground(cornerRadius: layout.cornerRadius)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: layout.capsuleSize)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: layout.cornerRadius))
+        .contentShape(RoundedRectangle(cornerRadius: layout.cornerRadius))
+        .onChange(of: actionFocused) { _, value in
+            controller.setRecoveryAccessibilityFocus(value, generation: generation)
+        }
+        .onChange(of: generation) { _, _ in actionFocused = false }
+        .padding(.bottom, HUDLayout.panelPadding.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private func icon(_ type: String) -> some View {
+        HUDIcon(type: type).frame(width: HUDLayout.iconSize, height: HUDLayout.iconSize)
+            .foregroundStyle(Color(nsColor: HUDLayout.primaryForegroundColor))
+            .accessibilityHidden(true)
+    }
+
+    private func measuredText(_ lines: [String], width: CGFloat, tracking: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line).font(.system(size: HUDLayout.textSize, weight: .semibold))
+                    .tracking(tracking).fixedSize().frame(height: HUDLayout.lineHeight)
             }
         }
-    }
-
-    // MARK: - Recording Capsule
-
-    private var recordingCapsule: some View {
-        HUDRecordingContent(
-            barHeights: controller.barHeights,
-            signalMissing: controller.recordingSignalMissing,
-            controlsOpacity: layers.recordingControlsOpacity,
-            waveformOpacity: layers.recordingWaveOpacity,
-            onCancel: onCancel,
-            onConfirm: onConfirm
-        )
-    }
-
-    // MARK: - Thinking Capsule
-
-    private var thinkingCapsule: some View {
-        HUDThinkingContent()
-    }
-
-    // MARK: - Mode Cue Capsule
-
-    private func modeCueCapsule(label: String) -> some View {
-        Text(label)
-            .font(.system(size: HUDLayout.textSize, weight: .semibold))
-            .tracking(HUDLayout.modeTracking)
-            .textCase(.uppercase)
-            .foregroundStyle(Color(nsColor: HUDLayout.secondaryForegroundColor))
-            .padding(.vertical, HUDLayout.compactVerticalPadding)
-            .padding(.horizontal, HUDLayout.regularHorizontalPadding)
-    }
-
-    // MARK: - Result Capsule
-
-    private func resultCapsule(for state: HUDState) -> some View {
-        let payload = resultPayload(for: state)
-        let isNotice = state.isNotice
-        return HStack(spacing: isNotice ? HUDLayout.noticeSpacing : HUDLayout.compactHorizontalPadding) {
-            if !payload.icon.isEmpty {
-                HUDIcon(type: payload.icon)
-                    .frame(width: HUDLayout.iconSize, height: HUDLayout.iconSize)
-                    .foregroundStyle(Color(nsColor: HUDLayout.primaryForegroundColor))
-                    .offset(y: isNotice ? HUDLayout.noticeIconYOffset : 0)
-            }
-            Text(payload.text)
-                .font(.system(size: HUDLayout.textSize, weight: .semibold))
-                .tracking(isNotice ? HUDLayout.noticeTracking : HUDLayout.resultTracking)
-                .textCase(isNotice ? nil : .uppercase)
-                .foregroundStyle(Color(nsColor: HUDLayout.secondaryForegroundColor))
-        }
-        .padding(.vertical, HUDLayout.compactVerticalPadding)
-        .padding(.leading, isNotice ? HUDLayout.noticeLeadingPadding : HUDLayout.regularHorizontalPadding)
-        .padding(.trailing, isNotice ? HUDLayout.noticeTrailingPadding : HUDLayout.regularHorizontalPadding)
-        .contentShape(Capsule())
-        .onTapGesture { controller.performRecoveryAction() }
-        .accessibilityAction(named: Text(controller.recoveryActionTitle ?? "恢复")) {
-            controller.performRecoveryAction()
-        }
-    }
-
-    // MARK: - Common Background
-
-    private var capsuleBackground: some View {
-        HUDCapsuleBackground()
-    }
-
-    // MARK: - State Sync
-
-    private func syncImmediately(to state: HUDState) {
-        transitionTask?.cancel()
-        resultState = state.isResult ? state : nil
-
-        switch state {
-        case .hidden:
-            phase = .hidden
-            capsuleWidth = HUDLayout.hiddenWidth
-            capsuleScale = 1
-            capsuleYOffset = 0
-            layers = .hidden
-            resultOffsetY = HUDLayout.resultOffset
-
-        case .hotkeyPending:
-            phase = .recording
-            capsuleWidth = HUDLayout.activeWidth
-            capsuleScale = 1
-            capsuleYOffset = 0
-            layers = HUDLayerState(
-                recordingOpacity: 1,
-                processingOpacity: 0,
-                resultOpacity: 0,
-                recordingControlsOpacity: 0,
-                recordingWaveOpacity: 0.45
-            )
-            resultOffsetY = HUDLayout.resultOffset
-
-        case .recording:
-            phase = .recording
-            capsuleWidth = HUDLayout.activeWidth
-            capsuleScale = 1
-            capsuleYOffset = 0
-            layers = HUDLayerState(
-                recordingOpacity: 1,
-                processingOpacity: 0,
-                resultOpacity: 0,
-                recordingControlsOpacity: 1,
-                recordingWaveOpacity: 1
-            )
-            resultOffsetY = HUDLayout.resultOffset
-
-        case .processing:
-            phase = .processing
-            capsuleWidth = HUDLayout.activeWidth
-            capsuleScale = 1
-            capsuleYOffset = 0
-            layers = HUDLayerState(
-                recordingOpacity: 0,
-                processingOpacity: 1,
-                resultOpacity: 0,
-                recordingControlsOpacity: 0,
-                recordingWaveOpacity: 0
-            )
-            resultOffsetY = HUDLayout.resultOffset
-
-        case .failure, .notice:
-            phase = .result
-            capsuleWidth = resultCapsuleWidth(for: state)
-            capsuleScale = 1
-            capsuleYOffset = 0
-            layers = HUDLayerState(
-                recordingOpacity: 0,
-                processingOpacity: 0,
-                resultOpacity: 1,
-                recordingControlsOpacity: 0,
-                recordingWaveOpacity: 0
-            )
-            resultOffsetY = 0
-        }
-    }
-
-    private func animateStateHandoff(from oldValue: HUDState, to newValue: HUDState) async {
-        layers.prepareForTransition(to: newValue)
-
-        switch (oldValue, newValue) {
-        case (_, .hidden):
-            withAnimation(.easeOut(duration: 0.18)) {
-                layers.recordingOpacity = 0
-                layers.processingOpacity = 0
-                layers.resultOpacity = 0
-                capsuleScale = 0.985
-            }
-            try? await Task.sleep(for: .milliseconds(180))
-            guard !Task.isCancelled else { return }
-            syncImmediately(to: .hidden)
-
-        case (.hotkeyPending, .recording):
-            phase = .recording
-            resultState = nil
-            withAnimation(.easeOut(duration: 0.16)) {
-                layers.recordingControlsOpacity = 1
-                layers.recordingWaveOpacity = 1
-            }
-
-        case (.recording, .processing):
-            phase = .recording
-            resultState = nil
-            withAnimation(.easeOut(duration: 0.12)) {
-                layers.recordingControlsOpacity = 0
-                layers.recordingWaveOpacity = 0.18
-                capsuleWidth = HUDLayout.activeWidth
-                capsuleScale = 0.985
-                capsuleYOffset = HUDLayout.transitionYOffset
-            }
-            try? await Task.sleep(for: .milliseconds(90))
-            guard !Task.isCancelled else { return }
-            phase = .processing
-            withAnimation(.easeOut(duration: 0.16)) {
-                layers.recordingOpacity = 0
-                layers.processingOpacity = 1
-                capsuleScale = 1
-                capsuleYOffset = 0
-            }
-            try? await Task.sleep(for: .milliseconds(160))
-            guard !Task.isCancelled else { return }
-
-        case (.processing, let next) where next.isResult:
-            resultState = next
-            phase = .processing
-            withAnimation(.easeOut(duration: 0.12)) {
-                layers.processingOpacity = 0.14
-                capsuleWidth = resultCapsuleWidth(for: next)
-                capsuleScale = 0.992
-            }
-            try? await Task.sleep(for: .milliseconds(80))
-            guard !Task.isCancelled else { return }
-            phase = .result
-            resultOffsetY = HUDLayout.processingResultOffset
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                layers.processingOpacity = 0
-                layers.resultOpacity = 1
-                resultOffsetY = 0
-                capsuleScale = 1
-            }
-
-        default:
-            syncImmediately(to: newValue)
-            withAnimation(.easeOut(duration: 0.16)) {
-                capsuleScale = 1
-                capsuleYOffset = 0
-            }
-        }
-    }
-
-    private func resultPayload(for state: HUDState) -> (icon: String, text: String) {
-        switch state {
-        case .notice(let text):
-            return (text == "已复制" ? "check" : "dictionary", text)
-        case .failure(let reason):
-            return ("warn", controller.recoveryActionTitle.map { reason.shortLabel + " · " + $0 } ?? reason.shortLabel)
-        default:
-            return ("check", "")
-        }
-    }
-
-    private func resultCapsuleWidth(for state: HUDState) -> CGFloat {
-        switch state {
-        case .notice(let text):
-            HUDLayout.noticeWidth(for: text)
-        case .failure where controller.recoveryActionTitle != nil:
-            HUDLayout.recoveryWidth(for: resultPayload(for: state).text)
-        default:
-            HUDLayout.resultWidth
-        }
+        .frame(width: width, alignment: .leading)
     }
 }
 
-private enum VisualPhase {
-    case hidden
-    case recording
-    case processing
-    case result
-}
-
-private extension HUDState {
-    var isResult: Bool {
-        switch self {
-        case .failure, .notice:
-            true
-        default:
-            false
-        }
-    }
-
-    var isNotice: Bool {
-        if case .notice = self {
-            true
-        } else {
-            false
-        }
+private struct HUDRecoveryButtonStyle: ButtonStyle {
+    @State private var hovered = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(.white.opacity(configuration.isPressed ? 0.22 : (hovered ? 0.12 : 0.04)),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .onHover { hovered = $0 }
     }
 }
 
@@ -403,10 +169,12 @@ private struct HUDRecordingContent: View {
         HStack(spacing: HUDLayout.recordingSpacing) {
             hudButton(icon: "x", isConfirm: false, action: onCancel)
                 .opacity(controlsOpacity)
+                .allowsHitTesting(controlsOpacity > 0)
+                .accessibilityHidden(controlsOpacity == 0)
                 .offset(x: controlsOpacity == 0 ? HUDLayout.hiddenControlOffset : -HUDLayout.visibleControlOffset)
             ZStack {
                 if signalMissing {
-                    Text("没收到声音").font(.system(size: 10)).foregroundStyle(.white)
+                    Text("没收到声音").font(.system(size: HUDLayout.textSize, weight: .semibold)).fixedSize().foregroundStyle(.white)
                 } else {
                     HStack(spacing: HUDLayout.waveformSpacing) {
                         ForEach(barHeights.indices, id: \.self) { i in
@@ -417,12 +185,14 @@ private struct HUDRecordingContent: View {
                     }
                 }
             }
-            .frame(width: HUDLayout.waveformWidth, height: HUDLayout.capsuleHeight - HUDLayout.scaled(6))
+            .frame(width: signalMissing ? HUDLayout.missingSignalWidth : HUDLayout.waveformWidth, height: HUDLayout.capsuleHeight - HUDLayout.scaled(6))
             .clipped()
             .opacity(waveformOpacity)
             .scaleEffect(x: 1, y: 0.88 + 0.12 * waveformOpacity, anchor: .center)
             hudButton(icon: "check", isConfirm: true, action: onConfirm)
                 .opacity(controlsOpacity)
+                .allowsHitTesting(controlsOpacity > 0)
+                .accessibilityHidden(controlsOpacity == 0)
                 .offset(x: controlsOpacity == 0 ? -HUDLayout.hiddenControlOffset : HUDLayout.visibleControlOffset)
         }
         .padding(.vertical, HUDLayout.compactVerticalPadding)
@@ -434,19 +204,21 @@ private struct HUDRecordingContent: View {
             HUDIcon(type: icon).frame(width: HUDLayout.iconSize, height: HUDLayout.iconSize)
         }
         .buttonStyle(HUDButtonStyle(isConfirm: isConfirm))
+        .accessibilityLabel(isConfirm ? "结束录音" : "取消录音")
         .frame(width: HUDLayout.buttonSize, height: HUDLayout.buttonSize)
     }
 }
 
 private struct HUDCapsuleBackground: View {
+    var cornerRadius: CGFloat = HUDLayout.capsuleHeight / 2
     var body: some View {
         ZStack {
-            Capsule()
+            RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(Color(nsColor: HUDLayout.capsuleBackgroundColor))
                 .overlay {
-                    Capsule().strokeBorder(Color(nsColor: HUDLayout.capsuleInnerStrokeColor), lineWidth: HUDLayout.backgroundInnerStroke)
+                    RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(Color(nsColor: HUDLayout.capsuleInnerStrokeColor), lineWidth: HUDLayout.backgroundInnerStroke)
                 }
-            Capsule().strokeBorder(Color(nsColor: HUDLayout.capsuleOuterStrokeColor), lineWidth: HUDLayout.backgroundOuterStroke)
+            RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(Color(nsColor: HUDLayout.capsuleOuterStrokeColor), lineWidth: HUDLayout.backgroundOuterStroke)
         }
         .environment(\.colorScheme, .dark)
     }
@@ -455,6 +227,7 @@ private struct HUDCapsuleBackground: View {
 // MARK: - HUD Button Style
 
 private struct HUDButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isConfirm: Bool
 
     func makeBody(configuration: Configuration) -> some View {
@@ -487,8 +260,8 @@ private struct HUDButtonStyle: ButtonStyle {
                         : HUDLayout.primaryForegroundColor
                 )
             )
-            .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.96 : 1.0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
