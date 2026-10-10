@@ -22,9 +22,7 @@
 
 需要用其他语言表达时，可以开启翻译。常用的人名、术语可以加入词典，MemoEcho 也会从你对输入结果的修改中学习用词。
 
-语音识别可选本地模型或云端服务，文字整理和翻译使用你配置的 AI 服务。开发版的语音引擎按厂商分组，以“厂商 · 产品”命名云端入口，同时保留一句话、非实时与实时服务；讯飞区分“语音听写”和“实时语音转写”两个实时版本，配置方法见[使用说明](./docs/USAGE.md#云端识别)。
-
-火山引擎传统、大模型与录音文件极速版的并存接入见[接入方案](./docs/plans/volcengine-asr-products.md)，配置方式见[使用说明](./docs/USAGE.md#火山引擎)。真实服务与最终注入仍需手工验收。
+语音识别可选本地模型或云端服务，文字整理和翻译使用你配置的 AI 服务。配置方式见[使用说明](./docs/USAGE.md)。
 
 ## 界面一览
 
@@ -42,9 +40,7 @@
 
 ## 开始使用
 
-需要 **macOS 14 或更新版本**。当前为 **1.0.0-beta.11** 测试版。
-
-也可以通过我们维护的 Homebrew Tap 安装：
+需要 **macOS 14 或更新版本**。从[版本下载](https://github.com/isecret/MemoEcho/releases)获取安装包，或通过 Homebrew 安装：
 
 ```bash
 brew install --cask isecret/tap/memoecho
@@ -58,18 +54,4 @@ Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-ta
 
 ---
 
-[开发与发布](./docs/DEVELOPMENT.md) · [产品说明](./docs/PRD.md) · [技术设计](./docs/TDD.md) · [HUD 样式预览](./docs/hud-prototype.html)
-
-快捷键方案：[单按、双按与按住录音](./docs/plans/hotkey-recording-modes.md)（Issue #8）
-
-开发方案：[OpenAI 兼容语音识别与小米入口移除](./docs/plans/openai-compatible-asr.md)
-
-后续方案：[云端实时 ASR 与 MiMo 独立适配](./docs/plans/realtime-asr.md)
-
-验证记录：[实时 ASR 实施检查与待验收范围](./docs/validation-realtime-asr.md)
-
-界面方案：[HUD 展示优化](./docs/plans/hud-display-refinement.md)（[Issue #12](https://github.com/isecret/MemoEcho/issues/12)，长词、失败动作与动态窗口，代码已调整、待实机验收）
-
-菜单方案：[菜单栏职责与展示优化](./docs/plans/menu-bar-refinement.md)（[Issue #13](https://github.com/isecret/MemoEcho/issues/13)，恢复入口收敛、词典操作迁移，代码已实现，待实机验收）
-
-修复方案：[浏览器富文本输入框写入确认](./docs/plans/text-injection-confirmation.md)（Issue #14，按用户反馈进一步简化为一次粘贴与延迟恢复，待实机验收）
+[使用说明](./docs/USAGE.md) · [开发与发布](./docs/DEVELOPMENT.md) · [文档导航](./docs/README.md) · [问题反馈](https://github.com/isecret/MemoEcho/issues)
