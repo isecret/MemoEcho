@@ -176,3 +176,5 @@ HUD 收起不代表注入互斥已经结束。继续保持一个 active session�
 - Release universal（arm64 / x86_64）构建通过；本地验证包沿用 `me.wangmao.memoecho` 与原 Developer ID 签名。时间戳服务不可用，外层应用与 DMG 以无时间戳方式签名，本地包未进行新公证。
 - 首次本地验证不发布版本、不关闭 Issue #14；第 5.2 节真实网页验收待用户完成。
 - 已替换并重启 `/Applications/MemoEcho.app`，进程存活且安装文件与 Release 产物摘要一致。安装包与原应用备份位于 `dist/issue-14-20261010/`，当前显示版本仍为 `1.0.0-beta.9`（本地修复验证包）。
+
+- 后续发布授权：用户要求提交、推送并发布新的测试包，准备 `v1.0.0-beta.10`，使用 GitHub Actions 签名、公证与更新源发布流程；仍不将测试包发布视为真实网页验收通过。
