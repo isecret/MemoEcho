@@ -185,6 +185,16 @@ final class DiagnosticsLogger: Sendable {
 
     // MARK: - General Events
 
+    func outputConfirmation(sessionID: String, path: TextInjector.InjectionPath,
+                            confirmation: TextInjector.Confirmation) {
+        let detail: String
+        switch confirmation {
+        case .verified: detail = "verified path=\(path.rawValue)"
+        case .unconfirmed(let reason): detail = "unconfirmed path=\(path.rawValue) reason=\(reason.rawValue)"
+        }
+        log(sessionID: sessionID, event: "output_confirmation", detail: detail)
+    }
+
     func log(sessionID: String, event: String, detail: String? = nil) {
         if let detail {
             logger.info("[\(sessionID)] \(event, privacy: .public) | detail=\(detail, privacy: .public)")

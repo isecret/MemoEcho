@@ -30,6 +30,7 @@ final class SessionRecoveryCheckpoint {
     var failure: MemoEchoError?
     var failureReason: HUDFailureReason?
     var outputAttempted = false
+    private(set) var unconfirmedOutputReason: TextInjector.VerificationReason?
     var isPartialRecording = false
     private(set) var expiresAt: Date?
     private(set) var discarded = false
@@ -47,6 +48,7 @@ final class SessionRecoveryCheckpoint {
     }
 
     var stage: Stage {
+        if unconfirmedOutputReason != nil { return .output }
         if realtimeAudio != nil || !pendingSegments.isEmpty { return .recognition }
         if polished == nil { return .polish }
         if finalText == nil { return .translation }
@@ -54,7 +56,7 @@ final class SessionRecoveryCheckpoint {
     }
 
     var canRetry: Bool {
-        guard !discarded else { return false }
+        guard !discarded, unconfirmedOutputReason == nil else { return false }
         guard stage == .output else { return true }
         guard !outputAttempted, let target else { return false }
         return target.scope != .window || (target.continuity != nil && target.continuity?.isInvalidated == false)
@@ -67,10 +69,27 @@ final class SessionRecoveryCheckpoint {
 
     func isValid(at now: Date) -> Bool { !discarded && (expiresAt.map { now < $0 } ?? true) }
 
+    /// Keep only the final text and metadata needed for a copy-only recovery.
+    /// Expiration is intentionally untouched, including after a failed retry.
+    func keepUnconfirmedOutput(reason: TextInjector.VerificationReason) {
+        unconfirmedOutputReason = reason
+        outputAttempted = true
+        failure = nil
+        failureReason = nil
+        isPartialRecording = false
+        realtimeAudio = nil
+        pendingSegments.removeAll()
+        transcripts.removeAll()
+        polished = nil
+        target = nil
+        context = nil
+    }
+
     func discard() {
         discarded = true
         failure = nil
         failureReason = nil
+        unconfirmedOutputReason = nil
         realtimeAudio = nil
         pendingSegments.removeAll()
         transcripts.removeAll()
@@ -164,8 +183,9 @@ struct RecoveryPresentation {
     @MainActor
     init(checkpoint: SessionRecoveryCheckpoint, readiness: VoiceInputReadiness) {
         id = checkpoint.id
-        reason = checkpoint.failureReason?.shortLabel ?? (checkpoint.isPartialRecording ? "录音中断" : "处理未完成")
-        detail = checkpoint.failure?.recoveryUserMessage ?? "上次输入尚未完成，可以继续处理或丢弃。"
+        let unconfirmed = checkpoint.unconfirmedOutputReason != nil
+        reason = unconfirmed ? "未确认写入" : checkpoint.failureReason?.shortLabel ?? (checkpoint.isPartialRecording ? "录音中断" : "处理未完成")
+        detail = unconfirmed ? "已尝试写入，请先检查原输入框，避免重复粘贴。" : checkpoint.failure?.recoveryUserMessage ?? "上次输入尚未完成，可以继续处理或丢弃。"
         let requiredTab: SettingsTab?
         switch checkpoint.failure {
         case .llmConfigurationIncomplete, .invalidLLMConfiguration:

@@ -79,7 +79,8 @@ protocol TextInjectionDriver: AnyObject {
     func wait(milliseconds: Int) async
 }
 
-/// AX verification is optional only for targets captured without readable text.
+/// Delivery and AX confirmation are independent; an unreadable/mismatched value
+/// after delivery is not evidence that the receiving app failed to insert text.
 @MainActor
 struct TextInjector {
     private let driver: any TextInjectionDriver
@@ -95,8 +96,13 @@ struct TextInjector {
         var confirmation: Confirmation = .verified
     }
 
-    enum Confirmation: Sendable {
-        case verified, dispatched
+    enum Confirmation: Sendable, Equatable {
+        case verified
+        case unconfirmed(VerificationReason)
+    }
+
+    enum VerificationReason: String, Sendable {
+        case valueMismatch, snapshotUnavailable, targetChanged, composing, unchangedValue
     }
 
     enum InjectionPath: String, Sendable { case paste, axFallback }
@@ -129,7 +135,7 @@ struct TextInjector {
     func inject(text: String, target: TextInjectionFocus?,
                 shouldContinue: () -> Bool = { true },
                 onOutputAttempt: () -> Void = {},
-                onUnverifiedPasteDispatched: () -> Void = {}) async throws -> InjectionResult {
+                onOutputDispatched: () -> Void = {}) async throws -> InjectionResult {
         guard driver.authorized else { throw MemoEchoError.accessibilityPermissionDenied }
         guard !driver.isInjecting else { throw failure("上一次文本写入尚未结束") }
         guard let target, !text.isEmpty else { throw failure("未找到原来的输入框，请手动复制文本") }
@@ -210,9 +216,6 @@ struct TextInjector {
         if posted {
             onOutputAttempt()
             path = .paste
-            // Unreadable targets have no acknowledgement to wait for. Let the HUD
-            // dismiss now while the clipboard lease and safety checks remain active.
-            if before.snapshot == nil { onUnverifiedPasteDispatched() }
         } else {
             // AX fallback is allowed only BEFORE any paste event could have been delivered.
             let fallbackStart = Date()
@@ -227,16 +230,26 @@ struct TextInjector {
             breakdown.axFallbackMs = millisecondsSince(fallbackStart)
             path = .axFallback
         }
+        // A delivered event/accepted AX operation is not a text acknowledgement.
+        // Dismiss feedback now, while keeping the lease and injection lock active.
+        onOutputDispatched()
 
         let verification = Date()
         var invalidated = false
+        var reason: VerificationReason = .snapshotUnavailable
         // Keep the clipboard available while the receiving app consumes its queued paste.
         // Focus loss/cancellation invalidates success permanently; it never triggers a second write.
         for _ in 0..<20 {
             await driver.wait(milliseconds: 50)
             if Task.isCancelled || !shouldContinue() { invalidated = true }
             let current = driver.focus(pid: target.pid, bundleID: target.bundleID)
-            if !continuityIsValid() || current?.isSameField(as: before) != true || current?.snapshot?.isComposing == true { invalidated = true }
+            if !continuityIsValid() || current?.isSameField(as: before) != true {
+                invalidated = true
+                reason = .targetChanged
+            } else if current?.snapshot?.isComposing == true {
+                invalidated = true
+                if reason != .targetChanged { reason = .composing }
+            }
             if !invalidated, let expected, expected != before.snapshot?.value,
                let snapshot = current?.snapshot, !snapshot.isComposing,
                snapshot.value == expected {
@@ -247,17 +260,21 @@ struct TextInjector {
                 breakdown.totalMs = millisecondsSince(started)
                 return .init(path: path, breakdown: breakdown, beforeInjection: before.snapshot)
             }
+            if !invalidated {
+                if let snapshot = current?.snapshot, before.snapshot != nil, expected != nil {
+                    reason = snapshot.value == before.snapshot?.value ? .unchangedValue : .valueMismatch
+                } else {
+                    reason = .snapshotUnavailable
+                }
+            }
         }
         try checkCurrent()
-        if !invalidated, before.snapshot == nil, path == .paste {
-            breakdown.pasteVerificationMs = millisecondsSince(verification)
-            let restoration = Date()
-            lease?.restore()
-            breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
-            breakdown.totalMs = millisecondsSince(started)
-            return .init(path: path, breakdown: breakdown, confirmation: .dispatched)
-        }
-        throw failure("无法确认文本是否写入，请先检查原输入框，避免重复粘贴；文本可从菜单栏复制")
+        breakdown.pasteVerificationMs = millisecondsSince(verification)
+        let restoration = Date()
+        lease?.restore()
+        breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
+        breakdown.totalMs = millisecondsSince(started)
+        return .init(path: path, breakdown: breakdown, confirmation: .unconfirmed(reason))
     }
 
     private func failure(_ detail: String) -> MemoEchoError { .textInjectionFailure(detail: detail) }

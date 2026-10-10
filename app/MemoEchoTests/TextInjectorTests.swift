@@ -4,6 +4,31 @@ import XCTest
 
 @MainActor
 final class TextInjectorTests: XCTestCase {
+    func testEmptyRichEditorAuxiliaryValueDoesNotTurnDeliveredTextIntoFailure() async throws {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.focus(value: "0123456789\n", selection: NSRange(location: 0, length: 0))
+        let original = driver.board.items
+        var dispatched = 0
+        driver.onWait = { tick in
+            guard tick == 2 else { return }
+            XCTAssertEqual(dispatched, 1, "Dismiss the HUD before waiting for text confirmation")
+            XCTAssertTrue(driver.isInjecting)
+            XCTAssertEqual(driver.board.restores, 0)
+            driver.current = FakeInjectionDriver.focus(value: "测试写入内容", selection: NSRange(location: 6, length: 0))
+        }
+        let result = try await TextInjector(driver: driver).inject(
+            text: "测试写入内容", target: driver.current,
+            onOutputDispatched: { dispatched += 1 })
+        XCTAssertEqual(result.confirmation, .unconfirmed(.valueMismatch))
+        XCTAssertNil(result.beforeInjection, "Unconfirmed snapshots must not enter dictionary learning")
+        XCTAssertEqual(dispatched, 1)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.axWrites, 0)
+        XCTAssertEqual(driver.board.items, original)
+        XCTAssertEqual(driver.board.restores, 1)
+        XCTAssertFalse(driver.isInjecting)
+    }
+
     func testBackupDeadlineDoesNotBlockMainActorOrAccumulateReads() async throws {
         let worker = ClipboardBackupWorker()
         let release = DispatchSemaphore(value: 0)
@@ -108,7 +133,7 @@ final class TextInjectorTests: XCTestCase {
         driver.onWait = { tick in if tick == 5 { driver.apply("hello") } }
         let result = try await TextInjector(driver: driver).inject(
             text: "hello", target: driver.current,
-            onUnverifiedPasteDispatched: { XCTFail("Readable fields must keep waiting for confirmation") }
+            onOutputDispatched: { XCTAssertTrue(driver.isInjecting) }
         )
         XCTAssertEqual(result.path, .paste)
         XCTAssertEqual(result.beforeInjection?.value, "前后")
@@ -119,19 +144,23 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertFalse(driver.isInjecting)
     }
 
-    func testUnchangedValueTimesOutWithoutDuplicateAXInsertion() async {
+    func testUnchangedValueTimesOutWithoutDuplicateAXInsertion() async throws {
         let driver = FakeInjectionDriver()
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.unchangedValue))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
         XCTAssertEqual(driver.waits, 21)
         XCTAssertEqual(driver.board.restores, 1)
     }
 
-    func testUnrelatedTextChangeDoesNotCountAsSuccess() async {
+    func testUnrelatedTextChangeDoesNotCountAsSuccess() async throws {
         let driver = FakeInjectionDriver()
         driver.onWait = { tick in if tick == 2 { driver.apply("unrelated") } }
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.valueMismatch))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.axWrites, 0)
     }
 
@@ -177,13 +206,15 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.pastes, 0)
     }
 
-    func testTransientFocusLossAfterPasteCannotLaterBecomeSuccess() async {
+    func testTransientFocusLossAfterPasteCannotLaterBecomeSuccess() async throws {
         let driver = FakeInjectionDriver()
         driver.onWait = { tick in
             if tick == 2 { driver.current = nil }
             if tick == 3 { driver.current = FakeInjectionDriver.focus(value: "前hello后") }
         }
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.targetChanged))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.axWrites, 0)
         XCTAssertEqual(driver.waits, 21)
     }
@@ -247,10 +278,12 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.board.items, original)
     }
 
-    func testBackupFailureAXStillRequiresObservedTextChange() async {
+    func testBackupFailureAXStillRequiresObservedTextChange() async throws {
         let driver = FakeInjectionDriver()
         driver.board.snapshotError = .textInjectionFailure(detail: "synthetic backup failure")
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.unchangedValue))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.axWrites, 1)
         XCTAssertEqual(driver.pastes, 0)
         XCTAssertEqual(driver.board.writes, 0)
@@ -321,18 +354,37 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertTrue(board.types?.contains(.html) == true)
     }
 
-    func testAXSuccessCodeWithoutTextChangeDoesNotReportSuccess() async {
+    func testAXSuccessCodeWithoutTextChangeDoesNotReportSuccess() async throws {
         let driver = FakeInjectionDriver()
         driver.canPost = false
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.unchangedValue))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.axWrites, 1)
+    }
+
+    func testExplicitAXRejectionStillFailsWithoutDispatchFeedback() async {
+        let driver = FakeInjectionDriver()
+        driver.canPost = false
+        driver.canInsertViaAX = false
+        var attempts = 0
+        do {
+            _ = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current,
+                onOutputAttempt: { attempts += 1 },
+                onOutputDispatched: { XCTFail("Rejected writes must not dismiss the failure HUD") })
+            XCTFail("Expected an explicit write failure")
+        } catch { XCTAssertNotNil(error as? MemoEchoError) }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(driver.axWrites, 1)
+        XCTAssertEqual(driver.pastes, 0)
+        XCTAssertEqual(driver.board.restores, 1)
     }
 
     func testUnreadableFieldPastesOnceButDoesNotClaimConfirmation() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.focus(readable: false)
         let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
-        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.snapshotUnavailable))
         XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
@@ -349,11 +401,13 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.pastes, 0)
     }
 
-    func testUnreadableFieldCannotReportDispatchAfterCompositionStarts() async {
+    func testCompositionAfterDispatchIsUnconfirmedWithoutRetry() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.focus(readable: false)
         driver.onWait = { tick in if tick == 2 { driver.current = FakeInjectionDriver.focus(composing: true) } }
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.composing))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
     }
@@ -364,7 +418,7 @@ final class TextInjectorTests: XCTestCase {
         let injector = TextInjector(driver: driver)
         let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
         let result = try await injector.inject(text: "hello", target: target)
-        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.snapshotUnavailable))
         XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.activations, 0)
         XCTAssertEqual(driver.pastes, 1)
@@ -427,7 +481,9 @@ final class TextInjectorTests: XCTestCase {
         driver.current = FakeInjectionDriver.window()
         let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
         driver.onWait = { tick in if tick == 2 { driver.continuity.invalidate() } }
-        await fails(driver, target: target)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: target)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.targetChanged))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
         XCTAssertEqual(driver.waits, 21)
@@ -441,7 +497,7 @@ final class TextInjectorTests: XCTestCase {
         let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
         driver.onWait = { tick in if tick == 2 { driver.board.userCopy("new copy") } }
         let result = try await injector.inject(text: "hello", target: target)
-        XCTAssertEqual(result.confirmation, .dispatched)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.snapshotUnavailable))
         XCTAssertEqual(driver.board.restores, 0)
         XCTAssertEqual(driver.board.items, [[.string: Data("new copy".utf8)]])
     }
@@ -822,11 +878,13 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(driver.pastes, 0)
     }
 
-    func testSameValueReplacementIsNotMistakenForAcknowledgement() async {
+    func testSameValueReplacementIsNotMistakenForAcknowledgement() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.focus(value: "hello", selection: NSRange(location: 0, length: 5))
         driver.onWait = { tick in if tick == 2 { driver.apply("hello") } }
-        await fails(driver)
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(result.confirmation, .unconfirmed(.unchangedValue))
+        XCTAssertNil(result.beforeInjection)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(driver.axWrites, 0)
     }
@@ -843,7 +901,7 @@ final class TextInjectorTests: XCTestCase {
     private func fails(_ driver: FakeInjectionDriver, target: TextInjectionFocus? = nil) async {
         do {
             _ = try await TextInjector(driver: driver).inject(text: "hello", target: target ?? driver.current)
-            XCTFail("Expected unconfirmed/failed output")
+            XCTFail("Expected pre-delivery or explicitly rejected output failure")
         } catch {
             guard case .textInjectionFailure = error as? MemoEchoError else {
                 return XCTFail("Unexpected error: \(error)")
@@ -910,6 +968,7 @@ final class FakeInjectionDriver: TextInjectionDriver {
     var canActivate = true
     var canPost = true
     var axUpdatesValue = false
+    var canInsertViaAX = true
     var pastes = 0
     var axWrites = 0
     var waits = 0
@@ -933,8 +992,8 @@ final class FakeInjectionDriver: TextInjectionDriver {
     func postPaste(into target: TextInjectionFocus) -> Bool { if canPost { pastes += 1 }; return canPost }
     func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool {
         axWrites += 1
-        if axUpdatesValue { apply(text) }
-        return true
+        if canInsertViaAX && axUpdatesValue { apply(text) }
+        return canInsertViaAX
     }
     func wait(milliseconds: Int) async { waits += 1; onWait?(waits); await onAsyncWait?(waits) }
     func apply(_ text: String) {

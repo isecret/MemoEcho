@@ -71,3 +71,5 @@ Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-ta
 界面方案：[HUD 展示优化](./docs/plans/hud-display-refinement.md)（[Issue #12](https://github.com/isecret/MemoEcho/issues/12)，长词、失败动作与动态窗口，代码已调整、待实机验收）
 
 菜单方案：[菜单栏职责与展示优化](./docs/plans/menu-bar-refinement.md)（[Issue #13](https://github.com/isecret/MemoEcho/issues/13)，恢复入口收敛、词典操作迁移，代码已实现，待实机验收）
+
+修复方案：[浏览器富文本输入框写入确认](./docs/plans/text-injection-confirmation.md)（Issue #14，代码与自动回归已完成，待 ChatGPT 实机验收）
