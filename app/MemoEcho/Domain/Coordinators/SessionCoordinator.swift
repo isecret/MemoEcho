@@ -1013,25 +1013,15 @@ final class SessionCoordinator {
             }
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             if let result { diagnostics.injectionCompleted(sessionID: sessionID, path: result.path, breakdown: result.breakdown) }
-            let unconfirmedReason: TextInjector.VerificationReason?
-            if case .unconfirmed(let reason) = result?.confirmation { unconfirmedReason = reason }
-            else { unconfirmedReason = nil }
-            if let result {
-                diagnostics.outputConfirmation(sessionID: sessionID, path: result.path, confirmation: result.confirmation)
-            }
             isRecovering = false
             if !isOnboardingTrial {
                 lastInjectionFailureText = nil
-                if let unconfirmedReason {
-                    checkpoint.keepUnconfirmedOutput(reason: unconfirmedReason)
-                    retainRecovery(checkpoint)
-                } else {
-                    beginPostInjectionLearningIfNeeded(generation: generation, mode: checkpoint.mode, sessionID: sessionID,
-                                                       beforeInjection: result?.beforeInjection, insertedText: text)
-                    discardRecovery()
-                }
+                // The learner independently establishes its baseline; it never gates delivery.
+                beginPostInjectionLearningIfNeeded(generation: generation, mode: checkpoint.mode, sessionID: sessionID,
+                                                   beforeInjection: result?.beforeInjection, insertedText: text)
+                discardRecovery()
             }
-            if isOnboardingTrial || unconfirmedReason == nil { checkpoint.discard() }
+            checkpoint.discard()
             targetInput = nil
             lastResult = nil
             clearWindowContextCapture()
@@ -1044,7 +1034,7 @@ final class SessionCoordinator {
                     detail: "stop_to_injection_ms=\(Int(Date().timeIntervalSince(stopped) * 1000))")
             }
             if !outputFeedbackSent {
-                onFeedbackEvent?(unconfirmedReason != nil ? .outputDispatched : .processingFinished)
+                onFeedbackEvent?(.processingFinished)
             }
             scheduleResetToIdle()
         } catch {

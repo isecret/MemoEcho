@@ -72,4 +72,4 @@ Tap 当前包含测试版；信任提示、更新和卸载说明见 [homebrew-ta
 
 菜单方案：[菜单栏职责与展示优化](./docs/plans/menu-bar-refinement.md)（[Issue #13](https://github.com/isecret/MemoEcho/issues/13)，恢复入口收敛、词典操作迁移，代码已实现，待实机验收）
 
-修复方案：[浏览器富文本输入框写入确认](./docs/plans/text-injection-confirmation.md)（Issue #14，代码与自动回归已完成，待 ChatGPT 实机验收）
+修复方案：[浏览器富文本输入框写入确认](./docs/plans/text-injection-confirmation.md)（Issue #14，按用户反馈进一步简化为一次粘贴与延迟恢复，待实机验收）

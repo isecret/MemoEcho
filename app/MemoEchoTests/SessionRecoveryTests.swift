@@ -164,7 +164,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertTrue(cp.discarded)
     }
 
-    func testUnconfirmedOutputOffersCopyWithoutRetryOrProviderRerun() async {
+    func testDispatchedOutputClearsRecoveryWithoutRequiringTextConfirmation() async {
         let driver = FakeInjectionDriver()
         let (session, directory) = makeCoordinator(driver: driver, worker: processor())
         defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
@@ -172,21 +172,13 @@ final class SessionRecoveryTests: XCTestCase {
         session.retainRecovery(cp)
         session.retryRecovery()
         await waitUntil { !session.isRecovering }
+        XCTAssertEqual(session.state, .done)
+        XCTAssertNil(session.recovery)
         XCTAssertNil(session.lastInjectionFailureText)
-        XCTAssertEqual(session.recovery?.finalText, "整理结果")
-        XCTAssertEqual(session.recovery?.unconfirmedOutputReason, .unchangedValue)
-        XCTAssertTrue(session.copyRecovery(id: cp.id) { text in
-            XCTAssertEqual(text, "整理结果")
-            return true
-        })
-        XCTAssertTrue(cp.outputAttempted)
-        XCTAssertFalse(session.canRetryRecovery)
+        XCTAssertTrue(cp.discarded)
+        XCTAssertNil(cp.finalText)
         session.retryRecovery()
         XCTAssertEqual(driver.pastes, 1)
-        XCTAssertEqual(driver.axWrites, 0)
-        session.discardRecovery()
-        XCTAssertNil(session.lastInjectionFailureText)
-        XCTAssertNil(session.lastResult)
     }
 
     func testOutputBeforeDispatchCanBeRetriedWithoutLLM() async {
@@ -473,7 +465,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(session.recovery?.stage, .translation)
     }
 
-    func testUnconfirmedPasteRetainsOnlyFinalTextUntilOriginalExpiry() async throws {
+    func testUnreadablePasteCompletesWithoutMenuRecovery() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.window()
         let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
@@ -499,7 +491,6 @@ final class SessionRecoveryTests: XCTestCase {
         }
         let cp = checkpoint(target: target)
         session.retainRecovery(cp)
-        let expiry = cp.expiresAt
         session.retryRecovery()
         await waitUntil { !session.isRecovering }
         XCTAssertEqual(session.state, .done)
@@ -508,15 +499,9 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(finished, 0)
         XCTAssertEqual(failed, 0)
         XCTAssertNil(session.lastInjectionFailureText)
-        XCTAssertTrue(session.recovery === cp)
-        XCTAssertFalse(cp.discarded)
-        XCTAssertEqual(cp.finalText, "整理结果")
-        XCTAssertEqual(cp.unconfirmedOutputReason, .snapshotUnavailable)
-        XCTAssertEqual(cp.expiresAt, expiry)
-        XCTAssertEqual(cp.stage, .output)
-        let presentation = RecoveryPresentation(checkpoint: cp, readiness: ready)
-        XCTAssertEqual(presentation.reason, "未确认写入")
-        XCTAssertTrue(presentation.canCopy)
+        XCTAssertNil(session.recovery)
+        XCTAssertTrue(cp.discarded)
+        XCTAssertNil(cp.finalText)
         XCTAssertTrue(cp.outputAttempted)
         XCTAssertFalse(cp.canRetry)
         XCTAssertFalse(session.canRetryRecovery)
@@ -555,13 +540,13 @@ final class SessionRecoveryTests: XCTestCase {
             session.retryRecovery()
             await waitUntil { !session.isRecovering }
             XCTAssertEqual(session.state, .done)
-            XCTAssertEqual(driver.waits, 21)
+            XCTAssertEqual(driver.waits, 2)
             XCTAssertEqual(driver.board.items, originalClipboard)
             XCTAssertEqual(driver.board.restores, 1)
         }
     }
 
-    func testDiscardAfterDispatchCannotRepublishUnconfirmedRecovery() async {
+    func testDiscardAfterDispatchCannotRepublishRecovery() async {
         let driver = FakeInjectionDriver()
         let originalClipboard = driver.board.items
         let (session, directory) = makeCoordinator(driver: driver, worker: processor())
@@ -582,16 +567,14 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertNil(session.recovery)
         XCTAssertTrue(cp.discarded)
         XCTAssertNil(cp.finalText)
-        XCTAssertNil(cp.unconfirmedOutputReason)
         XCTAssertEqual(failed, 0)
         XCTAssertEqual(driver.pastes, 1)
-        XCTAssertEqual(driver.axWrites, 0)
-        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.waits, 2)
         XCTAssertEqual(driver.board.items, originalClipboard)
         XCTAssertEqual(driver.board.restores, 1)
     }
 
-    func testTargetLossAfterDispatchRetainsNeutralRecoveryWithoutFailure() async throws {
+    func testTargetLossAfterDispatchCompletesWithoutRecoveryOrFailure() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.window()
         let target = try XCTUnwrap(TextInjector(driver: driver).captureTarget(pid: 42, bundleID: "test"))
@@ -613,12 +596,10 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(events, ["dispatched"])
         XCTAssertEqual(session.state, .done)
         XCTAssertNil(session.currentError)
-        XCTAssertEqual(session.recovery?.unconfirmedOutputReason, .targetChanged)
         XCTAssertEqual(driver.pastes, 1)
-        XCTAssertEqual(driver.axWrites, 0)
-        XCTAssertEqual(driver.waits, 21)
+        XCTAssertEqual(driver.waits, 2)
         XCTAssertEqual(driver.board.restores, 1)
-        XCTAssertTrue(session.recovery?.outputAttempted == true)
+        XCTAssertNil(session.recovery)
     }
 
     func testNewNonrecoverableFailureDoesNotReplaceOldReasonOrGetClearedByDiscard() {

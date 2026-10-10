@@ -46,7 +46,6 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(sentBytes, 16_000)
         XCTAssertEqual(fixture.recorder.stops, 1)
         XCTAssertEqual(fixture.driver.pastes, 0)
-        XCTAssertEqual(fixture.driver.axWrites, 0)
     }
 
     func testStopCallbackTailIsFullySentBeforeProtocolFinish() async throws {
@@ -120,7 +119,6 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertNil(fixture.coordinator.lastResult)
         XCTAssertNil(fixture.coordinator.lastInjectionFailureText)
         XCTAssertEqual(fixture.driver.pastes, 0)
-        XCTAssertEqual(fixture.driver.axWrites, 0)
     }
 
     func testReleaseBeforeAsynchronousCaptureStartsLeavesNoRecordingOrRequests() async throws {

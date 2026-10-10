@@ -35,10 +35,10 @@ final class SessionTextOutputTests: XCTestCase {
         var injected = ""
         let result = try await SessionTextOutput.focusedApplication.deliver("正常语音输入") { text in
             injected = text
-            return .init(path: .axFallback, breakdown: .init())
+            return .init(path: .paste, breakdown: .init())
         }
         XCTAssertEqual(injected, "正常语音输入")
-        XCTAssertEqual(result?.path, .axFallback)
+        XCTAssertEqual(result?.path, .paste)
         XCTAssertFalse(SessionTextOutput.focusedApplication.isOnboardingTrial)
     }
 }

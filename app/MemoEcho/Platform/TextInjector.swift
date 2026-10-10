@@ -13,7 +13,6 @@ struct TextInjectionFocus: Sendable {
     enum Scope: Sendable { case field, window }
     var scope: Scope = .field
     var continuity: InjectionTargetContinuity? = nil
-    var requiresVerification = false
 
     func isSameField(as other: Self) -> Bool {
         pid == other.pid && bundleID == other.bundleID && scope == other.scope && identity == other.identity
@@ -75,12 +74,11 @@ protocol TextInjectionDriver: AnyObject {
     func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity?
     /// False must mean no event was posted; once posted, never retry through AX.
     func postPaste(into target: TextInjectionFocus) -> Bool
-    func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool
     func wait(milliseconds: Int) async
 }
 
-/// Delivery and AX confirmation are independent; an unreadable/mismatched value
-/// after delivery is not evidence that the receiving app failed to insert text.
+/// Deliver one paste, then restore the clipboard after a fixed consumption window.
+/// AX text snapshots are optional inputs for learning, never an injection acknowledgement.
 @MainActor
 struct TextInjector {
     private let driver: any TextInjectionDriver
@@ -93,19 +91,9 @@ struct TextInjector {
         let path: InjectionPath
         let breakdown: InjectionBreakdown
         var beforeInjection: FocusedElementTextSnapshot? = nil
-        var confirmation: Confirmation = .verified
     }
 
-    enum Confirmation: Sendable, Equatable {
-        case verified
-        case unconfirmed(VerificationReason)
-    }
-
-    enum VerificationReason: String, Sendable {
-        case valueMismatch, snapshotUnavailable, targetChanged, composing, unchangedValue
-    }
-
-    enum InjectionPath: String, Sendable { case paste, axFallback }
+    enum InjectionPath: String, Sendable { case paste }
 
     struct InjectionBreakdown: Sendable {
         var activateTargetMs = 0
@@ -113,8 +101,7 @@ struct TextInjector {
         var pasteboardWriteMs = 0
         var pasteboardPropagationMs = 0
         var postPasteShortcutMs = 0
-        var pasteVerificationMs = 0
-        var axFallbackMs = 0
+        var pasteConsumptionMs = 0
         var pasteboardRestoreMs = 0
         var totalMs = 0
     }
@@ -124,7 +111,7 @@ struct TextInjector {
         guard let focus = driver.focus(pid: pid, bundleID: bundleID) else { return nil }
         // Keep only the field identity throughout recording; read text at delivery time.
         var target = TextInjectionFocus(pid: focus.pid, bundleID: focus.bundleID, identity: focus.identity,
-                                        snapshot: nil, scope: focus.scope, requiresVerification: focus.snapshot != nil)
+                                        snapshot: nil, scope: focus.scope)
         if focus.scope == .window {
             guard let continuity = driver.monitorWindow(target), continuity.isValid else { return nil }
             target.continuity = continuity
@@ -159,122 +146,56 @@ struct TextInjector {
         try checkCurrent()
         let focusStart = Date()
         guard var before = driver.focus(pid: target.pid, bundleID: target.bundleID),
-              before.isSameField(as: target), before.snapshot?.isComposing != true,
-              !target.requiresVerification || before.snapshot != nil else {
+              before.isSameField(as: target), before.snapshot?.isComposing != true else {
             throw failure("输入框已变化，请手动复制文本")
         }
         before.continuity = target.continuity
         breakdown.focusBeforeMs = millisecondsSince(focusStart)
-        // Do not accept selection-only changes as proof when replacement is a no-op.
-        let expected: String? = before.snapshot.flatMap { snapshot in
-            guard let range = Range(snapshot.selection, in: snapshot.value) else { return nil }
-            return snapshot.value.replacingCharacters(in: range, with: text)
-        }
-        func continuityIsValid() -> Bool {
-            target.scope != .window || target.continuity?.isValid == true
-        }
         func unchangedTarget() -> Bool {
-            guard continuityIsValid(), let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
+            guard target.scope != .window || target.continuity?.isValid == true,
+                  let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
                   current.isSameField(as: before), current.snapshot?.isComposing != true else { return false }
-            return current.snapshot == before.snapshot
+            return true
         }
 
-        let lease: InjectionPasteboardLease?
-        let backupCount = driver.pasteboard.changeCount
-        do {
-            lease = try await InjectionPasteboardLease(pasteboard: driver.pasteboard)
-        } catch {
-            try checkCurrent()
-            // Snapshot failure has not modified the clipboard or posted any event.
-            // Only a stable, readable original field may bypass clipboard transport.
-            guard case .textInjectionFailure = error as? MemoEchoError,
-                  backupCount == driver.pasteboard.changeCount,
-                  before.scope == .field, expected != nil, unchangedTarget() else { throw error }
-            lease = nil
-        }
-        defer { lease?.restore() }
+        let lease: InjectionPasteboardLease
+        do { lease = try await InjectionPasteboardLease(pasteboard: driver.pasteboard) }
+        catch { try checkCurrent(); throw error }
+        defer { lease.restore() }
         try checkCurrent()
-        guard (lease?.isOwned ?? (backupCount == driver.pasteboard.changeCount)), unchangedTarget() else {
+        guard lease.isOwned, unchangedTarget() else {
             throw failure("输入位置或剪贴板已变化，已停止写入，请手动复制文本")
         }
         let writeStart = Date()
-        let written = lease?.write(text) ?? false
+        guard lease.write(text) else { throw failure("无法准备粘贴内容，请手动复制文本") }
         breakdown.pasteboardWriteMs = millisecondsSince(writeStart)
-        if written {
-            let propagation = Date()
-            await driver.wait(milliseconds: 30)
-            breakdown.pasteboardPropagationMs = millisecondsSince(propagation)
-        }
+        let propagation = Date()
+        await driver.wait(milliseconds: 30)
+        breakdown.pasteboardPropagationMs = millisecondsSince(propagation)
         try checkCurrent()
-        guard (lease?.isOwned ?? (backupCount == driver.pasteboard.changeCount)), unchangedTarget() else {
+        guard lease.isOwned, unchangedTarget() else {
             throw failure("输入位置或剪贴板已变化，已停止写入，请手动复制文本")
         }
         let dispatchStart = Date()
-        let posted = written && driver.postPaste(into: before)
-        breakdown.postPasteShortcutMs = millisecondsSince(dispatchStart)
-        let path: InjectionPath
-        if posted {
-            onOutputAttempt()
-            path = .paste
-        } else {
-            // AX fallback is allowed only BEFORE any paste event could have been delivered.
-            let fallbackStart = Date()
-            guard before.snapshot != nil, unchangedTarget() else {
-                throw failure("无法写入原来的输入框，请手动复制文本")
-            }
-            // Even a failed AX write may have side effects; recovery must not blindly repeat it.
-            onOutputAttempt()
-            guard driver.insertViaAX(text, into: before) else {
-                throw failure("无法写入原来的输入框，请手动复制文本")
-            }
-            breakdown.axFallbackMs = millisecondsSince(fallbackStart)
-            path = .axFallback
+        guard driver.postPaste(into: before) else {
+            throw failure("无法发送粘贴事件，请手动复制文本")
         }
-        // A delivered event/accepted AX operation is not a text acknowledgement.
-        // Dismiss feedback now, while keeping the lease and injection lock active.
+        breakdown.postPasteShortcutMs = millisecondsSince(dispatchStart)
+        onOutputAttempt()
+        // Window continuity is only needed before this one-shot delivery.
+        target.continuity?.invalidate()
         onOutputDispatched()
 
-        let verification = Date()
-        var invalidated = false
-        var reason: VerificationReason = .snapshotUnavailable
-        // Keep the clipboard available while the receiving app consumes its queued paste.
-        // Focus loss/cancellation invalidates success permanently; it never triggers a second write.
-        for _ in 0..<20 {
-            await driver.wait(milliseconds: 50)
-            if Task.isCancelled || !shouldContinue() { invalidated = true }
-            let current = driver.focus(pid: target.pid, bundleID: target.bundleID)
-            if !continuityIsValid() || current?.isSameField(as: before) != true {
-                invalidated = true
-                reason = .targetChanged
-            } else if current?.snapshot?.isComposing == true {
-                invalidated = true
-                if reason != .targetChanged { reason = .composing }
-            }
-            if !invalidated, let expected, expected != before.snapshot?.value,
-               let snapshot = current?.snapshot, !snapshot.isComposing,
-               snapshot.value == expected {
-                breakdown.pasteVerificationMs = millisecondsSince(verification)
-                let restoration = Date()
-                lease?.restore()
-                breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
-                breakdown.totalMs = millisecondsSince(started)
-                return .init(path: path, breakdown: breakdown, beforeInjection: before.snapshot)
-            }
-            if !invalidated {
-                if let snapshot = current?.snapshot, before.snapshot != nil, expected != nil {
-                    reason = snapshot.value == before.snapshot?.value ? .unchangedValue : .valueMismatch
-                } else {
-                    reason = .snapshotUnavailable
-                }
-            }
-        }
+        // No read-back, acknowledgement polling, or second write. Drain even on cancellation.
+        let consumption = Date()
+        await driver.wait(milliseconds: 500)
         try checkCurrent()
-        breakdown.pasteVerificationMs = millisecondsSince(verification)
+        breakdown.pasteConsumptionMs = millisecondsSince(consumption)
         let restoration = Date()
-        lease?.restore()
+        lease.restore()
         breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
         breakdown.totalMs = millisecondsSince(started)
-        return .init(path: path, breakdown: breakdown, confirmation: .unconfirmed(reason))
+        return .init(path: .paste, breakdown: breakdown, beforeInjection: before.snapshot)
     }
 
     private func failure(_ detail: String) -> MemoEchoError { .textInjectionFailure(detail: detail) }
@@ -366,8 +287,8 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         let textRoles = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
         guard writable.boolValue || valueWritable.boolValue || textRoles.contains(role as? String ?? "") else { return nil }
         let identity = FocusedElementIdentity(element: element)
-        let snapshot = FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundleID)
-        if let snapshot, snapshot.identity != identity { return nil }
+        let candidate = FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundleID)
+        let snapshot = candidate?.identity == identity ? candidate : nil
         return .init(pid: pid, bundleID: app.bundleIdentifier, identity: identity, snapshot: snapshot)
     }
 
@@ -375,14 +296,6 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         InjectionTargetContinuity.monitor(target: target) { [weak self] in
             self?.focus(pid: target.pid, bundleID: target.bundleID)?.isSameField(as: target) == true
         }
-    }
-
-    func insertViaAX(_ text: String, into target: TextInjectionFocus) -> Bool {
-        guard target.scope == .field, let current = focus(pid: target.pid, bundleID: target.bundleID),
-              current.isSameField(as: target), current.snapshot == target.snapshot,
-              let resolved = resolver.resolveFocusedElement(targetPID: target.pid, shouldRestoreTargetApplication: false),
-              FocusedElementIdentity(element: resolved.element) == target.identity else { return false }
-        return AXUIElementSetAttributeValue(resolved.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
     }
 
     func wait(milliseconds: Int) async {
@@ -399,7 +312,7 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         down.flags = shortcut.flags
         up.flags = shortcut.flags
         guard let current = focus(pid: target.pid, bundleID: target.bundleID),
-              current.isSameField(as: target), current.snapshot == target.snapshot else { return false }
+              current.isSameField(as: target), current.snapshot?.isComposing != true else { return false }
         // Route only to the captured process, even if another app becomes frontmost in this gap.
         down.postToPid(target.pid)
         up.postToPid(target.pid)
