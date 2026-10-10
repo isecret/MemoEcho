@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// One native task with a continuously running receiver. The pipeline owns audio buffering/pacing.
 actor RealtimeCloudASRSession: RealtimeASRSession {
@@ -11,6 +12,8 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
     private let sendTimeout: TimeInterval
     private let finalTimeout: TimeInterval
     private let requestBuilder: @Sendable (RealtimeCloudASRConfiguration) async throws -> URLRequest
+    private static let hotwordLogger = Logger(subsystem: "me.wangmao.memoecho", category: "ASRHotwords")
+    private let diagnosticID = UUID().uuidString
     private var codec: RealtimeWireCodec
     private var receiver: Task<Void, Never>?
     private var state = State.idle
@@ -51,7 +54,9 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             try await bounded(seconds: remaining(until: deadline)) { [transport] in try await transport.connect(request) }
             try checkFailure()
             if let start = try codec.startMessage() {
+                logHotwordEvent("start_prepared")
                 try await bounded(seconds: min(sendTimeout, remaining(until: deadline))) { [transport] in try await transport.send(start) }
+                logHotwordEvent("start_sent")
             }
             try checkFailure()
             // IAT returns recognition only after its first audio frame, with no started event.
@@ -64,6 +69,14 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             await fail(sanitized(error))
             throw sanitized(error)
         }
+    }
+
+    /// Counts only: never log terms, audio, credentials, or transcript contents.
+    private func logHotwordEvent(_ event: String) {
+        guard case .volcengine(_, _, let mode, let hotwords) = configuration else { return }
+        let endpoint = mode == .streaming ? "bigmodel_async" : "bigmodel_nostream"
+        let contextBytes = ((try? hotwords.context()) ?? "").utf8.count
+        Self.hotwordLogger.info("event=\(event, privacy: .public) request=\(self.diagnosticID, privacy: .public) endpoint=\(endpoint, privacy: .public) hotword_count=\(hotwords.terms.count) context_bytes=\(contextBytes)")
     }
 
     func send(_ pcm: Data) async throws {
@@ -96,6 +109,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             try checkFailure()
             guard state == .finished else { throw RealtimeASRError.connectionClosed }
             await transport.close()
+            logHotwordEvent("final_received")
             return sentenceOrder.compactMap { sentences[$0] }.joined()
         } catch {
             await fail(sanitized(error))

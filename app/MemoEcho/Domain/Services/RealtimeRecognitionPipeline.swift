@@ -450,9 +450,9 @@ actor RealtimeRecognitionPipeline {
 }
 
 extension RealtimeRecognitionPipeline {
-    static func replay(_ audio: RealtimeRecoveryAudio, config: ASRConfig) async throws -> [String] {
+    static func replay(_ audio: RealtimeRecoveryAudio, config: ASRConfig, hotwords: VolcengineHotwords = .empty) async throws -> [String] {
         let pipeline = RealtimeRecognitionPipeline(sessionID: UUID().uuidString, preprocess: false, minimumStartBytes: 0) {
-            try ASRProviderFactory.makeRealtimeSession(for: config)
+            try ASRProviderFactory.makeRealtimeSession(for: config, hotwords: hotwords)
         }
         return try await withTaskCancellationHandler {
             let producer = Task {

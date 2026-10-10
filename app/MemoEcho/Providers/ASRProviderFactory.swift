@@ -3,8 +3,8 @@ import Foundation
 struct ASRProviderFactory {
     let runtimeManager: SenseVoiceRuntimeManager
 
-    func makeProvider(for config: ASRConfig) -> any ASRProvider {
-        if let provider = Self.makeSentenceProvider(for: config) { return provider }
+    func makeProvider(for config: ASRConfig, hotwords: VolcengineHotwords = .empty) -> any ASRProvider {
+        if let provider = Self.makeSentenceProvider(for: config, hotwords: hotwords) { return provider }
         return switch config.selectedPlatform {
         case .localSenseVoice: SenseVoiceASRProvider(runtimeManager: runtimeManager)
         case .openAICompatibleASR: OpenAICompatibleASRProvider(config: config.openAICompatible)
@@ -13,14 +13,14 @@ struct ASRProviderFactory {
         }
     }
 
-    static func makeSentenceProvider(for config: ASRConfig) -> (any ASRProvider & CloudASRValidating)? {
+    static func makeSentenceProvider(for config: ASRConfig, hotwords: VolcengineHotwords = .empty) -> (any ASRProvider & CloudASRValidating)? {
         switch config.selectedPlatform {
         case .tencentCloudSentence:
             TencentSentenceASRProvider(secretId: config.tencentCloud.secretId, secretKey: config.tencentCloud.secretKey)
         case .aliyunBailianHTTPASR:
             AliyunBailianHTTPASRProvider(config: config.aliyunBailianHTTP)
         case .volcengineSentence:
-            VolcengineSentenceASRProvider(apiKey: config.volcengine.apiKey)
+            VolcengineSentenceASRProvider(apiKey: config.volcengine.apiKey, hotwords: hotwords)
         case .aliyunSentence:
             AliyunSentenceASRProvider(accessKeyId: config.aliyun.accessKeyId,
                 accessKeySecret: config.aliyun.accessKeySecret, appKey: config.aliyun.appKey)
@@ -28,7 +28,7 @@ struct ASRProviderFactory {
         }
     }
 
-    static func realtimeConfiguration(for config: ASRConfig) throws -> RealtimeCloudASRConfiguration {
+    static func realtimeConfiguration(for config: ASRConfig, hotwords: VolcengineHotwords = .empty) throws -> RealtimeCloudASRConfiguration {
         switch config.selectedPlatform {
         case .tencentCloudRealtime:
             return .tencent(appID: config.tencentCloud.appID, secretID: config.tencentCloud.secretId,
@@ -43,9 +43,9 @@ struct ASRProviderFactory {
             return .bailian(apiKey: config.aliyunBailian.normalizedAPIKey, endpoint: url,
                             model: config.aliyunBailian.normalizedModel)
         case .volcengineRealtime:
-            return .volcengine(apiKey: config.volcengine.apiKey, resourceID: config.volcengine.modelVersion.resourceID, mode: .streaming)
+            return .volcengine(apiKey: config.volcengine.apiKey, resourceID: config.volcengine.modelVersion.resourceID, mode: .streaming, hotwords: hotwords)
         case .volcengineBigModelSentence:
-            return .volcengine(apiKey: config.volcengine.apiKey, resourceID: config.volcengine.modelVersion.resourceID, mode: .sentence)
+            return .volcengine(apiKey: config.volcengine.apiKey, resourceID: config.volcengine.modelVersion.resourceID, mode: .sentence, hotwords: hotwords)
         case .volcengineTraditionalSentence, .volcengineTraditionalRealtime:
             let traditional = config.volcengineTraditional
             let sentence = config.selectedPlatform == .volcengineTraditionalSentence
@@ -63,8 +63,8 @@ struct ASRProviderFactory {
         }
     }
 
-    static func makeRealtimeSession(for config: ASRConfig) throws -> any RealtimeASRSession {
-        RealtimeCloudASRSession(configuration: try realtimeConfiguration(for: config))
+    static func makeRealtimeSession(for config: ASRConfig, hotwords: VolcengineHotwords = .empty) throws -> any RealtimeASRSession {
+        RealtimeCloudASRSession(configuration: try realtimeConfiguration(for: config, hotwords: hotwords))
     }
 }
 

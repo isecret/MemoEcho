@@ -20,6 +20,7 @@ final class SessionRecoveryCheckpoint {
     let mode: TextProcessingMode
     let language: TranslationTargetLanguage
     let asrPlatform: ASRPlatform
+    private(set) var hotwords: VolcengineHotwords
     var target: TextInjectionFocus?
     var context: WindowContextSnapshot?
     var realtimeAudio: RealtimeRecoveryAudio?
@@ -36,12 +37,13 @@ final class SessionRecoveryCheckpoint {
 
     init(segments: [SealedSegment] = [], transcripts: [String], mode: TextProcessingMode,
          language: TranslationTargetLanguage, asrPlatform: ASRPlatform,
-         target: TextInjectionFocus?, context: WindowContextSnapshot?) {
+         target: TextInjectionFocus?, context: WindowContextSnapshot?, hotwords: VolcengineHotwords = .empty) {
         pendingSegments = segments.sorted { $0.index < $1.index }
         self.transcripts = transcripts
         self.mode = mode
         self.language = language
         self.asrPlatform = asrPlatform
+        self.hotwords = hotwords
         self.target = target
         self.context = context
     }
@@ -69,6 +71,7 @@ final class SessionRecoveryCheckpoint {
 
     func discard() {
         discarded = true
+        hotwords = .empty
         failure = nil
         failureReason = nil
         realtimeAudio = nil

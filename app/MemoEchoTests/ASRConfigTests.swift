@@ -218,7 +218,7 @@ final class ASRConfigTests: XCTestCase {
                 config.selectedPlatform = platform
                 config.volcengine = decoded
                 config.volcengine.modelVersion = version
-                guard case .volcengine(let key, let resource, let mode) = try ASRProviderFactory.realtimeConfiguration(for: config) else {
+                guard case .volcengine(let key, let resource, let mode, _) = try ASRProviderFactory.realtimeConfiguration(for: config) else {
                     return XCTFail("Expected large-model V3 route")
                 }
                 XCTAssertEqual(key, "synthetic-key")

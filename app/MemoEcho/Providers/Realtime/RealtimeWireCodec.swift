@@ -47,7 +47,7 @@ struct RealtimeWireCodec: Sendable {
                   endpoint.path == "/api-ws/v1/inference" else { throw RealtimeASRError.configuration }
             request = URLRequest(url: endpoint)
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        case .volcengine(let key, let resourceID, let mode):
+        case .volcengine(let key, let resourceID, let mode, _):
             let resources = ["volc.bigasr.sauc.duration", "volc.seedasr.sauc.duration",
                              "volc.bigasr.sauc.concurrent", "volc.seedasr.sauc.concurrent"]
             guard !key.isEmpty, resources.contains(resourceID) else { throw RealtimeASRError.configuration }
@@ -86,10 +86,11 @@ struct RealtimeWireCodec: Sendable {
                                     "payload": ["task_group": "audio", "task": "asr", "function": "recognition", "model": model,
                                                 "parameters": ["format": "pcm", "sample_rate": 16000, "semantic_punctuation_enabled": false, "heartbeat": true],
                                                 "input": [:]]])
-        case .volcengine(_, _, let mode):
+        case .volcengine(_, _, let mode, let hotwords):
             var options: [String: Any] = ["model_name": "bigmodel", "enable_itn": true,
                                          "enable_punc": true, "show_utterances": true, "result_type": "full"]
             if mode == .streaming { options["enable_nonstream"] = true }
+            if let context = try hotwords.context() { options["corpus"] = ["context": context] }
             let data = try JSONSerialization.data(withJSONObject: ["user": ["uid": "memoecho"],
                 "audio": ["format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1],
                 "request": options])
@@ -210,7 +211,7 @@ struct RealtimeWireCodec: Sendable {
                 }.joined()
                 events.append(transcript(id: String(id), text: text, stable: Self.integer(st["type"]) == 0, milliseconds: Self.integer(st["ed"])))
             }
-        case .volcengine(_, _, let mode):
+        case .volcengine(_, _, let mode, _):
             if let code = object["code"] as? Int, code != 0, code != 1000, code != 20000000 { throw RealtimeASRError.serviceRejected }
             events.append(.ready)
             let result = object["result"] as? [String: Any] ?? (object["result"] as? [[String: Any]])?.first

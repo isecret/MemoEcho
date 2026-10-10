@@ -82,8 +82,8 @@ final class SessionCoordinator {
     private(set) var recovery: SessionRecoveryCheckpoint?
     private(set) var isRecovering = false
     private var recoveryExpiryTask: Task<Void, Never>?
-    private let realtimeSessionFactory: (@Sendable (ASRConfig) throws -> any RealtimeASRSession)?
-    private let asrProviderOverride: ((ASRConfig) -> any ASRProvider)?
+    private let realtimeSessionFactory: (@Sendable (ASRConfig, VolcengineHotwords) throws -> any RealtimeASRSession)?
+    private let asrProviderOverride: ((ASRConfig, VolcengineHotwords) -> any ASRProvider)?
     private let recoveryLifetime: TimeInterval
     private let recoveryProcessorFactory: ((SessionRecoveryCheckpoint) -> SessionRecoveryProcessor)?
     private var targetInput: TextInjectionFocus?
@@ -110,6 +110,7 @@ final class SessionCoordinator {
     private let segmenter = AudioSegmenter()
     private var realtimePipeline: RealtimeRecognitionPipeline?
     private var recordingRecoveryBuffer: RecordingRecoveryBuffer?
+    private var recordingHotwords: VolcengineHotwords = .empty
     private var recordingASRPlatform: ASRPlatform = .localSenseVoice
     private(set) var recordingWarning: String?
     private var segmentStream: AsyncStream<SealedSegment>?
@@ -134,8 +135,8 @@ final class SessionCoordinator {
         textInjector: TextInjector = TextInjector(),
         recoveryLifetime: TimeInterval = 600,
         recoveryProcessorFactory: ((SessionRecoveryCheckpoint) -> SessionRecoveryProcessor)? = nil,
-        asrProviderOverride: ((ASRConfig) -> any ASRProvider)? = nil,
-        realtimeSessionFactory: (@Sendable (ASRConfig) throws -> any RealtimeASRSession)? = nil
+        asrProviderOverride: ((ASRConfig, VolcengineHotwords) -> any ASRProvider)? = nil,
+        realtimeSessionFactory: (@Sendable (ASRConfig, VolcengineHotwords) throws -> any RealtimeASRSession)? = nil
     ) {
         self.realtimeSessionFactory = realtimeSessionFactory
         self.asrProviderOverride = asrProviderOverride
@@ -207,6 +208,8 @@ final class SessionCoordinator {
         currentSessionID = Self.generateSessionID()
         let recordingConfig = configStore.asrConfig
         let selectedPlatform = recordingConfig.selectedPlatform
+        let hotwords = VolcengineHotwords(terms: dictionaryStore?.entries.map(\.term) ?? [], platform: selectedPlatform)
+        recordingHotwords = hotwords
         let sessionID = currentSessionID
         let targetBundleID = targetApplicationBundleID
 
@@ -248,7 +251,8 @@ final class SessionCoordinator {
                     sessionID: sessionID,
                     targetBundleID: targetBundleID,
                     selectedPlatform: selectedPlatform,
-                    asrConfig: recordingConfig
+                    asrConfig: recordingConfig,
+                    hotwords: hotwords
                 )
                 if !Task.isCancelled, self.sessionGeneration == generation {
                     self.recordingStartTask = nil
@@ -264,7 +268,8 @@ final class SessionCoordinator {
         sessionID: String,
         targetBundleID: String?,
         selectedPlatform: ASRPlatform,
-        asrConfig: ASRConfig
+        asrConfig: ASRConfig,
+        hotwords: VolcengineHotwords
     ) async {
         guard generation == sessionGeneration, state == .recording else { return }
 
@@ -272,7 +277,7 @@ final class SessionCoordinator {
             let realtimeFactory = realtimeSessionFactory
             let realtime: RealtimeRecognitionPipeline? = selectedPlatform.isRealtime
                 ? RealtimeRecognitionPipeline(sessionID: sessionID) {
-                    try realtimeFactory?(asrConfig) ?? ASRProviderFactory.makeRealtimeSession(for: asrConfig)
+                    try realtimeFactory?(asrConfig, hotwords) ?? ASRProviderFactory.makeRealtimeSession(for: asrConfig, hotwords: hotwords)
                 } : nil
             realtimePipeline = realtime
             // 配置分段器和 AsyncStream
@@ -346,14 +351,15 @@ final class SessionCoordinator {
             processingTask = Task { [weak self] in
                 if let realtime {
                     await self?.processRealtimeAudio(realtime, generation: generation, sessionID: sessionID,
-                                                     platform: selectedPlatform)
+                                                     platform: selectedPlatform, hotwords: hotwords)
                 } else {
                 await self?.processSegmentedAudio(
                     generation: generation,
                     sessionID: sessionID,
                     asrConfig: asrConfig,
                     selectedPlatform: selectedPlatform,
-                    recoveryBuffer: recoveryBuffer
+                    recoveryBuffer: recoveryBuffer,
+                    hotwords: hotwords
                 )
                 }
                 if self?.sessionGeneration == generation { self?.processingTask = nil }
@@ -396,7 +402,7 @@ final class SessionCoordinator {
                 let checkpoint = SessionRecoveryCheckpoint(segments: snapshot.segments, transcripts: snapshot.transcripts,
                     mode: processingMode, language: configStore.generalConfig.translationTargetLanguage,
                     asrPlatform: recordingASRPlatform, target: targetInput,
-                    context: configStore.windowContextEnabled ? capturedWindowContext : nil)
+                    context: configStore.windowContextEnabled ? capturedWindowContext : nil, hotwords: recordingHotwords)
                 checkpoint.isPartialRecording = true
                 retainRecovery(checkpoint)
             }
@@ -560,12 +566,12 @@ final class SessionCoordinator {
     }
 
     private func processRealtimeAudio(_ pipeline: RealtimeRecognitionPipeline, generation: UInt64,
-                                      sessionID: String, platform: ASRPlatform) async {
+                                      sessionID: String, platform: ASRPlatform, hotwords: VolcengineHotwords) async {
         do {
             let texts = try await pipeline.run()
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             realtimePipeline = nil
-            let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: texts, asrPlatform: platform)
+            let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: texts, asrPlatform: platform, hotwords: hotwords)
             guard sessionGeneration == generation, !Task.isCancelled else { checkpoint.discard(); return }
             var diag = SessionDiagnostics()
             diag.recordingMs = recordingDurationMs
@@ -591,7 +597,7 @@ final class SessionCoordinator {
                !snapshot.audio.processedPCM.isEmpty || !snapshot.audio.rawPCM.isEmpty || !snapshot.transcripts.isEmpty {
                 if case .transcriptTooLong = mapped {} else {
                     let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: snapshot.transcripts,
-                                                                   asrPlatform: platform)
+                                                                   asrPlatform: platform, hotwords: hotwords)
                     guard sessionGeneration == generation, !Task.isCancelled else { checkpoint.discard(); return }
                     if !snapshot.audio.processedPCM.isEmpty || !snapshot.audio.rawPCM.isEmpty {
                         checkpoint.realtimeAudio = snapshot.audio
@@ -615,7 +621,8 @@ final class SessionCoordinator {
         sessionID: String,
         asrConfig: ASRConfig,
         selectedPlatform: ASRPlatform,
-        recoveryBuffer: RecordingRecoveryBuffer
+        recoveryBuffer: RecordingRecoveryBuffer,
+        hotwords: VolcengineHotwords
     ) async {
         let sessionStart = Date()
         var diag = SessionDiagnostics()
@@ -635,7 +642,7 @@ final class SessionCoordinator {
         // 构建 ASR Provider
         let asrProviderFactory = ASRProviderFactory(runtimeManager: asrRuntimeManager)
         let asrProvider = await MainActor.run {
-            asrProviderOverride?(asrConfig) ?? asrProviderFactory.makeProvider(for: asrConfig)
+            asrProviderOverride?(asrConfig, hotwords) ?? asrProviderFactory.makeProvider(for: asrConfig, hotwords: hotwords)
         }
 
         guard let stream = await MainActor.run(body: { segmentStream }) else { return }
@@ -798,7 +805,7 @@ final class SessionCoordinator {
             cleanupSegmenterState()
         }
         let checkpoint = await makeRecoveryCheckpoint(segments: failedSegments, transcripts: transcripts,
-                                                       asrPlatform: selectedPlatform)
+                                                       asrPlatform: selectedPlatform, hotwords: hotwords)
         if let firstASRError {
             await MainActor.run {
                 guard sessionGeneration == generation, !Task.isCancelled else { return }
@@ -819,11 +826,11 @@ final class SessionCoordinator {
     }
 
     private func makeRecoveryCheckpoint(segments: [SealedSegment], transcripts: [String],
-                                        asrPlatform: ASRPlatform) async -> SessionRecoveryCheckpoint {
+                                        asrPlatform: ASRPlatform, hotwords: VolcengineHotwords) async -> SessionRecoveryCheckpoint {
         await windowContextTask?.value
         return .init(segments: segments, transcripts: transcripts, mode: processingMode,
               language: configStore.generalConfig.translationTargetLanguage, asrPlatform: asrPlatform,
-              target: targetInput, context: configStore.windowContextEnabled ? capturedWindowContext : nil)
+              target: targetInput, context: configStore.windowContextEnabled ? capturedWindowContext : nil, hotwords: hotwords)
     }
 
     /// Called after an ASR error, including during the final 100ms sound delay.
@@ -928,8 +935,9 @@ final class SessionCoordinator {
         // Read current credentials on each retry, keeping the original ASR platform and intent.
         var asrConfig = configStore.asrConfig
         asrConfig.selectedPlatform = checkpoint.asrPlatform
-        let provider = asrProviderOverride?(asrConfig)
-            ?? ASRProviderFactory(runtimeManager: asrRuntimeManager).makeProvider(for: asrConfig)
+        let hotwords = checkpoint.hotwords
+        let provider = asrProviderOverride?(asrConfig, hotwords)
+            ?? ASRProviderFactory(runtimeManager: asrRuntimeManager).makeProvider(for: asrConfig, hotwords: hotwords)
         let generation = sessionGeneration
         let llmConfig = configStore.llmConfig
         let apiKey = configStore.openAIAPIKey
@@ -965,7 +973,7 @@ final class SessionCoordinator {
         if asrConfig.selectedPlatform.isRealtime {
             let replayConfig = asrConfig
             processor.recognizeRealtime = { audio in
-                try await RealtimeRecognitionPipeline.replay(audio, config: replayConfig)
+                try await RealtimeRecognitionPipeline.replay(audio, config: replayConfig, hotwords: hotwords)
             }
         }
         return processor
@@ -1065,6 +1073,7 @@ final class SessionCoordinator {
     // MARK: - Segmenter Cleanup
 
     private func cleanupSegmenterState() {
+        recordingHotwords = .empty
         if let realtimePipeline { Task { await realtimePipeline.cancel() } }
         realtimePipeline = nil
         recordingRecoveryBuffer?.clear()

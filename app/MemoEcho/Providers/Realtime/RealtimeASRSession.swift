@@ -66,7 +66,7 @@ enum RealtimeCloudASRConfiguration: Sendable {
     case tencent(appID: String, secretID: String, secretKey: String)
     case aliyun(accessKeyID: String, accessKeySecret: String, appKey: String)
     case bailian(apiKey: String, endpoint: URL, model: String)
-    case volcengine(apiKey: String, resourceID: String = "volc.bigasr.sauc.duration", mode: VolcengineRealtimeMode = .streaming)
+    case volcengine(apiKey: String, resourceID: String = "volc.bigasr.sauc.duration", mode: VolcengineRealtimeMode = .streaming, hotwords: VolcengineHotwords = .empty)
     case volcengineTraditional(appID: String, accessToken: String, cluster: String, mode: VolcengineRealtimeMode)
     case xunfeiIAT(appID: String, apiKey: String, apiSecret: String)
     case xunfei(appID: String, apiKey: String)

@@ -184,6 +184,29 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         }
     }
 
+    func testRecordingFreezesDictionaryBeforeAsyncStartupAndNextRecordingRefreshesIt() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        try fixture.dictionary.addEntry(.init(term: "MemoEcho", pronunciationHint: "must-not-send"))
+        fixture.coordinator.startRecording()
+        // No await: update before beginRecording's delayed task starts.
+        try fixture.dictionary.addEntry(.init(term: "新词"))
+        await fixture.recorder.started.wait()
+        fixture.recorder.emit(samples: 8_000)
+        await fixture.service.sent.wait()
+        XCTAssertEqual(fixture.factory.snapshots.first?.terms, ["MemoEcho"])
+        fixture.coordinator.finishRecording()
+        await fixture.service.finishEntered.wait()
+        await fixture.service.releaseFinal.open()
+        await waitUntil { fixture.coordinator.recovery != nil }
+        XCTAssertEqual(fixture.coordinator.recovery?.hotwords.terms, ["MemoEcho"])
+        fixture.coordinator.startRecording()
+        await waitUntil { fixture.recorder.completedStarts == 2 }
+        fixture.recorder.emit(samples: 8_000)
+        await waitUntil { fixture.factory.creationCount >= 2 }
+        XCTAssertEqual(fixture.factory.snapshots.last?.terms, ["MemoEcho", "新词"])
+    }
+
     private func makeFixture(sendError: RealtimeASRError? = nil) throws -> CoordinatorRealtimeFixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
@@ -193,6 +216,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         try store.saveASRConfig(config)
         try store.updateCloudValidationState(for: .volcengineRealtime, status: .verified)
         try store.saveWindowContextEnabled(false)
+        let dictionary = PersonalDictionaryStore(directoryURL: directory)
         let recorder = CoordinatorRealtimeRecorder()
         let service = CoordinatorRealtimeSession(sendError: sendError)
         let factory = CoordinatorRealtimeFactory(session: service)
@@ -210,15 +234,15 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
             throw MemoEchoError.llmEmptyResponse
         })
         let coordinator = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
-            audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
+            audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder, dictionaryStore: dictionary,
             ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
             textInjector: TextInjector(driver: driver), recoveryProcessorFactory: { _ in worker },
-            realtimeSessionFactory: { config in
+            realtimeSessionFactory: { config, hotwords in
                 guard config.selectedPlatform == .volcengineRealtime else { throw RealtimeASRError.configuration }
-                return factory.makeSession()
+                return factory.makeSession(hotwords: hotwords)
             })
         return .init(coordinator: coordinator, recorder: recorder, service: service, factory: factory,
-                     probe: probe, driver: driver, directory: directory)
+                     probe: probe, driver: driver, directory: directory, dictionary: dictionary)
     }
 
     private func waitUntil(timeout: Duration = .seconds(3), _ condition: () -> Bool) async {
@@ -240,6 +264,7 @@ private struct CoordinatorRealtimeFixture {
     let probe: CoordinatorRealtimeProbe
     let driver: FakeInjectionDriver
     let directory: URL
+    let dictionary: PersonalDictionaryStore
 
     func cleanup() {
         coordinator.cancel()
@@ -362,11 +387,13 @@ private actor CoordinatorRealtimeSession: RealtimeASRSession {
 private final class CoordinatorRealtimeFactory: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
+    private var captured: [VolcengineHotwords] = []
+    var snapshots: [VolcengineHotwords] { lock.withLock { captured } }
     private let session: CoordinatorRealtimeSession
     init(session: CoordinatorRealtimeSession) { self.session = session }
     var creationCount: Int { lock.withLock { count } }
-    func makeSession() -> any RealtimeASRSession {
-        lock.withLock { count += 1 }
+    func makeSession(hotwords: VolcengineHotwords) -> any RealtimeASRSession {
+        lock.withLock { count += 1; captured.append(hotwords) }
         return session
     }
 }

@@ -27,6 +27,29 @@ final class VolcengineSentenceASRProviderTests: XCTestCase {
         XCTAssertEqual(body["user"] as? [String: String], ["uid": "memoecho"])
     }
 
+    func testFlashSendsSameSnapshotForEverySegmentAndNeverRetriesRejection() async throws {
+        let hotwords = VolcengineHotwords(terms: ["MemoEcho", "火山引擎", "a\"b\\c"], platform: .volcengineSentence)
+        let client = FileFlashTestClient(body: #"{"result":{"text":"合成测试结果"}}"#)
+        let provider = VolcengineSentenceASRProvider(apiKey: "synthetic-key", hotwords: hotwords, httpClient: client)
+        for _ in 0..<2 {
+            _ = try await provider.recognize(audioData: Data([1]))
+            let captured = await client.request
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(captured?.httpBody)) as? [String: Any])
+            let request = try XCTUnwrap(body["request"] as? [String: Any])
+            XCTAssertEqual(request["corpus"] as? [String: String], ["context": try XCTUnwrap(hotwords.context())])
+        }
+        let calls = await client.calls
+        XCTAssertEqual(calls, 2)
+        let failed = FileFlashTestClient(body: "private-response-sentinel", status: 400)
+        do {
+            _ = try await VolcengineSentenceASRProvider(apiKey: "synthetic-key", hotwords: hotwords, httpClient: failed)
+                .recognize(audioData: Data([1]))
+            XCTFail("Expected rejection")
+        } catch { }
+        let failedCalls = await failed.calls
+        XCTAssertEqual(failedCalls, 1)
+    }
+
     func testInvalidCredentialsAndEmptyAudioNeverReachNetwork() async throws {
         let client = FileFlashTestClient()
         for key in ["", " \n ", "synthetic\nInjected: value"] {

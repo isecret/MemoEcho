@@ -6,11 +6,13 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
     private static let resourceID = "volc.bigasr.auc_turbo"
     private static let endpoint = "openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
     private let apiKey: String
+    private let hotwords: VolcengineHotwords
     private let httpClient: any OpenAIASRHTTPClient
     private let validationAudioLoader: @Sendable () throws -> Data
 
-    init(apiKey: String, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared,
+    init(apiKey: String, hotwords: VolcengineHotwords = .empty, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared,
          validationAudioLoader: @escaping @Sendable () throws -> Data = { try ASRValidationAudio.load() }) {
+        self.hotwords = hotwords
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.httpClient = httpClient
         self.validationAudioLoader = validationAudioLoader
@@ -24,10 +26,13 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
         guard !audioData.isEmpty else { throw MemoEchoError.asrEmptyAudio }
 
         let base64Audio = audioData.base64EncodedString()
+        var options: [String: Any] = ["model_name": "bigmodel"]
+        let context = try hotwords.context()
+        if let context { options["corpus"] = ["context": context] }
         let body: [String: Any] = [
             "user": ["uid": "memoecho"],
             "audio": ["data": base64Audio],
-            "request": ["model_name": "bigmodel"],
+            "request": options,
         ]
         var request = URLRequest(url: Self.recognizeURL)
         request.httpMethod = "POST"
@@ -43,7 +48,7 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
             provider: "volcengine", endpoint: Self.endpoint, transport: "json_base64_wav",
             audioBytes: audioData.count, uploadBytes: request.httpBody?.count ?? 0,
             timeoutMs: Int(request.timeoutInterval * 1000), base64Bytes: base64Audio.utf8.count,
-            frameCount: nil, minFrameBytes: nil, maxFrameBytes: nil, extra: nil
+            frameCount: nil, minFrameBytes: nil, maxFrameBytes: nil, extra: "hotword_count=\(hotwords.terms.count) context_bytes=\(context?.utf8.count ?? 0)"
         ))
         let start = ContinuousClock.now
         let responseData: Data

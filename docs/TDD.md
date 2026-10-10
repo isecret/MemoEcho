@@ -424,7 +424,7 @@
 - 模型结果返回后重新验证取消、会话 generation、元素身份、正文和光标；确认仍有效才入库。未知/不稳定/格式错误结果不学习。不记录局部正文日志。
 - 自动学习诊断记录开始观察、基线确认、候选评估及提前退出原因（输入框不可读/变化、基线或选区不匹配、清空、范围外修改、超时等），只写固定事件名，不包含输入正文、候选词或模型响应，便于区分未开始评估和模型拒绝。
 - 存储事务保证学习、删除失败时内存回滚。自动学习词条使用普通删除，删除后仍可重新学习；不维护禁止状态或排除名单。
-- HUD 沿用新词提示；词典页统一复用已有编辑、删除入口，不展示独立的最近添加或撤销区域；保存失败局部反馈并回滚。候选积累、相关词召回和 ASR 热词接入留到 P2。
+- HUD 沿用新词提示；词典页统一复用已有编辑、删除入口，不展示独立的最近添加或撤销区域；保存失败局部反馈并回滚。候选积累、相关词召回留到 P2；火山 V3 热词直传按 Issue #15 单独接入。
 
 ### 5.12 DiagnosticsLogger
 
@@ -1177,3 +1177,19 @@ RTASR 保留既有签名、binary PCM 与 normal-close-after-end 收尾语义。
 菜单就绪快照区分未验证配置、已确认配置阻塞和瞬时运行失败；网络/空响应等失效仍影响运行前就绪检查，但不在结果过期后留下常驻菜单告警。显式重新验证后按新验证结果展示。
 
 HUD 恢复按钮使用两字短标题：重试、设置、复制、继续。`RecoveryPresentation.hudRetryTitle` 与完整菜单标题分离，动作仍按检查点身份及能力执行；辅助功能标签读出原因与动作。
+
+### 火山 V3 热词直传（Issue #15，2026-10-10）
+
+- `VolcengineHotwords` 为不持久化的 Sendable 值快照，输入来自 `PersonalDictionaryStore.entries.term`，过滤空白并按 Unicode canonical normalization + lowercase 去重，保留首个词的大小写。只对三个 V3 平台选词。
+- `SessionCoordinator.startRecording` 在任何挂起前取得快照，经工厂传入实时配置或文件 Provider；实时 factory 闭包捕获同一值，续接不读取词典。`SessionRecoveryCheckpoint` 保留该快照，恢复允许更新凭据，但不更新词条；丢弃恢复时释放快照。
+- WebSocket 首包和极速版 HTTP 请求均使用 `request.corpus.context`，值为 JSONEncoder 编码得到的 JSON 字符串，内容只有 `hotwords: [{word: term}]`。空词典省略 corpus；音频帧不附带词典。
+- 容量统一为 5000 条（2026-10-10 用户授权实测后调整）：官方流式文档仍列出 async 100 tokens，但当前配置 v2 + async + enable_nonstream=true 实测发送 128 / 1000 / 5000 条合成热词均正常返回最终结果；5000 条 context 为 228,885 UTF-8 字节。nostream 与极速版也通过 5000 条测试。移除原 async 100 字节保守预算；这属于客户端策略，不代表厂商承诺全部超量热词有效，也不代表 v1 已完成同样实测。
+- 竞品核对仅基于本机闪电说 0.8.0 二进制静态分析，并非公开源码：`load_dictionary_hotword_terms` → `terms_to_hotwords_json` 路径按 5000 条截断；火山请求路径按模式选择 `100 tokens` / `5000 words` 日志文字，未发现对应的 100 tokens 计数或截断。不能据此认定 async 超量热词全部有效，原客户端 100 字节预算也不是闪电说的策略。
+- 三个 V3 入口共用 5000 条上限，并额外设置客户端 256 KiB context 预算以约束内存和请求体。按词典顺序取完整前缀；遇到首个装不下的词停止。保守计数对控制字符按 6 字节计算，对引号与反斜杠按 2 字节计算，其余按 UTF-8 字节计算；编码不转义斜杠。
+- 不创建、同步、引用云端词表，不改变传统 V2 和其他平台的请求。校验凭据请求默认不附用户词典。失败保持原有错误传播，不降级为无热词请求。
+- 两个 WebSocket 入口仍使用各自原 URL，async 保留 enable_nonstream=true；文件入口保留 auc_turbo。LLM 词典参考保持原有读取行为，ASR 快照不替换 LLM 配置。
+- 自动测试覆盖参数编码、去重/容量、快照与恢复、续接/分段复用及错误语义。真实联调必须核对三个入口（async 核对最终 definite）；未联调的模式不得标记验收通过。
+
+参考：[流式 ASR](https://docs.volcengine.com/docs/DoubaoVoice/LargemodelstreamingautomaticspeechrecognitionAPI?lang=zh)、[单向流式](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-automatic-speech-recognition-websocket?lang=zh)、[极速版](https://docs.volcengine.com/docs/DoubaoVoice/recording-file-recognition-lite-http?lang=zh)。
+
+热词发送诊断（2026-10-10）：实时 V3 请求在首包构造后、transport.send 成功后、取得最终结果后分别记录 `start_prepared` / `start_sent` / `final_received`。仅记录随机请求关联 ID、固定接口名、热词数量与 context 字节数，不记录词条、凭据、音频或转写正文。HTTP 文件入口在既有 prepared 日志中增加数量与字节数，成功仍由既有 completed 日志确认。发送成功不等价于每个词条已生效。

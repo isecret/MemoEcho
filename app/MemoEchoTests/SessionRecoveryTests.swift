@@ -349,7 +349,7 @@ final class SessionRecoveryTests: XCTestCase {
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
             audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
             ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
-            recoveryProcessorFactory: { _ in worker }, asrProviderOverride: { _ in asr })
+            recoveryProcessorFactory: { _ in worker }, asrProviderOverride: { _, _ in asr })
         return (session, recorder, directory)
     }
 
@@ -366,7 +366,7 @@ final class SessionRecoveryTests: XCTestCase {
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
                                          audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
                                          ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
-                                         asrProviderOverride: { _ in FailingASR() })
+                                         asrProviderOverride: { _, _ in FailingASR() })
         defer { session.cancel() }
         session.startRecording()
         // This integration case denoises a real 55-second segment. Shared CI
@@ -405,7 +405,7 @@ final class SessionRecoveryTests: XCTestCase {
                                          audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder,
                                          ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
                                          textInjector: TextInjector(driver: driver), recoveryProcessorFactory: { _ in worker },
-                                         asrProviderOverride: { _ in asr })
+                                         asrProviderOverride: { _, _ in asr })
         session.startRecording()
         await waitUntil { recorder.starts == 1 }
         session.finishRecording()
@@ -430,7 +430,7 @@ final class SessionRecoveryTests: XCTestCase {
         var requestedKeys: [String] = []
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
                                          audioDeviceManager: AudioDeviceManager(configStore: store),
-                                         asrProviderOverride: { config in
+                                         asrProviderOverride: { config, _ in
             XCTAssertEqual(config.selectedPlatform, .openAICompatibleASR)
             requestedKeys.append(config.openAICompatible.apiKey)
             return asr
