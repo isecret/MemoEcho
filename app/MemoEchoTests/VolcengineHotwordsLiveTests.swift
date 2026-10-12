@@ -29,7 +29,7 @@ final class VolcengineHotwordsLiveTests: XCTestCase {
         var config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: URL(fileURLWithPath: path))).asr
         config.selectedPlatform = platform
         let terms = suppliedTerms ?? (["语音识别"] + (1..<count).map { "合成热词容量验证条目\($0)" })
-        let hotwords = VolcengineHotwords(terms: terms, platform: platform)
+        let hotwords = ASRHotwords(terms: terms, platform: platform)
         XCTAssertEqual(hotwords.terms.count, count)
         print("Hotword probe: platform=\(platform.rawValue) model=\(config.volcengine.modelVersion) words=\(count) contextBytes=\(try XCTUnwrap(hotwords.context()).utf8.count)")
         let wav = try ASRValidationAudio.load()

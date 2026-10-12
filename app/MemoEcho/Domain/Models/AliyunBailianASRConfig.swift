@@ -2,7 +2,7 @@ import Foundation
 
 struct AliyunBailianASRConfig: Codable, Equatable, Sendable, CloudASRConfigState {
     static let defaultBaseURL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
-    static let defaultModel = "paraformer-realtime-v2"
+    static let defaultModel = ""
     static let endpointSuffix = "/api-ws/v1/inference"
 
     var baseURL: String = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"

@@ -112,7 +112,7 @@ final class AliyunBailianValidationTests: XCTestCase {
         let store = ConfigStore(configDirectory: directory)
         var config = store.asrConfig
         config.selectedPlatform = .aliyunBailianASR
-        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "synthetic-key")
+        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "synthetic-key", model: "paraformer-realtime-v2")
         try store.saveASRConfig(config)
         return store
     }

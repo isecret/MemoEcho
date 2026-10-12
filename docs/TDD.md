@@ -1193,3 +1193,11 @@ HUD 恢复按钮使用两字短标题：重试、设置、复制、继续。`Rec
 参考：[流式 ASR](https://docs.volcengine.com/docs/DoubaoVoice/LargemodelstreamingautomaticspeechrecognitionAPI?lang=zh)、[单向流式](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-automatic-speech-recognition-websocket?lang=zh)、[极速版](https://docs.volcengine.com/docs/DoubaoVoice/recording-file-recognition-lite-http?lang=zh)。
 
 热词发送诊断（2026-10-10）：实时 V3 请求在首包构造后、transport.send 成功后、取得最终结果后分别记录 `start_prepared` / `start_sent` / `final_received`。仅记录随机请求关联 ID、固定接口名、热词数量与 context 字节数，不记录词条、凭据、音频或转写正文。HTTP 文件入口在既有 prepared 日志中增加数量与字节数，成功仍由既有 completed 日志确认。发送成功不等价于每个词条已生效。
+
+### 百炼即时热词（Issue #17）
+
+- 共享 ASRHotwords 录音快照，按平台执行词条选择；分段、续接和恢复复用同一快照。火山序列化与容量行为保持不变。
+- 显式支持 qwen-audio-3.0/3.1-asr-flash-streaming 的 payload.parameters.vocabulary 和 qwen-audio-3.0/3.1-asr-flash 的 parameters.vocabulary；其他模型不发送该字段。格式为词条到权重 4 的对象，空词典省略。
+- 仅记录发送条数与阶段，不记录词条或签名；不自动移除热词重试。
+- 百炼实时 defaultModel 为空，解码缺失 Model 也为空，已有 Model 原样保留。
+- 官方依据：https://help.aliyun.com/zh/model-studio/improve-asr-accuracy 。真实联调未完成前不宣称验收通过。

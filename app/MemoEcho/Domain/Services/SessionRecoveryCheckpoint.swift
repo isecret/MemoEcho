@@ -20,7 +20,7 @@ final class SessionRecoveryCheckpoint {
     let mode: TextProcessingMode
     let language: TranslationTargetLanguage
     let asrPlatform: ASRPlatform
-    private(set) var hotwords: VolcengineHotwords
+    private(set) var hotwords: ASRHotwords
     var target: TextInjectionFocus?
     var context: WindowContextSnapshot?
     var realtimeAudio: RealtimeRecoveryAudio?
@@ -37,7 +37,7 @@ final class SessionRecoveryCheckpoint {
 
     init(segments: [SealedSegment] = [], transcripts: [String], mode: TextProcessingMode,
          language: TranslationTargetLanguage, asrPlatform: ASRPlatform,
-         target: TextInjectionFocus?, context: WindowContextSnapshot?, hotwords: VolcengineHotwords = .empty) {
+         target: TextInjectionFocus?, context: WindowContextSnapshot?, hotwords: ASRHotwords = .empty) {
         pendingSegments = segments.sorted { $0.index < $1.index }
         self.transcripts = transcripts
         self.mode = mode

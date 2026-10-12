@@ -2,12 +2,14 @@ import Foundation
 
 /// DashScope synchronous audio recognition; sends one completed WAV per segment.
 final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Sendable {
+    private let hotwords: ASRHotwords
     private let config: AliyunBailianHTTPASRConfig
     private let httpClient: any OpenAIASRHTTPClient
     private static let providerName = "aliyunBailianHTTP"
 
-    init(config: AliyunBailianHTTPASRConfig, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared) {
+    init(config: AliyunBailianHTTPASRConfig, hotwords: ASRHotwords = .empty, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared) {
         self.config = config
+        self.hotwords = hotwords
         self.httpClient = httpClient
     }
 
@@ -26,8 +28,9 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
         request.setValue("disable", forHTTPHeaderField: "X-DashScope-SSE")
         let audio = RecognitionRequest.Audio(data: "data:audio/wav;base64," + audioData.base64EncodedString())
         let message = RecognitionRequest.Message(content: [.init(input_audio: audio)])
+        let vocabulary = hotwords.bailianVocabulary(model: config.normalizedModel, realtime: false)
         request.httpBody = try JSONEncoder().encode(RecognitionRequest(
-            model: config.normalizedModel, input: .init(messages: [message])
+            model: config.normalizedModel, input: .init(messages: [message]), parameters: .init(vocabulary: vocabulary)
         ))
         try Task.checkCancellation()
         CloudASRRequestLogger.requestPrepared(.init(
@@ -35,7 +38,7 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
             transport: "json_base64_wav",
             audioBytes: audioData.count, uploadBytes: request.httpBody?.count ?? 0,
             timeoutMs: Int(request.timeoutInterval * 1000), base64Bytes: nil,
-            frameCount: nil, minFrameBytes: nil, maxFrameBytes: nil, extra: nil
+            frameCount: nil, minFrameBytes: nil, maxFrameBytes: nil, extra: "hotword_count=\(vocabulary?.count ?? 0)"
         ))
         let start = ContinuousClock.now
         let data: Data
@@ -124,7 +127,7 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
     private struct RecognitionRequest: Encodable {
         let model: String
         let input: Input
-        let parameters = Parameters()
+        let parameters: Parameters
         struct Input: Encodable { let messages: [Message] }
         struct Message: Encodable {
             let role = "user"
@@ -136,6 +139,7 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
         }
         struct Audio: Encodable { let data: String }
         struct Parameters: Encodable {
+            let vocabulary: [String: Int]?
             let format = "wav"
             let sample_rate = "16000"
         }

@@ -5,12 +5,12 @@ final class AliyunBailianConfigTests: XCTestCase {
     func testEndpointNormalizationSupportsWSSOnly() {
         let expected = "wss://workspace.example.com" + AliyunBailianASRConfig.endpointSuffix
         for address in [" WSS://WORKSPACE.example.com/api-ws/v1/inference///\n", expected, expected + "/"] {
-            let config = AliyunBailianASRConfig(baseURL: address, apiKey: "key")
+            let config = AliyunBailianASRConfig(baseURL: address, apiKey: "key", model: "paraformer-realtime-v2")
             XCTAssertEqual(config.requestURL?.absoluteString, expected)
             XCTAssertTrue(config.isComplete)
         }
         for host in ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "workspace.ap-southeast-1.maas.aliyuncs.com"] {
-            let config = AliyunBailianASRConfig(baseURL: "wss://\(host)/api-ws/v1/inference", apiKey: "key")
+            let config = AliyunBailianASRConfig(baseURL: "wss://\(host)/api-ws/v1/inference", apiKey: "key", model: "paraformer-realtime-v2")
             XCTAssertEqual(config.requestURL?.host, host)
         }
     }
@@ -31,7 +31,7 @@ final class AliyunBailianConfigTests: XCTestCase {
                         "https://user:password@example.com/api/v1", "https://example.com/api/v1?key=secret",
                         "https://example.com/api/v1#fragment", "https://example.com", "https://example.com/v1",
                         "https://example.com/api/v1/chat/completions", "https://exam ple.com/api/v1"] {
-            var config = AliyunBailianASRConfig(baseURL: address, apiKey: "key")
+            var config = AliyunBailianASRConfig(baseURL: address, apiKey: "key", model: "paraformer-realtime-v2")
             config.validationStatus = .verified
             XCTAssertNil(config.requestURL, address)
             XCTAssertFalse(config.isComplete, address)
@@ -49,14 +49,14 @@ final class AliyunBailianConfigTests: XCTestCase {
 
     func testFingerprintUsesCanonicalEndpointModelAndKey() {
         var config = ASRConfig()
-        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "key", model: AliyunBailianASRConfig.defaultModel)
+        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "key", model: "paraformer-realtime-v2")
         let original = CloudASRValidationInput(platform: .aliyunBailianASR, asrConfig: config).fingerprint
         var equivalent = config
         equivalent.aliyunBailian.baseURL += "/"
         equivalent.aliyunBailian.model = " paraformer-realtime-v2 "
         XCTAssertEqual(CloudASRValidationInput(platform: .aliyunBailianASR, asrConfig: equivalent).fingerprint, original)
-        for changed in [AliyunBailianASRConfig(baseURL: "wss://other.example/api-ws/v1/inference", apiKey: "key", model: AliyunBailianASRConfig.defaultModel),
-                        .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "other-key", model: AliyunBailianASRConfig.defaultModel),
+        for changed in [AliyunBailianASRConfig(baseURL: "wss://other.example/api-ws/v1/inference", apiKey: "key", model: "paraformer-realtime-v2"),
+                        .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "other-key", model: "paraformer-realtime-v2"),
                         .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "key", model: "other-model")] {
             config.aliyunBailian = changed
             XCTAssertNotEqual(CloudASRValidationInput(platform: .aliyunBailianASR, asrConfig: config).fingerprint, original)
@@ -91,7 +91,7 @@ final class AliyunBailianConfigTests: XCTestCase {
     func testReadinessRequiresVerifiedBailianAndFactoryRoutesIndependently() {
         var config = ASRConfig()
         config.selectedPlatform = .aliyunBailianASR
-        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "key")
+        config.aliyunBailian = .init(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "key", model: "paraformer-realtime-v2")
         config.aliyun.validationStatus = .verified
         XCTAssertFalse(config.isReady(localModelsAvailable: true))
         config.aliyunBailian.validationStatus = .verified
@@ -109,14 +109,14 @@ final class AliyunBailianConfigTests: XCTestCase {
         let store = ConfigStore(configDirectory: directory)
         var config = store.asrConfig
         config.selectedPlatform = .aliyunBailianASR
-        let original = AliyunBailianASRConfig(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "synthetic-key")
+        let original = AliyunBailianASRConfig(baseURL: "wss://example.com/api-ws/v1/inference", apiKey: "synthetic-key", model: "paraformer-realtime-v2")
         config.aliyunBailian = original
         config.aliyun.accessKeyId = "id"
         config.aliyun.accessKeySecret = "synthetic-secret"
         config.aliyun.appKey = "app"
         try store.saveASRConfig(config)
         try store.updateCloudValidationState(for: .aliyunRealtime, status: .verified)
-        for changed in [AliyunBailianASRConfig(baseURL: "wss://other.example/api-ws/v1/inference", apiKey: "synthetic-key"),
+        for changed in [AliyunBailianASRConfig(baseURL: "wss://other.example/api-ws/v1/inference", apiKey: "synthetic-key", model: "paraformer-realtime-v2"),
                         .init(baseURL: original.baseURL, apiKey: "new-key"),
                         .init(baseURL: original.baseURL, apiKey: original.apiKey, model: "other-model")] {
             var reset = store.asrConfig

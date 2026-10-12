@@ -6,11 +6,11 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
     private static let resourceID = "volc.bigasr.auc_turbo"
     private static let endpoint = "openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
     private let apiKey: String
-    private let hotwords: VolcengineHotwords
+    private let hotwords: ASRHotwords
     private let httpClient: any OpenAIASRHTTPClient
     private let validationAudioLoader: @Sendable () throws -> Data
 
-    init(apiKey: String, hotwords: VolcengineHotwords = .empty, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared,
+    init(apiKey: String, hotwords: ASRHotwords = .empty, httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared,
          validationAudioLoader: @escaping @Sendable () throws -> Data = { try ASRValidationAudio.load() }) {
         self.hotwords = hotwords
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)

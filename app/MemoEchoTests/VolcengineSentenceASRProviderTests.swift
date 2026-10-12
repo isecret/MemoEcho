@@ -28,7 +28,7 @@ final class VolcengineSentenceASRProviderTests: XCTestCase {
     }
 
     func testFlashSendsSameSnapshotForEverySegmentAndNeverRetriesRejection() async throws {
-        let hotwords = VolcengineHotwords(terms: ["MemoEcho", "火山引擎", "a\"b\\c"], platform: .volcengineSentence)
+        let hotwords = ASRHotwords(terms: ["MemoEcho", "火山引擎", "a\"b\\c"], platform: .volcengineSentence)
         let client = FileFlashTestClient(body: #"{"result":{"text":"合成测试结果"}}"#)
         let provider = VolcengineSentenceASRProvider(apiKey: "synthetic-key", hotwords: hotwords, httpClient: client)
         for _ in 0..<2 {

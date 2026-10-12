@@ -185,36 +185,39 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
     }
 
     func testRecordingFreezesDictionaryBeforeAsyncStartupAndNextRecordingRefreshesIt() async throws {
-        let fixture = try makeFixture()
-        defer { fixture.cleanup() }
-        try fixture.dictionary.addEntry(.init(term: "MemoEcho", pronunciationHint: "must-not-send"))
-        fixture.coordinator.startRecording()
-        // No await: update before beginRecording's delayed task starts.
-        try fixture.dictionary.addEntry(.init(term: "新词"))
-        await fixture.recorder.started.wait()
-        fixture.recorder.emit(samples: 8_000)
-        await fixture.service.sent.wait()
-        XCTAssertEqual(fixture.factory.snapshots.first?.terms, ["MemoEcho"])
-        fixture.coordinator.finishRecording()
-        await fixture.service.finishEntered.wait()
-        await fixture.service.releaseFinal.open()
-        await waitUntil { fixture.coordinator.recovery != nil }
-        XCTAssertEqual(fixture.coordinator.recovery?.hotwords.terms, ["MemoEcho"])
-        fixture.coordinator.startRecording()
-        await waitUntil { fixture.recorder.completedStarts == 2 }
-        fixture.recorder.emit(samples: 8_000)
-        await waitUntil { fixture.factory.creationCount >= 2 }
-        XCTAssertEqual(fixture.factory.snapshots.last?.terms, ["MemoEcho", "新词"])
+        for platform in [ASRPlatform.volcengineRealtime, .aliyunBailianASR] {
+            let fixture = try makeFixture(platform: platform)
+            defer { fixture.cleanup() }
+            try fixture.dictionary.addEntry(.init(term: "MemoEcho", pronunciationHint: "must-not-send"))
+            fixture.coordinator.startRecording()
+            // No await: update before beginRecording's delayed task starts.
+            try fixture.dictionary.addEntry(.init(term: "新词"))
+            await fixture.recorder.started.wait()
+            fixture.recorder.emit(samples: 8_000)
+            await fixture.service.sent.wait()
+            XCTAssertEqual(fixture.factory.snapshots.first?.terms, ["MemoEcho"])
+            fixture.coordinator.finishRecording()
+            await fixture.service.finishEntered.wait()
+            await fixture.service.releaseFinal.open()
+            await waitUntil { fixture.coordinator.recovery != nil }
+            XCTAssertEqual(fixture.coordinator.recovery?.hotwords.terms, ["MemoEcho"])
+            fixture.coordinator.startRecording()
+            await waitUntil { fixture.recorder.completedStarts == 2 }
+            fixture.recorder.emit(samples: 8_000)
+            await waitUntil { fixture.factory.creationCount >= 2 }
+            XCTAssertEqual(fixture.factory.snapshots.last?.terms, ["MemoEcho", "新词"])
+        }
     }
 
-    private func makeFixture(sendError: RealtimeASRError? = nil) throws -> CoordinatorRealtimeFixture {
+    private func makeFixture(sendError: RealtimeASRError? = nil, platform: ASRPlatform = .volcengineRealtime) throws -> CoordinatorRealtimeFixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
-        config.selectedPlatform = .volcengineRealtime
+        config.selectedPlatform = platform
+        config.aliyunBailian = .init(apiKey: "synthetic", model: "qwen-audio-3.1-asr-flash-streaming")
         config.volcengine.apiKey = "synthetic-test-key"
         try store.saveASRConfig(config)
-        try store.updateCloudValidationState(for: .volcengineRealtime, status: .verified)
+        try store.updateCloudValidationState(for: platform, status: .verified)
         try store.saveWindowContextEnabled(false)
         let dictionary = PersonalDictionaryStore(directoryURL: directory)
         let recorder = CoordinatorRealtimeRecorder()
@@ -238,7 +241,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
             ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
             textInjector: TextInjector(driver: driver), recoveryProcessorFactory: { _ in worker },
             realtimeSessionFactory: { config, hotwords in
-                guard config.selectedPlatform == .volcengineRealtime else { throw RealtimeASRError.configuration }
+                guard config.selectedPlatform == platform else { throw RealtimeASRError.configuration }
                 return factory.makeSession(hotwords: hotwords)
             })
         return .init(coordinator: coordinator, recorder: recorder, service: service, factory: factory,
@@ -387,12 +390,12 @@ private actor CoordinatorRealtimeSession: RealtimeASRSession {
 private final class CoordinatorRealtimeFactory: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
-    private var captured: [VolcengineHotwords] = []
-    var snapshots: [VolcengineHotwords] { lock.withLock { captured } }
+    private var captured: [ASRHotwords] = []
+    var snapshots: [ASRHotwords] { lock.withLock { captured } }
     private let session: CoordinatorRealtimeSession
     init(session: CoordinatorRealtimeSession) { self.session = session }
     var creationCount: Int { lock.withLock { count } }
-    func makeSession(hotwords: VolcengineHotwords) -> any RealtimeASRSession {
+    func makeSession(hotwords: ASRHotwords) -> any RealtimeASRSession {
         lock.withLock { count += 1; captured.append(hotwords) }
         return session
     }

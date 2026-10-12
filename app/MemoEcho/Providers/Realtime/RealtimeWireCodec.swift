@@ -41,7 +41,7 @@ struct RealtimeWireCodec: Sendable {
             guard !key.isEmpty, !secret.isEmpty, !appKey.isEmpty else { throw RealtimeASRError.configuration }
             let token = try await fetchAliyunToken(key: key, secret: secret, now: now)
             request = URLRequest(url: try signedURL("wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1", ["token": token]))
-        case .bailian(let key, let endpoint, let model):
+        case .bailian(let key, let endpoint, let model, _):
             guard !key.isEmpty, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, endpoint.scheme == "wss", endpoint.host != nil,
                   endpoint.user == nil, endpoint.password == nil, endpoint.query == nil, endpoint.fragment == nil,
                   endpoint.path == "/api-ws/v1/inference" else { throw RealtimeASRError.configuration }
@@ -81,10 +81,14 @@ struct RealtimeWireCodec: Sendable {
                                                    "namespace": "SpeechTranscriber", "name": "StartTranscription"],
                                     "payload": ["format": "pcm", "sample_rate": 16000, "enable_intermediate_result": true,
                                                 "enable_punctuation_prediction": true, "enable_inverse_text_normalization": true]])
-        case .bailian(_, _, let model):
+        case .bailian(_, _, let model, let hotwords):
+            var parameters: [String: Any] = ["format": "pcm", "sample_rate": 16000, "semantic_punctuation_enabled": false, "heartbeat": true]
+            if let vocabulary = hotwords.bailianVocabulary(model: model, realtime: true) {
+                parameters["vocabulary"] = vocabulary
+            }
             return try jsonMessage(["header": ["action": "run-task", "task_id": taskID, "streaming": "duplex"],
                                     "payload": ["task_group": "audio", "task": "asr", "function": "recognition", "model": model,
-                                                "parameters": ["format": "pcm", "sample_rate": 16000, "semantic_punctuation_enabled": false, "heartbeat": true],
+                                                "parameters": parameters,
                                                 "input": [:]]])
         case .volcengine(_, _, let mode, let hotwords):
             var options: [String: Any] = ["model_name": "bigmodel", "enable_itn": true,

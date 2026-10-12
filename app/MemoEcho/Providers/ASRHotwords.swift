@@ -2,9 +2,9 @@ import Foundation
 
 /// Immutable, request-ready selection from a recording's personal dictionary.
 /// This is never persisted and contains only terms, not pronunciation hints or user context.
-struct VolcengineHotwords: Sendable, Equatable {
+struct ASRHotwords: Sendable, Equatable {
     let terms: [String]
-    static let empty = VolcengineHotwords(terms: [], platform: .localSenseVoice)
+    static let empty = ASRHotwords(terms: [], platform: .localSenseVoice)
 
     init(terms: [String], platform: ASRPlatform) {
         let maximumWords: Int
@@ -16,6 +16,21 @@ struct VolcengineHotwords: Sendable, Equatable {
             // Request acceptance does not establish that every term affects recognition.
             // Keep a separate memory/payload bound.
             maximumBytes = 256 * 1024
+        case .aliyunBailianASR, .aliyunBailianHTTPASR:
+            var selected: [String] = []
+            var seen: Set<String> = []
+            for original in terms {
+                let term = original.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !term.isEmpty, !term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { continue }
+                let valid = term.unicodeScalars.contains(where: { !$0.isASCII })
+                    ? term.unicodeScalars.count <= 15
+                    : term.split(separator: " ").count <= 7
+                guard valid, seen.insert(term.precomposedStringWithCanonicalMapping.lowercased()).inserted else { continue }
+                selected.append(term)
+                if selected.count == 2000 { break }
+            }
+            self.terms = selected
+            return
         default:
             self.terms = []
             return
@@ -41,6 +56,15 @@ struct VolcengineHotwords: Sendable, Equatable {
             bytes += entryBytes
         }
         self.terms = selected
+    }
+
+    /// Only documented Qwen-Audio models accept inline vocabulary. Custom models remain usable.
+    func bailianVocabulary(model: String, realtime: Bool) -> [String: Int]? {
+        let supported = realtime
+            ? ["qwen-audio-3.1-asr-flash-streaming", "qwen-audio-3.0-asr-flash-streaming"]
+            : ["qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"]
+        guard supported.contains(model), !terms.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: terms.map { ($0, 4) })
     }
 
     /// Context must be a JSON STRING nested within the outer request JSON.

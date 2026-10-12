@@ -121,7 +121,9 @@ final class ASRConfigTests: XCTestCase {
             var config = ASRConfig()
             config.selectedPlatform = platform
             if platform.isRealtime {
-                if platform == .aliyunBailianASR { config.aliyunBailian.apiKey = "synthetic-key" }
+                if platform == .aliyunBailianASR {
+                    config.aliyunBailian = .init(apiKey: "synthetic-key", model: "paraformer-realtime-v2")
+                }
                 config.volcengineTraditional = .init(appID: "synthetic-app", accessToken: "synthetic-token",
                     sentenceCluster: "sentence-cluster", realtimeCluster: "streaming-cluster")
                 XCTAssertTrue(try ASRProviderFactory.makeRealtimeSession(for: config) is RealtimeCloudASRSession)

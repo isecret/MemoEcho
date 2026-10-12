@@ -2,6 +2,24 @@ import XCTest
 @testable import MemoEcho
 
 final class AliyunBailianHTTPASRProviderTests: XCTestCase {
+    func testInlineVocabularySentOnlyToSupportedHTTPModels() async throws {
+        for model in ["qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash", "custom-model"] {
+            for terms in [[], ["MemoEcho"]] {
+                let client = BailianHTTPTestClient(body: #"{"output":{"text":"测试"}}"#)
+                let provider = AliyunBailianHTTPASRProvider(config: .init(apiKey: "synthetic", model: model),
+                    hotwords: ASRHotwords(terms: terms, platform: .aliyunBailianHTTPASR), httpClient: client)
+                _ = try await provider.recognize(audioData: Data([1]))
+                let request = await client.request
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request?.httpBody)) as? [String: Any])
+                let parameters = try XCTUnwrap(body["parameters"] as? [String: Any])
+                if model.hasPrefix("qwen-audio-") && !terms.isEmpty {
+                    XCTAssertEqual(parameters["vocabulary"] as? [String: Int], ["MemoEcho": 4])
+                } else { XCTAssertNil(parameters["vocabulary"]) }
+                XCTAssertNil(parameters["vocabulary_id"])
+            }
+        }
+    }
+
     func testRequestMatchesDashScopeHTTPContract() async throws {
         let client = BailianHTTPTestClient(body: #"{"output":{"text":" 完整测试结果 ","sentence":{"sentence_end":true}}}"#)
         let provider = AliyunBailianHTTPASRProvider(config: .init(apiKey: " synthetic-key ", model: " custom-model "), httpClient: client)

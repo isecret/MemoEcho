@@ -73,6 +73,11 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
 
     /// Counts only: never log terms, audio, credentials, or transcript contents.
     private func logHotwordEvent(_ event: String) {
+        if case .bailian(_, _, let model, let hotwords) = configuration {
+            let count = hotwords.bailianVocabulary(model: model, realtime: true)?.count ?? 0
+            Self.hotwordLogger.info("event=\(event, privacy: .public) request=\(self.diagnosticID, privacy: .public) endpoint=bailian_inference hotword_count=\(count)")
+            return
+        }
         guard case .volcengine(_, _, let mode, let hotwords) = configuration else { return }
         let endpoint = mode == .streaming ? "bigmodel_async" : "bigmodel_nostream"
         let contextBytes = ((try? hotwords.context()) ?? "").utf8.count
