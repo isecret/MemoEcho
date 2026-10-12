@@ -16,6 +16,21 @@ struct ASRHotwords: Sendable, Equatable {
             // Request acceptance does not establish that every term affects recognition.
             // Keep a separate memory/payload bound.
             maximumBytes = 256 * 1024
+        case .tencentCloudRealtime, .tencentCloudSentence:
+            var selected: [String] = []
+            var seen: Set<String> = []
+            for original in terms {
+                let term = original.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Conservative interpretation of Tencent's 30 characters / 10 Chinese characters limit.
+                guard !term.isEmpty, term.utf8.count <= 30,
+                      !term.contains(","), !term.contains("|"),
+                      !term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                      seen.insert(term.precomposedStringWithCanonicalMapping.lowercased()).inserted else { continue }
+                selected.append(term)
+                if selected.count == 128 { break }
+            }
+            self.terms = selected
+            return
         case .aliyunBailianASR, .aliyunBailianHTTPASR:
             var selected: [String] = []
             var seen: Set<String> = []
@@ -56,6 +71,11 @@ struct ASRHotwords: Sendable, Equatable {
             bytes += entryBytes
         }
         self.terms = selected
+    }
+
+    func tencentList() -> String? {
+        guard !terms.isEmpty else { return nil }
+        return terms.map { "\($0)|5" }.joined(separator: ",")
     }
 
     /// Only documented Qwen-Audio models accept inline vocabulary. Custom models remain usable.

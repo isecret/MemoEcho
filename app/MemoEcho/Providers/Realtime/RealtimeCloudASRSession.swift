@@ -51,6 +51,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
                 try await requestBuilder(configuration)
             }
             try checkFailure()
+            if case .tencent = configuration { logHotwordEvent("connection_prepared") }
             try await bounded(seconds: remaining(until: deadline)) { [transport] in try await transport.connect(request) }
             try checkFailure()
             if let start = try codec.startMessage() {
@@ -65,6 +66,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             try await waitUntil(seconds: remaining(until: deadline)) { self.state != .connecting }
             try checkFailure()
             guard state == .ready else { throw RealtimeASRError.invalidState }
+            if case .tencent = configuration { logHotwordEvent("connection_established") }
         } catch {
             await fail(sanitized(error))
             throw sanitized(error)
@@ -73,6 +75,10 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
 
     /// Counts only: never log terms, audio, credentials, or transcript contents.
     private func logHotwordEvent(_ event: String) {
+        if case .tencent(_, _, _, let hotwords) = configuration {
+            Self.hotwordLogger.info("event=\(event, privacy: .public) request=\(self.diagnosticID, privacy: .public) endpoint=tencent_realtime hotword_count=\(hotwords.terms.count)")
+            return
+        }
         if case .bailian(_, _, let model, let hotwords) = configuration {
             let count = hotwords.bailianVocabulary(model: model, realtime: true)?.count ?? 0
             Self.hotwordLogger.info("event=\(event, privacy: .public) request=\(self.diagnosticID, privacy: .public) endpoint=bailian_inference hotword_count=\(count)")

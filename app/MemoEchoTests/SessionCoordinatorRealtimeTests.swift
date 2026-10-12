@@ -81,7 +81,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         fixture.coordinator.startRecording()
         await fixture.recorder.started.wait()
         fixture.recorder.emit(samples: 16_000)
-        await waitUntil { fixture.coordinator.recovery != nil }
+        await waitUntil { fixture.coordinator.recovery != nil && fixture.coordinator.state == .error }
         let recovery = try XCTUnwrap(fixture.coordinator.recovery)
         let audio = try XCTUnwrap(recovery.realtimeAudio)
         XCTAssertEqual(fixture.coordinator.state, .error)
@@ -185,7 +185,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
     }
 
     func testRecordingFreezesDictionaryBeforeAsyncStartupAndNextRecordingRefreshesIt() async throws {
-        for platform in [ASRPlatform.volcengineRealtime, .aliyunBailianASR] {
+        for platform in [ASRPlatform.volcengineRealtime, .aliyunBailianASR, .tencentCloudRealtime] {
             let fixture = try makeFixture(platform: platform)
             defer { fixture.cleanup() }
             try fixture.dictionary.addEntry(.init(term: "MemoEcho", pronunciationHint: "must-not-send"))
@@ -215,6 +215,9 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         var config = ASRConfig()
         config.selectedPlatform = platform
         config.aliyunBailian = .init(apiKey: "synthetic", model: "qwen-audio-3.1-asr-flash-streaming")
+        config.tencentCloud.appID = "123"
+        config.tencentCloud.secretId = "synthetic"
+        config.tencentCloud.secretKey = "synthetic"
         config.volcengine.apiKey = "synthetic-test-key"
         try store.saveASRConfig(config)
         try store.updateCloudValidationState(for: platform, status: .verified)

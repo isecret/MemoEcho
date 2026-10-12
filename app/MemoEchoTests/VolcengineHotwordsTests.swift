@@ -43,7 +43,7 @@ final class VolcengineHotwordsTests: XCTestCase {
     }
 
     func testOtherPlatformsNeverSelectHotwords() {
-        for platform in ASRPlatform.allCases where ![.volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence, .aliyunBailianASR, .aliyunBailianHTTPASR].contains(platform) {
+        for platform in ASRPlatform.allCases where ![.volcengineRealtime, .volcengineBigModelSentence, .volcengineSentence, .aliyunBailianASR, .aliyunBailianHTTPASR, .tencentCloudRealtime, .tencentCloudSentence].contains(platform) {
             XCTAssertEqual(ASRHotwords(terms: ["MemoEcho"], platform: platform), .empty)
         }
     }

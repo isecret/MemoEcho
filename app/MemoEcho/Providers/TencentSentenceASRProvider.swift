@@ -20,7 +20,13 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
     private let secretId: String
     private let secretKey: String
 
-    init(secretId: String, secretKey: String) {
+    private let hotwords: ASRHotwords
+    private let httpClient: any OpenAIASRHTTPClient
+
+    init(secretId: String, secretKey: String, hotwords: ASRHotwords = .empty,
+         httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared) {
+        self.hotwords = hotwords
+        self.httpClient = httpClient
         self.secretId = secretId
         self.secretKey = secretKey
     }
@@ -37,7 +43,7 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
         let base64Audio = audioData.base64EncodedString()
         let dataLen = audioData.count
 
-        let requestBody: [String: Any] = [
+        var requestBody: [String: Any] = [
             "ProjectId": 0,
             "SubServiceType": 2,
             "EngSerViceType": Self.engineModelType,
@@ -46,6 +52,8 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
             "Data": base64Audio,
             "DataLen": dataLen,
         ]
+
+        if let list = hotwords.tencentList() { requestBody["HotwordList"] = list }
 
         let bodyData = try JSONSerialization.data(withJSONObject: requestBody)
         let bodyString = String(data: bodyData, encoding: .utf8)!
@@ -63,7 +71,7 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
                 frameCount: nil,
                 minFrameBytes: nil,
                 maxFrameBytes: nil,
-                extra: "data_len=\(dataLen)"
+                extra: "data_len=\(dataLen) hotword_count=\(hotwords.terms.count)"
             )
         )
 
@@ -92,7 +100,7 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
         let startTime = Date()
         let (responseData, response): (Data, URLResponse)
         do {
-            (responseData, response) = try await URLSession.shared.data(for: request)
+            (responseData, response) = try await httpClient.data(for: request)
         } catch let error as URLError {
             CloudASRRequestLogger.requestFailed(
                 provider: "tencent",
@@ -128,15 +136,14 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
                 )
                 throw MemoEchoError.cloudASRAuthenticationFailure
             default:
-                let body = String(data: responseData, encoding: .utf8) ?? ""
                 CloudASRRequestLogger.requestFailed(
                     provider: "tencent",
                     endpoint: endpoint,
                     phase: "http",
                     statusCode: httpResponse.statusCode,
-                    message: body
+                    message: "unexpected_http_status"
                 )
-                throw MemoEchoError.cloudASRNetworkFailure(message: "HTTP \(httpResponse.statusCode): \(body)")
+                throw MemoEchoError.cloudASRNetworkFailure(message: "HTTP \(httpResponse.statusCode)")
             }
         }
 
@@ -179,12 +186,13 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
         // 检查 API 错误
         if let error = responseObj["Error"] as? [String: Any] {
             let code = error["Code"] as? String ?? "Unknown"
-            let message = error["Message"] as? String ?? "Unknown error"
+            // Server messages may echo the submitted dictionary. Expose only a bounded error code.
+            let safeCode = String(code.prefix(100)).filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "_") }
 
             if code.contains("AuthFailure") || code.contains("SecretId") || code.contains("Signature") {
                 throw MemoEchoError.cloudASRAuthenticationFailure
             }
-            throw MemoEchoError.cloudASRInvalidResponse(detail: "[\(code)] \(message)")
+            throw MemoEchoError.cloudASRInvalidResponse(detail: "腾讯云请求失败（\(safeCode)）")
         }
 
         guard let result = responseObj["Result"] as? String,

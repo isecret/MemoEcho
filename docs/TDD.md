@@ -1201,3 +1201,11 @@ HUD 恢复按钮使用两字短标题：重试、设置、复制、继续。`Rec
 - 仅记录发送条数与阶段，不记录词条或签名；不自动移除热词重试。
 - 百炼实时 defaultModel 为空，解码缺失 Model 也为空，已有 Model 原样保留。
 - 官方依据：https://help.aliyun.com/zh/model-studio/improve-asr-accuracy 。真实联调未完成前不宣称验收通过。
+
+### 腾讯云即时热词（Issue #16，2026-10-12）
+
+- `ASRHotwords` 统一筛选腾讯云词条：原有顺序、规范等价且大小写不敏感去重、首尾空白裁剪、UTF-8 ≤30 字节，排除控制字符及 `,` / `|`；筛选后截取 128 条。官方“30 个字符（最多 10 个汉字）”未明确混合词计数，客户端采用上述保守字节预算；不把它描述为厂商已保证的计数算法。
+- 实时 `/asr/v2/{appID}` 的 `hotword_list=词|5,词|5` 在 HMAC-SHA1 签名前加入原始参数，签名完成后统一 URL 编码。一句话 `SentenceRecognition` 的 JSON `HotwordList` 在序列化和 TC3 签名前加入，保持 `16k_zh-PY` 引擎。
+- `SessionCoordinator` 录音开始时的快照经 factory 传入对应 Provider，跨分段、实时续接及恢复保持一致；凭据验证默认无词典。空词典不发送字段。
+- 实时记录 `connection_prepared` / `connection_established` / `final_received`，HTTP 在 prepared 中记录 `hotword_count` 并保留 completed；不记录词正文、音频或带签名 URL。HTTP 服务端错误正文可能回显热词，因此只暴露有界错误代码或 HTTP 状态。
+- 官方依据：[实时 WebSocket](https://intl.cloud.tencent.com/zh/document/api/1118/53937)、[SentenceRecognition](https://cloud.tencent.com/document/api/1093/35646)。不创建、同步或引用云端词表，不新增 UI 或自动回退。

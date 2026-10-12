@@ -63,7 +63,7 @@ enum VolcengineRealtimeMode: Sendable, Equatable {
 }
 
 enum RealtimeCloudASRConfiguration: Sendable {
-    case tencent(appID: String, secretID: String, secretKey: String)
+    case tencent(appID: String, secretID: String, secretKey: String, hotwords: ASRHotwords = .empty)
     case aliyun(accessKeyID: String, accessKeySecret: String, appKey: String)
     case bailian(apiKey: String, endpoint: URL, model: String, hotwords: ASRHotwords = .empty)
     case volcengine(apiKey: String, resourceID: String = "volc.bigasr.sauc.duration", mode: VolcengineRealtimeMode = .streaming, hotwords: ASRHotwords = .empty)

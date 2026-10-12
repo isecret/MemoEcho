@@ -16,7 +16,7 @@ struct ASRProviderFactory {
     static func makeSentenceProvider(for config: ASRConfig, hotwords: ASRHotwords = .empty) -> (any ASRProvider & CloudASRValidating)? {
         switch config.selectedPlatform {
         case .tencentCloudSentence:
-            TencentSentenceASRProvider(secretId: config.tencentCloud.secretId, secretKey: config.tencentCloud.secretKey)
+            TencentSentenceASRProvider(secretId: config.tencentCloud.secretId, secretKey: config.tencentCloud.secretKey, hotwords: hotwords)
         case .aliyunBailianHTTPASR:
             AliyunBailianHTTPASRProvider(config: config.aliyunBailianHTTP, hotwords: hotwords)
         case .volcengineSentence:
@@ -32,7 +32,7 @@ struct ASRProviderFactory {
         switch config.selectedPlatform {
         case .tencentCloudRealtime:
             return .tencent(appID: config.tencentCloud.appID, secretID: config.tencentCloud.secretId,
-                            secretKey: config.tencentCloud.secretKey)
+                            secretKey: config.tencentCloud.secretKey, hotwords: hotwords)
         case .aliyunRealtime:
             return .aliyun(accessKeyID: config.aliyun.accessKeyId, accessKeySecret: config.aliyun.accessKeySecret,
                            appKey: config.aliyun.appKey)

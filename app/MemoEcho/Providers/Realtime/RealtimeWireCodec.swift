@@ -26,7 +26,7 @@ struct RealtimeWireCodec: Sendable {
         let timestamp = String(Int(now.timeIntervalSince1970))
         var request: URLRequest
         switch configuration {
-        case .tencent(let appID, let secretID, let secretKey):
+        case .tencent(let appID, let secretID, let secretKey, let hotwords):
             guard !appID.isEmpty, appID.allSatisfy(\.isNumber), !secretID.isEmpty, !secretKey.isEmpty else { throw RealtimeASRError.configuration }
             let hostPath = "asr.cloud.tencent.com/asr/v2/\(appID)"
             var params = ["secretid": secretID, "timestamp": timestamp,
@@ -34,6 +34,7 @@ struct RealtimeWireCodec: Sendable {
                           "nonce": String(UInt32.random(in: 1...UInt32.max)),
                           "engine_model_type": "16k_zh", "voice_id": String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)),
                           "voice_format": "1", "needvad": "1", "filter_empty_result": "0"]
+            if let list = hotwords.tencentList() { params["hotword_list"] = list }
             let raw = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
             params["signature"] = hmacSHA1(secretKey, hostPath + "?" + raw)
             request = URLRequest(url: try signedURL("wss://" + hostPath, params))
