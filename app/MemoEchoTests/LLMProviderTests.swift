@@ -110,6 +110,57 @@ final class LLMProviderTests: XCTestCase {
     }
 
     @MainActor
+    func testMaskedDisabledThinkingRejectionRetriesAndCachesCompatibility() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ConfigStore(configDirectory: directory)
+        let config = LLMConfig(baseURL: "https://example.invalid", model: "test")
+        try store.saveLLMConfig(config, apiKey: "synthetic")
+        let network = ContextRequestRecorder(rejectThinking: true,
+            rejectionMessage: #"{"error":{"message":"***.type `disabled` is not supported by this model","type":"BadRequest","code":"InvalidParameter"}}"#)
+        let provider = LLMProvider(baseURL: config.baseURL, apiKey: "synthetic", model: config.model,
+            omitThinkingParameter: store.omitThinkingParameter,
+            onThinkingUnsupported: { try? store.markThinkingParameterUnsupported(for: config, apiKey: "synthetic") },
+            requestSender: { try await network.send($0) })
+
+        try await provider.validateConfiguration()
+        XCTAssertTrue(store.omitThinkingParameter)
+        let cachedProvider = LLMProvider(baseURL: config.baseURL, apiKey: "synthetic", model: config.model,
+            omitThinkingParameter: store.omitThinkingParameter, requestSender: { try await network.send($0) })
+        let result = try await cachedProvider.polish(text: "合成测试")
+        XCTAssertEqual(result.text, "result")
+        let bodies = await network.bodies
+        XCTAssertEqual(bodies.count, 3)
+        let thinkingParameters = try bodies.map {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+            return json["thinking"] != nil
+        }
+        XCTAssertEqual(thinkingParameters, [true, false, false])
+    }
+
+    @MainActor
+    func testUnrelatedNotSupportedErrorsDoNotRetryOrCacheThinkingCompatibility() async throws {
+        for message in ["model is not supported", "response_format.type `json_schema` is not supported by this model"] {
+            let network = ContextRequestRecorder(rejectThinking: true, rejectionMessage: message)
+            var cachedCompatibility = false
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: false, onThinkingUnsupported: { cachedCompatibility = true },
+                requestSender: { try await network.send($0) })
+            do {
+                try await provider.validateConfiguration()
+                XCTFail("Unrelated HTTP 400 must fail without retrying")
+            } catch let error as MemoEchoError {
+                guard case .llmNetworkFailure(message: "HTTP 400") = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+            let bodies = await network.bodies
+            XCTAssertEqual(bodies.count, 1)
+            XCTAssertFalse(cachedCompatibility)
+        }
+    }
+
+    @MainActor
     func testThinkingFallbackRechecksContextSwitchBeforeSending() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -222,14 +273,18 @@ private final class RequestMetricsRecorder: @unchecked Sendable {
 private actor ContextRequestRecorder {
     var bodies: [String] = []
     let rejectThinking: Bool
-    init(rejectThinking: Bool = false) { self.rejectThinking = rejectThinking }
+    let rejectionMessage: String
+    init(rejectThinking: Bool = false, rejectionMessage: String = "unsupported thinking") {
+        self.rejectThinking = rejectThinking
+        self.rejectionMessage = rejectionMessage
+    }
 
     func send(_ request: URLRequest) throws -> (Data, URLResponse) {
         bodies.append(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "")
         let failure = rejectThinking && bodies.count == 1
         let response = HTTPURLResponse(url: request.url!, statusCode: failure ? 400 : 200,
                                        httpVersion: nil, headerFields: nil)!
-        if failure { return (Data("unsupported thinking".utf8), response) }
+        if failure { return (Data(rejectionMessage.utf8), response) }
         let content = #"{"mode":"plain_text","text":"result","correction_applied":false}"#
         let data = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]])
         return (data, response)

@@ -330,7 +330,7 @@
 - 使用固定 Prompt 生成 Chat Completions 请求
 - 默认优先发送 `thinking: { "type": "disabled" }` 关闭长思考
 - 若 state.json 的当前配置指纹命中不支持 thinking 参数的能力缓存，则直接发送普通请求
-- 若上游明确返回 `thinking` 字段不支持，则回退一次普通请求，并将当前配置的 SHA-256 指纹写入 `~/.memoecho/state.json` 的 `llmWithoutThinkingParameter`
+- 若上游明确返回 `thinking` 字段或其 `disabled` 值不支持（含网关将字段名脱敏成 `***.type` 的错误），则回退一次普通请求，并将当前配置的 SHA-256 指纹写入 `~/.memoecho/state.json` 的 `llmWithoutThinkingParameter`；普通 `not supported` 错误不触发此兼容重试
 - 返回保守型结构化处理后的最终文本
 - 解析结构化 JSON 结果；格式错误时直接报错
 - 不支持独立 `message` 模式；短消息口述、回复口述、转发口述统一保持 `plain_text`

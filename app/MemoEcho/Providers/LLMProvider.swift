@@ -483,7 +483,13 @@ struct LLMProvider: Sendable {
 
     private func shouldRetryWithoutThinking(message: String) -> Bool {
         let lowered = message.lowercased()
+        // Some gateways redact thinking as "***.type" while retaining the rejected value.
+        // Require the type and disabled value together, not a generic "not supported" error.
+        let rejectsDisabledType = lowered.contains(".type")
+            && lowered.contains("`disabled`")
+            && lowered.contains("not supported")
         return lowered.contains("thinking")
+            || rejectsDisabledType
             || lowered.contains("unsupported")
             || lowered.contains("unknown parameter")
             || lowered.contains("unknown field")
