@@ -73,6 +73,11 @@ final class SessionCoordinator {
         audioRecorder.currentLevel()
     }
 
+    /// Settings may resume its meter as soon as cancellation updates UI, before the old mic closes.
+    func waitForCaptureClose() async {
+        if let captureDrainTask { _ = await captureDrainTask.value }
+    }
+
     private let audioRecorder: any AudioRecording
     private let audioPreprocessor = AudioPreprocessor()
     private let permissionsManager: PermissionsManager
@@ -87,7 +92,13 @@ final class SessionCoordinator {
     private let recoveryLifetime: TimeInterval
     private let recoveryProcessorFactory: ((SessionRecoveryCheckpoint) -> SessionRecoveryProcessor)?
     private var targetInput: TextInjectionFocus?
-    private let windowContextService = WindowContextService()
+    private let windowContextService: WindowContextService
+    private let clock: PipelineClock
+    private var latencyTimeline: SessionLatencyTimeline?
+    private(set) var lastLatencyDiagnostics: SessionLatencySnapshot?
+    var onLatencyMilestone: (@MainActor @Sendable (String, SessionLatencyTimeline.Milestone, SessionLatencySnapshot) -> Void)?
+    private var windowContextReadyAt: ContinuousClock.Instant?
+    private let promptTermIndex = LLMTermIndexWarmer()
     private let diagnostics = DiagnosticsLogger.shared
 
     /// SenseVoice 运行时管理器，跨 session 复用
@@ -100,6 +111,12 @@ final class SessionCoordinator {
     private var recordingStartTask: Task<Void, Never>?
     private var soundCueTask: Task<Void, Never>?
     private var recordingStopTask: Task<Void, Never>?
+    /// Physical close survives UI/task cancellation and is awaited before configuring another capture.
+    private var captureDrainTask: Task<AudioRecordingResult, Never>?
+    private var captureHasDrained = false
+    private var closedCaptureMetadata = AudioRecordingResult(data: Data(), durationMs: 0)
+    private var captureGeneration: UInt64?
+    var beforeCaptureStart: (@MainActor @Sendable () async -> Void)?
     private var sessionGeneration: UInt64 = 0
     private(set) var currentSessionID: String = ""
     private var processingMode: TextProcessingMode = .polish
@@ -117,8 +134,7 @@ final class SessionCoordinator {
     private var segmentContinuation: AsyncStream<SealedSegment>.Continuation?
     /// 录音时长（毫秒），finishRecording 写入，processSegmentedAudio 读取
     private var recordingDurationMs: Int = 0
-    private var recordingStoppedAt: Date?
-    private var recordingStopRequestedAt: Date?
+    private var recordingStopRequestedAt: ContinuousClock.Instant?
     private var capturedWindowContext: WindowContextSnapshot?
     private let ensureMicrophoneAuthorized: @MainActor @Sendable () throws -> Void
     private let ensureAccessibilityAuthorized: @MainActor @Sendable () throws -> Void
@@ -136,8 +152,12 @@ final class SessionCoordinator {
         recoveryLifetime: TimeInterval = 600,
         recoveryProcessorFactory: ((SessionRecoveryCheckpoint) -> SessionRecoveryProcessor)? = nil,
         asrProviderOverride: ((ASRConfig, ASRHotwords) -> any ASRProvider)? = nil,
-        realtimeSessionFactory: (@Sendable (ASRConfig, ASRHotwords) throws -> any RealtimeASRSession)? = nil
+        realtimeSessionFactory: (@Sendable (ASRConfig, ASRHotwords) throws -> any RealtimeASRSession)? = nil,
+        clock: PipelineClock = .live,
+        windowContextService: WindowContextService = WindowContextService()
     ) {
+        self.clock = clock
+        self.windowContextService = windowContextService
         self.realtimeSessionFactory = realtimeSessionFactory
         self.asrProviderOverride = asrProviderOverride
         self.textInjector = textInjector
@@ -193,8 +213,9 @@ final class SessionCoordinator {
 
         currentError = nil
         currentErrorRecoveryID = nil
-        recordingStoppedAt = nil
         recordingStopRequestedAt = nil
+        latencyTimeline = nil
+        lastLatencyDiagnostics = nil
         recordingWarning = nil
         lastRecordedAudio = nil
         targetInput = nil
@@ -209,6 +230,7 @@ final class SessionCoordinator {
         let recordingConfig = configStore.asrConfig
         let selectedPlatform = recordingConfig.selectedPlatform
         let hotwords = ASRHotwords(terms: dictionaryStore?.entries.map(\.term) ?? [], platform: selectedPlatform)
+        promptTermIndex.prepare(dictionaryStore?.termsForPrompt() ?? [])
         recordingHotwords = hotwords
         let sessionID = currentSessionID
         let targetBundleID = targetApplicationBundleID
@@ -274,6 +296,14 @@ final class SessionCoordinator {
         guard generation == sessionGeneration, state == .recording else { return }
 
         do {
+            if let captureDrainTask { _ = await captureDrainTask.value }
+            guard !Task.isCancelled, generation == sessionGeneration, state == .recording else { return }
+            await beforeCaptureStart?()
+            guard !Task.isCancelled, generation == sessionGeneration, state == .recording else { return }
+            captureDrainTask = nil
+            captureHasDrained = false
+            closedCaptureMetadata = .init(data: Data(), durationMs: 0)
+            captureGeneration = generation
             let realtimeFactory = realtimeSessionFactory
             let realtime: RealtimeRecognitionPipeline? = selectedPlatform.isRealtime
                 ? RealtimeRecognitionPipeline(sessionID: sessionID) {
@@ -310,8 +340,8 @@ final class SessionCoordinator {
             )
             guard !Task.isCancelled, generation == sessionGeneration, state == .recording else {
                 if generation == sessionGeneration {
-                    _ = audioRecorder.stopRecording()
-                    cleanupSegmenterState()
+                    _ = await drainCapture().value
+                    if generation == sessionGeneration { cleanupSegmenterState() }
                 }
                 return
             }
@@ -366,14 +396,38 @@ final class SessionCoordinator {
             }
         } catch {
             guard !Task.isCancelled, generation == sessionGeneration else { return }
+            _ = await drainCapture().value
+            guard !Task.isCancelled, generation == sessionGeneration else { return }
+            cleanupSegmenterState()
             handleError(mapError(error))
         }
+    }
+
+    private func drainCapture() -> Task<AudioRecordingResult, Never> {
+        if let captureDrainTask { return captureDrainTask }
+        if captureHasDrained { return Task { [closedCaptureMetadata] in closedCaptureMetadata } }
+        let generation = sessionGeneration
+        let task = Task { [weak self, audioRecorder] in
+            let result = await audioRecorder.stopRecording()
+            self?.markCurrentLatency(.captureClosed, generation: generation)
+            // Keep duration for concurrent failure handling, but release the full WAV after its caller consumes it.
+            self?.closedCaptureMetadata = .init(data: Data(), durationMs: result.durationMs, sampleCount: result.sampleCount)
+            self?.captureHasDrained = true
+            self?.captureDrainTask = nil
+            return result
+        }
+        captureDrainTask = task
+        return task
+    }
+
+    private var isCaptureClosing: Bool {
+        captureGeneration == sessionGeneration && (captureDrainTask != nil || captureHasDrained)
     }
 
     private func handleCaptureEvent(_ event: AudioCaptureEvent) {
         switch event {
         case .signalMissing, .signalRestored:
-            guard recordingStopTask == nil else { return }
+            guard recordingStopTask == nil, !isCaptureClosing else { return }
             recordingWarning = event == .signalMissing ? "没收到声音，请检查麦克风" : nil
             onFeedbackEvent?(.recordingSignalChanged(missing: event == .signalMissing))
         case .interrupted(let reason):
@@ -392,24 +446,33 @@ final class SessionCoordinator {
             soundCueTask = nil
             processingTask?.cancel()
             processingTask = nil
-            let stopped = audioRecorder.stopRecording()
-            recordingDurationMs = stopped.durationMs
-            segmenter.finalize()
-            let snapshot = recordingRecoveryBuffer?.snapshot()
-            discardRecovery()
-            if !isOnboardingTrial, let snapshot,
-               !snapshot.segments.isEmpty || !snapshot.transcripts.isEmpty {
-                let checkpoint = SessionRecoveryCheckpoint(segments: snapshot.segments, transcripts: snapshot.transcripts,
-                    mode: processingMode, language: configStore.generalConfig.translationTargetLanguage,
-                    asrPlatform: recordingASRPlatform, target: targetInput,
-                    context: configStore.windowContextEnabled ? capturedWindowContext : nil, hotwords: recordingHotwords)
-                checkpoint.isPartialRecording = true
-                retainRecovery(checkpoint)
+            let generation = sessionGeneration
+            let drain = drainCapture()
+            recordingStopTask = Task { [weak self] in
+                let stopped = await drain.value
+                guard let self, !Task.isCancelled, self.sessionGeneration == generation else { return }
+                self.completeCaptureInterruption(reason, stopped: stopped)
             }
-            cleanupSegmenterState()
-            diagnostics.log(sessionID: currentSessionID, event: "recording_interrupted", detail: reason.rawValue)
-            handleError(.audioCaptureInterrupted(reason))
         }
+    }
+
+    private func completeCaptureInterruption(_ reason: AudioCaptureInterruption, stopped: AudioRecordingResult) {
+        recordingDurationMs = stopped.durationMs
+        segmenter.finalize()
+        let snapshot = recordingRecoveryBuffer?.snapshot()
+        discardRecovery()
+        if !isOnboardingTrial, let snapshot,
+           !snapshot.segments.isEmpty || !snapshot.transcripts.isEmpty {
+            let checkpoint = SessionRecoveryCheckpoint(segments: snapshot.segments, transcripts: snapshot.transcripts,
+                mode: processingMode, language: configStore.generalConfig.translationTargetLanguage,
+                asrPlatform: recordingASRPlatform, target: targetInput,
+                context: configStore.windowContextEnabled ? capturedWindowContext : nil, hotwords: recordingHotwords)
+            checkpoint.isPartialRecording = true
+            retainRecovery(checkpoint)
+        }
+        cleanupSegmenterState()
+        diagnostics.log(sessionID: currentSessionID, event: "recording_interrupted", detail: reason.rawValue)
+        handleError(.audioCaptureInterrupted(reason))
     }
 
     var recoveryActionTitle: String? {
@@ -419,44 +482,45 @@ final class SessionCoordinator {
 
     /// 结束录音并开始处理链路
     func finishRecording() {
-        guard state == .recording, recordingStopTask == nil else { return }
-        recordingStopRequestedAt = Date()
+        guard state == .recording, recordingStopTask == nil, !isCaptureClosing else { return }
+        recordingStopRequestedAt = clock.now()
+        latencyTimeline = SessionLatencyTimeline(origin: .recordingStop,
+            path: recordingASRPlatform.isRealtime ? .realtime : .segmented, startedAt: recordingStopRequestedAt!)
         diagnostics.log(sessionID: currentSessionID, event: "recording_stop_requested")
 
         let pendingStart = recordingStartTask
         soundCueTask?.cancel()
         soundCueTask = nil
 
-        // Short captures remain silent and close immediately. Valid captures
-        // play End first and keep input open for 100ms, matching Typeless.
-        guard audioRecorder.currentDurationMs >= 500 else {
+        let generation = sessionGeneration
+        let hadCapture = captureGeneration == generation
+        let shortCapture = audioRecorder.currentDurationMs < 500 || !hadCapture
+        // Short captures remain silent. End still precedes the unchanged 100ms tail window.
+        if shortCapture {
             recordingStartTask?.cancel()
             recordingStartTask = nil
-            completeRecordingStop(audioRecorder.stopRecording())
-            return
+        } else {
+            onFeedbackEvent?(.recordingStopped)
         }
-        onFeedbackEvent?(.recordingStopped)
-        let generation = sessionGeneration
+        // Reserve the stop slot synchronously, before the first suspension.
+        let immediateDrain = shortCapture ? drainCapture() : nil
         recordingStopTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(100)) }
-            catch { return }
-            // Samples can arrive before startRecording returns. Keep that start alive
-            // for a valid capture, so it installs the ASR consumer before we seal input.
-            await pendingStart?.value
+            if !shortCapture {
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return }
+                await pendingStart?.value
+            }
             guard !Task.isCancelled, let self, self.sessionGeneration == generation,
                   self.state == .recording else { return }
+            let result = await (immediateDrain ?? self.drainCapture()).value
+            guard !Task.isCancelled, self.sessionGeneration == generation, self.state == .recording else { return }
             self.recordingStopTask = nil
-            self.completeRecordingStop(self.audioRecorder.stopRecording())
+            self.completeRecordingStop(hadCapture ? result : .init(data: Data(), durationMs: 0))
         }
     }
 
     private func completeRecordingStop(_ recordingResult: AudioRecordingResult) {
         let audioData = recordingResult.data
-        recordingStoppedAt = Date()
-        if let requested = recordingStopRequestedAt {
-            diagnostics.log(sessionID: currentSessionID, event: "capture_closed",
-                detail: "stop_request_to_capture_closed_ms=\(Int(Date().timeIntervalSince(requested) * 1000))")
-        }
 
         // 短录音静默取消（<500ms）：先取消处理任务，再清理流
         if recordingResult.isShortRecording {
@@ -522,7 +586,7 @@ final class SessionCoordinator {
             sessionGeneration &+= 1
             processingTask?.cancel()
             processingTask = nil
-            _ = audioRecorder.stopRecording()
+            _ = drainCapture()
             clearWindowContextCapture()
             cancelPostInjectionLearning()
             cleanupSegmenterState()
@@ -559,7 +623,7 @@ final class SessionCoordinator {
 
     /// 切换当前录音 session 的文本处理模式（仅在录音态生效）
     func toggleProcessingMode() {
-        guard state == .recording, recordingStopTask == nil else { return }
+        guard state == .recording, recordingStopTask == nil, !isCaptureClosing else { return }
         processingMode = (processingMode == .polish) ? .translate : .polish
         diagnostics.log(sessionID: currentSessionID, event: "processing_mode_changed", detail: processingMode.rawValue)
         onFeedbackEvent?(.modeSwitched(processingMode))
@@ -570,13 +634,13 @@ final class SessionCoordinator {
         do {
             let texts = try await pipeline.run()
             guard sessionGeneration == generation, !Task.isCancelled else { return }
+            markCurrentLatency(.asrFinal, generation: generation)
             realtimePipeline = nil
-            let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: texts, asrPlatform: platform, hotwords: hotwords)
+            let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: texts, asrPlatform: platform, hotwords: hotwords, generation: generation)
             guard sessionGeneration == generation, !Task.isCancelled else { checkpoint.discard(); return }
             var diag = SessionDiagnostics()
             diag.recordingMs = recordingDurationMs
-            diag.asrMs = max(0, Int(Date().timeIntervalSince(recordingStoppedAt ?? Date()) * 1000))
-            diag.totalMs = diag.asrMs ?? 0
+            diag = diagnosticsForCurrentAttempt(diag, generation: generation)
             diag.targetBundleID = targetApplicationBundleID
             await runCheckpoint(checkpoint, generation: generation, sessionID: sessionID, diagnostics: diag)
         } catch {
@@ -587,7 +651,9 @@ final class SessionCoordinator {
                 recordingStopTask = nil
                 soundCueTask?.cancel()
                 soundCueTask = nil
-                recordingDurationMs = audioRecorder.stopRecording().durationMs
+                let stopped = await drainCapture().value
+                guard sessionGeneration == generation, !Task.isCancelled else { return }
+                recordingDurationMs = stopped.durationMs
                 pipeline.input.finish()
             }
             let snapshot = await pipeline.snapshot()
@@ -597,7 +663,7 @@ final class SessionCoordinator {
                !snapshot.audio.processedPCM.isEmpty || !snapshot.audio.rawPCM.isEmpty || !snapshot.transcripts.isEmpty {
                 if case .transcriptTooLong = mapped {} else {
                     let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: snapshot.transcripts,
-                                                                   asrPlatform: platform, hotwords: hotwords)
+                                                                   asrPlatform: platform, hotwords: hotwords, generation: generation)
                     guard sessionGeneration == generation, !Task.isCancelled else { checkpoint.discard(); return }
                     if !snapshot.audio.processedPCM.isEmpty || !snapshot.audio.rawPCM.isEmpty {
                         checkpoint.realtimeAudio = snapshot.audio
@@ -624,7 +690,6 @@ final class SessionCoordinator {
         recoveryBuffer: RecordingRecoveryBuffer,
         hotwords: ASRHotwords
     ) async {
-        let sessionStart = Date()
         var diag = SessionDiagnostics()
         diag.targetBundleID = await MainActor.run { targetApplicationBundleID }
 
@@ -692,7 +757,7 @@ final class SessionCoordinator {
             )
 
             // 降噪
-            let denoiseStart = Date()
+            let denoiseStart = clock.now()
             let processedAudio: Data
             do {
                 processedAudio = try audioPreprocessor.denoise(wavData: wavData)
@@ -701,7 +766,7 @@ final class SessionCoordinator {
                 // 降噪失败时使用原始音频
                 processedAudio = wavData
             }
-            let denoiseMs = Int(Date().timeIntervalSince(denoiseStart) * 1000)
+            let denoiseMs = clock.milliseconds(since: denoiseStart)
             totalDenoiseMs += denoiseMs
 
             guard await MainActor.run(body: { sessionGeneration }) == generation,
@@ -710,7 +775,7 @@ final class SessionCoordinator {
             // ASR 识别（动态超时：按 AGENTS.md 规范 min(90s, max(15s, duration * 1.3 + 10s))）
             let dynamicTimeout = min(90.0, max(15.0, segment.durationSeconds * 1.3 + 10.0))
             diagnostics.log(sessionID: sessionID, event: "segment_asr_started", detail: "index=\(segment.index) duration=\(Int(segment.durationSeconds * 1000))ms timeout=\(Int(dynamicTimeout))s")
-            let asrStart = Date()
+            let asrStart = clock.now()
             let transcriptResult: TranscriptResult
             do {
                 transcriptResult = try await asrProvider.recognize(audioData: processedAudio, timeout: dynamicTimeout)
@@ -724,10 +789,10 @@ final class SessionCoordinator {
                 guard await MainActor.run(body: { sessionGeneration }) == generation,
                       !Task.isCancelled else { return }
                 let mapped = await MainActor.run { mapError(error) }
-                let asrMs = Int(Date().timeIntervalSince(asrStart) * 1000)
-                diag.asrMs = totalASRMs + asrMs
+                let asrMs = clock.milliseconds(since: asrStart)
+                diag.asrWorkMs = totalASRMs + asrMs
                 diag.denoiseMs = totalDenoiseMs
-                diag.totalMs = Int(Date().timeIntervalSince(sessionStart) * 1000)
+                diag = await diagnosticsForCurrentAttempt(diag, generation: generation)
                 diag.errorClassification = mapped.diagnosticClassification
                 diag.segmentCount = segmentCount
                 diag.segmentDiagnostics = segmentDiagList
@@ -736,10 +801,7 @@ final class SessionCoordinator {
                 firstASRError = mapped
                 failedSegments.append(segment)
                 // Seal the already-recorded tail before draining the stream into recovery.
-                await MainActor.run {
-                    guard sessionGeneration == generation, !Task.isCancelled else { return }
-                    sealRecordingAfterRecognitionFailure()
-                }
+                await sealRecordingAfterRecognitionFailure(generation: generation)
                 continue
             }
 
@@ -749,7 +811,7 @@ final class SessionCoordinator {
                 return true
             }
             guard accepted else { return }
-            let asrMs = Int(Date().timeIntervalSince(asrStart) * 1000)
+            let asrMs = clock.milliseconds(since: asrStart)
             totalASRMs += asrMs
 
             let segDiag = SegmentDiagnostics(
@@ -771,25 +833,16 @@ final class SessionCoordinator {
 
             // 检查累计字符数
             if accumulatedChars > maxChars {
-                diag.asrMs = totalASRMs
+                diag.asrWorkMs = totalASRMs
                 diag.denoiseMs = totalDenoiseMs
-                diag.totalMs = Int(Date().timeIntervalSince(sessionStart) * 1000)
+                diag = await diagnosticsForCurrentAttempt(diag, generation: generation)
                 diag.segmentCount = segmentCount
                 diag.segmentDiagnostics = segmentDiagList
                 let tooLongError = MemoEchoError.transcriptTooLong(charCount: accumulatedChars)
                 diag.errorClassification = tooLongError.diagnosticClassification
                 diagnostics.sessionError(sessionID: sessionID, error: tooLongError)
                 diagnostics.sessionEnded(sessionID: sessionID, result: diag)
-                await MainActor.run {
-                    guard sessionGeneration == generation, !Task.isCancelled else { return }
-                    if state == .recording {
-                        soundCueTask?.cancel()
-                        soundCueTask = nil
-                        _ = audioRecorder.stopRecording()
-                        cleanupSegmenterState()
-                    }
-                    handleError(tooLongError)
-                }
+                await stopRecordingForTranscriptLimit(tooLongError, generation: generation)
                 return
             }
         }
@@ -799,13 +852,14 @@ final class SessionCoordinator {
         guard await MainActor.run(body: { sessionGeneration }) == generation,
               !Task.isCancelled else { return }
 
+        if firstASRError == nil { await markCurrentLatency(.asrFinal, generation: generation) }
         await MainActor.run {
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             lastRecordedAudio = nil
             cleanupSegmenterState()
         }
         let checkpoint = await makeRecoveryCheckpoint(segments: failedSegments, transcripts: transcripts,
-                                                       asrPlatform: selectedPlatform, hotwords: hotwords)
+                                                       asrPlatform: selectedPlatform, hotwords: hotwords, generation: generation)
         if let firstASRError {
             await MainActor.run {
                 guard sessionGeneration == generation, !Task.isCancelled else { return }
@@ -814,38 +868,59 @@ final class SessionCoordinator {
             }
             return
         }
-        diag.asrMs = totalASRMs
+        diag.asrWorkMs = totalASRMs
         diag.denoiseMs = totalDenoiseMs
         diag.segmentCount = segmentCount
         diag.segmentDiagnostics = segmentDiagList
         diag.recordingMs = await MainActor.run { recordingDurationMs }
         diagnostics.log(sessionID: sessionID, event: "asr_completed",
                         detail: "chars=\(transcripts.joined().count) cold=\(wasColdStart)")
-        diag.totalMs = Int(Date().timeIntervalSince(sessionStart) * 1000)
+        diag = await diagnosticsForCurrentAttempt(diag, generation: generation)
         await runCheckpoint(checkpoint, generation: generation, sessionID: sessionID, diagnostics: diag)
     }
 
     private func makeRecoveryCheckpoint(segments: [SealedSegment], transcripts: [String],
-                                        asrPlatform: ASRPlatform, hotwords: ASRHotwords) async -> SessionRecoveryCheckpoint {
+                                        asrPlatform: ASRPlatform, hotwords: ASRHotwords,
+                                        generation: UInt64) async -> SessionRecoveryCheckpoint {
+        let waitStarted = clock.now()
         await windowContextTask?.value
+        if generation == sessionGeneration {
+            latencyTimeline?.contextWaitMs += clock.milliseconds(since: waitStarted)
+            markCurrentLatency(.contextReady, generation: generation, at: windowContextReadyAt ?? latencyTimeline?.startedAt ?? clock.now())
+        }
         return .init(segments: segments, transcripts: transcripts, mode: processingMode,
               language: configStore.generalConfig.translationTargetLanguage, asrPlatform: asrPlatform,
               target: targetInput, context: configStore.windowContextEnabled ? capturedWindowContext : nil, hotwords: hotwords)
     }
 
     /// Called after an ASR error, including during the final 100ms sound delay.
-    private func sealRecordingAfterRecognitionFailure() {
-        guard state == .recording else { return }
+    private func sealRecordingAfterRecognitionFailure(generation: UInt64) async {
+        guard generation == sessionGeneration, !Task.isCancelled, state == .recording else { return }
         recordingStopTask?.cancel()
         recordingStopTask = nil
         soundCueTask?.cancel()
         soundCueTask = nil
-        let stopped = audioRecorder.stopRecording()
+        let stopped = await drainCapture().value
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         recordingDurationMs = stopped.durationMs
         lastRecordedAudio = nil
         segmenter.finalize()
         segmentContinuation?.finish()
         state = .transcribing
+    }
+
+    private func stopRecordingForTranscriptLimit(_ error: MemoEchoError, generation: UInt64) async {
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
+        if state == .recording {
+            recordingStopTask?.cancel()
+            recordingStopTask = nil
+            soundCueTask?.cancel()
+            soundCueTask = nil
+            _ = await drainCapture().value
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
+            cleanupSegmenterState()
+        }
+        handleError(error)
     }
 
     var recoveryNeedsSettings: Bool {
@@ -915,6 +990,9 @@ final class SessionCoordinator {
         recoveryOwnerGeneration = generation
         currentSessionID = Self.generateSessionID()
         let sessionID = currentSessionID
+        latencyTimeline = SessionLatencyTimeline(origin: .recoveryAttempt, path: .recovery, startedAt: clock.now())
+        lastLatencyDiagnostics = nil
+        markCurrentLatency(.contextReady, generation: generation)
         textOutput = .focusedApplication
         currentError = nil
         currentErrorRecoveryID = nil
@@ -942,15 +1020,21 @@ final class SessionCoordinator {
         let llmConfig = configStore.llmConfig
         let apiKey = configStore.openAIAPIKey
         let isConfigured = configStore.isLLMConfigured
+        let terms = dictionaryStore?.termsForPrompt() ?? []
+        let sessionID = currentSessionID
+        let logger = diagnostics
+        promptTermIndex.prepare(terms)
         let llm = LLMProvider(baseURL: llmConfig.baseURL, apiKey: apiKey, model: llmConfig.model,
                               omitThinkingParameter: configStore.omitThinkingParameter,
-                              dictionaryTerms: dictionaryStore?.termsForPrompt() ?? [],
+                              dictionaryTerms: terms,
+                              preparedTermIndex: promptTermIndex.ready(for: terms),
                               onThinkingUnsupported: { [weak self] in
             guard let self, self.sessionGeneration == generation, self.configStore.llmConfig.baseURL == llmConfig.baseURL,
                   self.configStore.llmConfig.model == llmConfig.model,
                   self.configStore.openAIAPIKey == apiKey else { return }
             try? self.configStore.markThinkingParameterUnsupported(for: llmConfig, apiKey: apiKey)
-        }, windowContextEnabled: { [configStore] in configStore.windowContextEnabled })
+        }, onRequestMetrics: { metrics in logger.llmRequest(sessionID: sessionID, metrics: metrics) },
+        windowContextEnabled: { [configStore] in configStore.windowContextEnabled })
         let preprocessor = audioPreprocessor
         var processor = SessionRecoveryProcessor(recognize: { segment in
             let audio = await Task.detached {
@@ -984,23 +1068,29 @@ final class SessionCoordinator {
         var diag = initial
         let recoveryAttempt = isRecovering
         diagnostics.log(sessionID: sessionID, event: "recovery_attempt", detail: recoveryAttempt ? "1" : "0")
-        let start = Date()
-        var stageStart = start
+        let attemptTimeline = latencyTimeline
+        var stageStart = clock.now()
         var activeStage: SessionRecoveryCheckpoint.Stage?
         func finishStageTiming() {
-            let elapsed = Int(Date().timeIntervalSince(stageStart) * 1000)
+            let elapsed = clock.milliseconds(since: stageStart)
             switch activeStage {
-            case .recognition: diag.asrMs = (diag.asrMs ?? 0) + elapsed
+            case .recognition: diag.asrWorkMs = (diag.asrWorkMs ?? 0) + elapsed
             case .polish, .translation: diag.llmMs = (diag.llmMs ?? 0) + elapsed
             case .output: diag.injectionMs = (diag.injectionMs ?? 0) + elapsed
             case nil: break
             }
-            stageStart = Date()
+            stageStart = clock.now()
         }
         do {
             let processor = makeRecoveryProcessor(checkpoint)
             let text = try await processor.process(checkpoint, shouldContinue: { self.sessionGeneration == generation }, onStage: { stage in
                 finishStageTiming()
+                if activeStage == .recognition, stage != .recognition {
+                    self.markCurrentLatency(.asrFinal, generation: generation)
+                }
+                if stage == .output, activeStage == .polish || activeStage == .translation {
+                    self.markCurrentLatency(.llmComplete, generation: generation)
+                }
                 activeStage = stage
                 self.state = stage == .recognition ? .transcribing : .polishing
                 self.diagnostics.log(sessionID: sessionID, event: "processing_stage", detail: stage.rawValue)
@@ -1016,8 +1106,15 @@ final class SessionCoordinator {
                                                onOutputAttempt: { checkpoint.outputAttempted = true },
                                                onOutputDispatched: {
                     outputFeedbackSent = true
+                    self.emitLatency(.dispatched, timeline: attemptTimeline, generation: generation, sessionID: sessionID)
                     self.onFeedbackEvent?(.outputDispatched)
+                }, onCleanupCompleted: {
+                    self.emitLatency(.cleanupComplete, timeline: attemptTimeline, generation: generation, sessionID: sessionID)
                 })
+            }
+            if result == nil {
+                emitLatency(.dispatched, timeline: attemptTimeline, generation: generation, sessionID: sessionID)
+                emitLatency(.cleanupComplete, timeline: attemptTimeline, generation: generation, sessionID: sessionID)
             }
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             if let result { diagnostics.injectionCompleted(sessionID: sessionID, path: result.path, breakdown: result.breakdown) }
@@ -1035,12 +1132,8 @@ final class SessionCoordinator {
             clearWindowContextCapture()
             state = .done
             finishStageTiming()
-            diag.totalMs = initial.totalMs + Int(Date().timeIntervalSince(start) * 1000)
+            diag = diagnosticsForCurrentAttempt(diag, generation: generation)
             diagnostics.sessionEnded(sessionID: sessionID, result: diag)
-            if !recoveryAttempt, let stopped = recordingStopRequestedAt {
-                diagnostics.log(sessionID: sessionID, event: "stop_to_injection",
-                    detail: "stop_to_injection_ms=\(Int(Date().timeIntervalSince(stopped) * 1000))")
-            }
             if !outputFeedbackSent {
                 onFeedbackEvent?(.processingFinished)
             }
@@ -1062,12 +1155,40 @@ final class SessionCoordinator {
             }
             isRecovering = false
             finishStageTiming()
-            diag.totalMs = initial.totalMs + Int(Date().timeIntervalSince(start) * 1000)
+            diag = diagnosticsForCurrentAttempt(diag, generation: generation)
             diag.errorClassification = mapped.diagnosticClassification
             diagnostics.sessionError(sessionID: sessionID, error: mapped)
             diagnostics.sessionEnded(sessionID: sessionID, result: diag)
             handleError(mapped, failedStage: checkpoint.stage)
         }
+    }
+
+    private func markCurrentLatency(_ milestone: SessionLatencyTimeline.Milestone, generation: UInt64,
+                                    at instant: ContinuousClock.Instant? = nil) {
+        guard generation == sessionGeneration else { return }
+        emitLatency(milestone, timeline: latencyTimeline, generation: generation,
+                    sessionID: currentSessionID, at: instant)
+    }
+
+    private func emitLatency(_ milestone: SessionLatencyTimeline.Milestone, timeline: SessionLatencyTimeline?,
+                             generation: UInt64, sessionID: String, at instant: ContinuousClock.Instant? = nil) {
+        guard let timeline else { return }
+        timeline.mark(milestone, at: instant ?? clock.now())
+        let snapshot = timeline.snapshot(at: clock.now())
+        if generation == sessionGeneration, timeline === latencyTimeline { lastLatencyDiagnostics = snapshot }
+        diagnostics.latencyMilestone(sessionID: sessionID, milestone: milestone, snapshot: snapshot)
+        onLatencyMilestone?(sessionID, milestone, snapshot)
+    }
+
+    private func diagnosticsForCurrentAttempt(_ initial: SessionDiagnostics, generation: UInt64) -> SessionDiagnostics {
+        guard generation == sessionGeneration, let latencyTimeline else { return initial }
+        var result = initial
+        let snapshot = latencyTimeline.snapshot(at: clock.now())
+        result.latency = snapshot
+        result.asrWaitMs = snapshot.asrWaitMs
+        result.totalMs = snapshot.elapsedMs
+        lastLatencyDiagnostics = snapshot
+        return result
     }
 
     // MARK: - Segmenter Cleanup
@@ -1170,7 +1291,9 @@ final class SessionCoordinator {
         windowContextTask?.cancel()
         capturedWindowContext = nil
         windowContextTask = nil
+        windowContextReadyAt = clock.now()
         guard configStore.windowContextEnabled else { return }
+        windowContextReadyAt = nil
 
         let identity = targetInput?.scope == .field ? targetInput?.identity : nil
         windowContextTask = Task { [weak self] in
@@ -1185,6 +1308,7 @@ final class SessionCoordinator {
                 })
             guard !Task.isCancelled, self.sessionGeneration == generation else { return }
             self.capturedWindowContext = self.configStore.windowContextEnabled ? WindowContextService.sanitized(result.snapshot) : nil
+            self.windowContextReadyAt = self.clock.now()
             self.windowContextTask = nil
             let quality = result.snapshot?.fieldStatus.sorted { $0.key < $1.key }
                 .map { "\($0.key)=\($0.value.rawValue)" }.joined(separator: ",") ?? ""
@@ -1197,6 +1321,7 @@ final class SessionCoordinator {
         windowContextTask?.cancel()
         windowContextTask = nil
         capturedWindowContext = nil
+        windowContextReadyAt = nil
     }
 
     func beginPostInjectionLearningIfNeeded(

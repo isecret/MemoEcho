@@ -4,6 +4,188 @@ import XCTest
 
 @MainActor
 final class TextInjectorTests: XCTestCase {
+    func testMonotonicBreakdownSeparatesBackupDispatchAndClipboardCleanup() async throws {
+        let driver = FakeInjectionDriver()
+        let timer = ManualPipelineClock()
+        driver.board.onSnapshot = { timer.advance(milliseconds: 40) }
+        driver.onWait = { tick in timer.advance(milliseconds: tick == 1 ? 30 : 500) }
+        var events: [String] = []
+        let started = timer.clock.now()
+        let result = try await TextInjector(driver: driver, clock: timer.clock).inject(text: "synthetic", target: driver.current,
+            onOutputDispatched: {
+                events.append("dispatch")
+                XCTAssertEqual(timer.clock.milliseconds(since: started), 70)
+                XCTAssertEqual(driver.board.restores, 0)
+            }, onCleanupCompleted: {
+                events.append("cleanup")
+                XCTAssertEqual(timer.clock.milliseconds(since: started), 570)
+                XCTAssertEqual(driver.board.restores, 1)
+            })
+        XCTAssertEqual(events, ["dispatch", "cleanup"])
+        XCTAssertEqual(result.breakdown.pasteboardBackupMs, 40)
+        XCTAssertEqual(result.breakdown.dispatchMs, 70)
+        XCTAssertEqual(result.breakdown.cleanupMs, 500)
+        XCTAssertEqual(result.breakdown.totalMs, 570)
+    }
+
+    func testCancellationAfterDispatchStillReportsCompletedClipboardCleanup() async {
+        let driver = FakeInjectionDriver()
+        let timer = ManualPipelineClock()
+        var active = true
+        var events: [String] = []
+        driver.onWait = { tick in
+            timer.advance(milliseconds: tick == 1 ? 30 : 500)
+            if tick == 2 { active = false }
+        }
+        do {
+            _ = try await TextInjector(driver: driver, clock: timer.clock).inject(text: "synthetic", target: driver.current,
+                shouldContinue: { active }, onOutputDispatched: { events.append("dispatch") },
+                onCleanupCompleted: { events.append("cleanup") })
+            XCTFail("Expected cancellation")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(events, ["dispatch", "cleanup"])
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertEqual(driver.board.restores, 1)
+    }
+
+    func testLearningSnapshotStartsOnceAtDeliveryAndOverlapsClipboardBackup() async throws {
+        let driver = FakeInjectionDriver()
+        let injector = TextInjector(driver: driver)
+        let target = try XCTUnwrap(injector.captureTarget(pid: 42, bundleID: "test"))
+        XCTAssertEqual(driver.learningSnapshotStarts, 0, "Recording capture only retains field identity")
+        XCTAssertNil(target.snapshot)
+        driver.board.onSnapshot = { XCTAssertEqual(driver.learningSnapshotStarts, 1) }
+        let result = try await injector.inject(text: "hello", target: target)
+        XCTAssertEqual(driver.learningSnapshotStarts, 1)
+        XCTAssertGreaterThan(driver.focusReads, 1, "Repeated safety checks remain lightweight")
+        XCTAssertEqual(result.beforeInjection?.value, "前后")
+        XCTAssertEqual(driver.pastes, 1)
+    }
+
+    func testSlowLearningSnapshotDoesNotBlockPasteOrAccumulateReads() async throws {
+        let worker = InjectionLearningSnapshotWorker()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let entered = expectation(description: "Background AX read entered")
+        let returned = expectation(description: "Background AX read returned")
+        let driver = FakeInjectionDriver()
+        let snapshot = driver.current?.snapshot
+        driver.onBeginLearningSnapshot = { _ in
+            worker.begin(timeout: 0.05) { shouldStop in
+                XCTAssertFalse(Thread.isMainThread)
+                entered.fulfill()
+                release.wait()
+                XCTAssertTrue(shouldStop(), "The paste closes the request before the read returns")
+                returned.fulfill()
+                return snapshot
+            }
+        }
+        driver.board.asyncSnapshot = {
+            await self.fulfillment(of: [entered], timeout: 1)
+            return [[.string: Data("original".utf8)]]
+        }
+        let started = Date()
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertNil(result.beforeInjection)
+        XCTAssertNil(worker.begin { _ in
+            XCTFail("A blocked system call must retain the sole worker slot")
+            return snapshot
+        })
+        release.signal()
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertNil(result.beforeInjection, "Late text cannot be promoted into a before-paste snapshot")
+    }
+
+    func testLearningSnapshotArrivingAtDispatchIsIgnored() async throws {
+        let driver = FakeInjectionDriver()
+        let capture = InjectionLearningSnapshotCapture()
+        driver.onBeginLearningSnapshot = { _ in capture }
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current,
+            onOutputDispatched: {
+                driver.apply("hello")
+                capture.complete(driver.current?.snapshot)
+            })
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertNil(result.beforeInjection)
+        XCTAssertNil(capture.takeReadySnapshot())
+    }
+
+    func testLearningSnapshotWithWrongIdentityOrCompositionIsIgnored() async throws {
+        for mismatch in 0..<4 {
+            let driver = FakeInjectionDriver()
+            let current = try XCTUnwrap(driver.current?.snapshot)
+            let candidate = FocusedElementTextSnapshot(
+                pid: mismatch == 0 ? 99 : current.pid,
+                bundleID: mismatch == 1 ? "other" : current.bundleID,
+                identity: mismatch == 2 ? .init(token: "other") : current.identity,
+                value: current.value, selection: current.selection, isComposing: mismatch == 3)
+            driver.onBeginLearningSnapshot = { _ in
+                let capture = InjectionLearningSnapshotCapture()
+                capture.complete(candidate)
+                return capture
+            }
+            let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+            XCTAssertEqual(driver.pastes, 1)
+            XCTAssertNil(result.beforeInjection)
+        }
+    }
+
+    func testExpiredLearningSnapshotIsIgnoredWithoutASecondRead() async throws {
+        let driver = FakeInjectionDriver()
+        let capture = InjectionLearningSnapshotCapture(timeout: 0.01)
+        capture.complete(driver.current?.snapshot)
+        driver.onBeginLearningSnapshot = { _ in capture }
+        driver.board.asyncSnapshot = {
+            try await Task.sleep(for: .milliseconds(30))
+            return [[.string: Data("original".utf8)]]
+        }
+        let result = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current)
+        XCTAssertEqual(driver.learningSnapshotStarts, 1)
+        XCTAssertEqual(driver.pastes, 1)
+        XCTAssertNil(result.beforeInjection)
+    }
+
+    func testUnreadableComposingFieldStillPreventsPaste() async {
+        let driver = FakeInjectionDriver()
+        driver.current = FakeInjectionDriver.focus(readable: false, composing: true)
+        await fails(driver)
+        XCTAssertEqual(driver.learningSnapshotStarts, 0)
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.pastes, 0)
+    }
+
+    func testCompositionStartingDuringBackupOrPropagationStillPreventsPaste() async {
+        for duringBackup in [true, false] {
+            let driver = FakeInjectionDriver()
+            let startComposition = { driver.current = FakeInjectionDriver.focus(readable: false, composing: true) }
+            if duringBackup { driver.board.onSnapshot = startComposition }
+            else { driver.onWait = { if $0 == 1 { startComposition() } } }
+            await fails(driver)
+            XCTAssertEqual(driver.pastes, 0)
+            XCTAssertEqual(driver.board.writes, duringBackup ? 0 : 1)
+        }
+    }
+
+    func testCancelledInjectionClosesPendingLearningSnapshot() async throws {
+        let driver = FakeInjectionDriver()
+        let capture = InjectionLearningSnapshotCapture()
+        driver.onBeginLearningSnapshot = { _ in capture }
+        var active = true
+        driver.board.onSnapshot = { active = false }
+        do {
+            _ = try await TextInjector(driver: driver).inject(text: "hello", target: driver.current,
+                                                            shouldContinue: { active })
+            XCTFail("Expected cancellation")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        capture.complete(driver.current?.snapshot)
+        XCTAssertTrue(capture.shouldStop)
+        XCTAssertNil(capture.takeReadySnapshot())
+        XCTAssertEqual(driver.board.writes, 0)
+        XCTAssertEqual(driver.pastes, 0)
+    }
+
     func testEmptyRichEditorAuxiliaryValueDoesNotTurnDeliveredTextIntoFailure() async throws {
         let driver = FakeInjectionDriver()
         driver.current = FakeInjectionDriver.focus(value: "0123456789\n", selection: NSRange(location: 0, length: 0))
@@ -938,6 +1120,8 @@ final class FakeInjectionDriver: TextInjectionDriver {
     var pastes = 0
     var waits = 0
     var focusReads = 0
+    var learningSnapshotStarts = 0
+    var onBeginLearningSnapshot: ((TextInjectionFocus) -> InjectionLearningSnapshotCapture?)?
     var waitDurations: [Int] = []
     var current: TextInjectionFocus? = FakeInjectionDriver.focus()
     var onWait: ((Int) -> Void)?
@@ -948,7 +1132,7 @@ final class FakeInjectionDriver: TextInjectionDriver {
         let id = FocusedElementIdentity(token: identity)
         let snapshot = readable ? FocusedElementTextSnapshot(pid: 42, bundleID: "test", identity: id,
                                                              value: value, selection: selection, isComposing: composing) : nil
-        return .init(pid: 42, bundleID: "test", identity: id, snapshot: snapshot)
+        return .init(pid: 42, bundleID: "test", identity: id, snapshot: snapshot, isComposing: composing)
     }
     static func window(identity: String = "window") -> TextInjectionFocus {
         .init(pid: 42, bundleID: "test", identity: .init(token: identity), snapshot: nil, scope: .window)
@@ -956,6 +1140,13 @@ final class FakeInjectionDriver: TextInjectionDriver {
     func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity? { canMonitor ? continuity : nil }
     func activate(pid: pid_t, bundleID: String?) -> Bool { activations += 1; return canActivate }
     func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus? { focusReads += 1; return current }
+    func beginLearningSnapshot(for target: TextInjectionFocus) -> InjectionLearningSnapshotCapture? {
+        learningSnapshotStarts += 1
+        if let onBeginLearningSnapshot { return onBeginLearningSnapshot(target) }
+        let capture = InjectionLearningSnapshotCapture()
+        capture.complete(target.snapshot)
+        return capture
+    }
     func postPaste(into target: TextInjectionFocus) -> Bool { if canPost { pastes += 1 }; return canPost }
     func wait(milliseconds: Int) async { waitDurations.append(milliseconds); waits += 1; onWait?(waits); await onAsyncWait?(waits) }
     func apply(_ text: String) {

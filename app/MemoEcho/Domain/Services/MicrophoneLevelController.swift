@@ -10,7 +10,9 @@ final class MicrophoneLevelController {
     private(set) var message: String?
     private let recorder: any AudioRecording
     private var task: Task<Void, Never>?
+    private var drainTask: Task<Void, Never>?
     private var generation = UUID()
+    var beforeCaptureStart: (@MainActor @Sendable () async -> Void)?
 
     init(recorder: any AudioRecording = AudioRecorder(retainsAudio: false)) {
         self.recorder = recorder
@@ -23,15 +25,20 @@ final class MicrophoneLevelController {
         catch { message = "请先开启麦克风权限"; return }
         let id = generation
         isRunning = true
-        recorder.onCaptureEvent = { [weak self] event in
-            guard let self, self.generation == id, self.isRunning else { return }
-            if case .interrupted = event {
-                self.stop()
-                self.message = "麦克风不可用，请检查设备"
-            }
-        }
         task = Task { [weak self] in
             guard let self, self.generation == id, !Task.isCancelled else { return }
+            if let drainTask = self.drainTask { _ = await drainTask.value }
+            guard self.generation == id, !Task.isCancelled else { return }
+            await self.beforeCaptureStart?()
+            guard self.generation == id, !Task.isCancelled else { return }
+            self.drainTask = nil
+            self.recorder.onCaptureEvent = { [weak self] event in
+                guard let self, self.generation == id, self.isRunning else { return }
+                if case .interrupted = event {
+                    self.stop()
+                    self.message = "麦克风不可用，请检查设备"
+                }
+            }
             do {
                 try await self.recorder.startRecording(device: device, onPCMChunk: nil)
                 guard self.generation == id, !Task.isCancelled else { return }
@@ -52,9 +59,17 @@ final class MicrophoneLevelController {
         task?.cancel()
         task = nil
         recorder.onCaptureEvent = nil
-        if isRunning { _ = recorder.stopRecording() }
+        if isRunning, drainTask == nil {
+            drainTask = Task { [recorder] in _ = await recorder.stopRecording() }
+        }
         isRunning = false
         level = 0
         message = nil
+    }
+
+    /// Main recording uses a different recorder, so it must await this microphone release.
+    func stopAndWait() async {
+        stop()
+        if let drainTask { _ = await drainTask.value }
     }
 }

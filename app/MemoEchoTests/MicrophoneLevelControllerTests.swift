@@ -4,6 +4,64 @@ import XCTest
 
 @MainActor
 final class MicrophoneLevelControllerTests: XCTestCase {
+    func testSlowStopResetsUIImmediatelyAndRestartWaitsForMicrophoneRelease() async {
+        let recorder = TestRecorder()
+        let controller = MicrophoneLevelController(recorder: recorder)
+        controller.start(device: nil, authorize: {})
+        await settle()
+        let stopEntered = expectation(description: "Meter stop entered")
+        var release: CheckedContinuation<Void, Never>?
+        recorder.stopOperation = {
+            await withCheckedContinuation { continuation in
+                release = continuation
+                stopEntered.fulfill()
+            }
+        }
+        controller.stop()
+        XCTAssertFalse(controller.isRunning)
+        XCTAssertEqual(controller.level, 0)
+        await fulfillment(of: [stopEntered], timeout: 1)
+        controller.start(device: nil, authorize: {})
+        let startedTooEarly = expectation(description: "Meter must await old close")
+        startedTooEarly.isInverted = true
+        recorder.onStart = { startedTooEarly.fulfill() }
+        await fulfillment(of: [startedTooEarly], timeout: 0.03)
+        XCTAssertEqual(recorder.starts, 1)
+        recorder.onStart = nil
+        let restarted = expectation(description: "Meter restarted after old close")
+        recorder.onStart = { restarted.fulfill() }
+        release?.resume()
+        await fulfillment(of: [restarted], timeout: 1)
+        XCTAssertEqual(recorder.starts, 2)
+        XCTAssertTrue(controller.isRunning)
+        recorder.stopOperation = nil
+        await controller.stopAndWait()
+        XCTAssertEqual(recorder.stops, 2)
+    }
+
+    func testStopAndWaitDoesNotReleaseMainRecordingBarrierEarly() async {
+        let recorder = TestRecorder()
+        let controller = MicrophoneLevelController(recorder: recorder)
+        controller.start(device: nil, authorize: {})
+        await settle()
+        let stopEntered = expectation(description: "Meter close entered")
+        var release: CheckedContinuation<Void, Never>?
+        recorder.stopOperation = {
+            await withCheckedContinuation { continuation in
+                release = continuation
+                stopEntered.fulfill()
+            }
+        }
+        var mayOpenMainCapture = false
+        let handoff = Task { await controller.stopAndWait(); mayOpenMainCapture = true }
+        await fulfillment(of: [stopEntered], timeout: 1)
+        XCTAssertFalse(mayOpenMainCapture)
+        XCTAssertFalse(controller.isRunning)
+        release?.resume()
+        await handoff.value
+        XCTAssertTrue(mayOpenMainCapture)
+    }
+
     func testPermissionFailureDoesNotStartCapture() async {
         let recorder = TestRecorder()
         let controller = MicrophoneLevelController(recorder: recorder)
@@ -27,7 +85,7 @@ final class MicrophoneLevelControllerTests: XCTestCase {
         XCTAssertFalse(controller.isRunning)
         XCTAssertEqual(controller.level, 0)
         XCTAssertNil(recorder.onCaptureEvent)
-        controller.stop()
+        await controller.stopAndWait()
         XCTAssertEqual(recorder.stops, 1)
         controller.start(device: nil, authorize: {})
         await settle()
@@ -70,10 +128,13 @@ final class MicrophoneLevelControllerTests: XCTestCase {
         var currentDurationMs = 1000
         var starts = 0
         var stops = 0
-        func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws { starts += 1 }
+        var onStart: (() -> Void)?
+        var stopOperation: (() async -> Void)?
+        func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws { starts += 1; onStart?() }
         func currentLevel() -> Float { 0.2 }
-        func stopRecording() -> AudioRecordingResult {
+        func stopRecording() async -> AudioRecordingResult {
             stops += 1
+            await stopOperation?()
             return .init(data: WAVAudioEncoder.encodePCM16(pcmData: Data(repeating: 0, count: 32000), sampleRate: 16000, channels: 1), durationMs: 1000)
         }
     }

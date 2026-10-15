@@ -10,6 +10,8 @@ struct TextInjectionFocus: Sendable {
     let bundleID: String?
     let identity: FocusedElementIdentity
     let snapshot: FocusedElementTextSnapshot?
+    /// IME safety never depends on whether optional learning text was readable.
+    var isComposing = false
     enum Scope: Sendable { case field, window }
     var scope: Scope = .field
     var continuity: InjectionTargetContinuity? = nil
@@ -71,6 +73,7 @@ protocol TextInjectionDriver: AnyObject {
     var pasteboard: any InjectionPasteboard { get }
     func activate(pid: pid_t, bundleID: String?) -> Bool
     func focus(pid: pid_t, bundleID: String?) -> TextInjectionFocus?
+    func beginLearningSnapshot(for target: TextInjectionFocus) -> InjectionLearningSnapshotCapture?
     func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity?
     /// False must mean no event was posted; once posted, never retry through AX.
     func postPaste(into target: TextInjectionFocus) -> Bool
@@ -82,9 +85,11 @@ protocol TextInjectionDriver: AnyObject {
 @MainActor
 struct TextInjector {
     private let driver: any TextInjectionDriver
+    private let clock: PipelineClock
 
-    init(driver: any TextInjectionDriver = NativeTextInjectionDriver.shared) {
+    init(driver: any TextInjectionDriver = NativeTextInjectionDriver.shared, clock: PipelineClock = .live) {
         self.driver = driver
+        self.clock = clock
     }
 
     struct InjectionResult: Sendable {
@@ -98,11 +103,14 @@ struct TextInjector {
     struct InjectionBreakdown: Sendable {
         var activateTargetMs = 0
         var focusBeforeMs = 0
+        var pasteboardBackupMs = 0
         var pasteboardWriteMs = 0
         var pasteboardPropagationMs = 0
         var postPasteShortcutMs = 0
         var pasteConsumptionMs = 0
         var pasteboardRestoreMs = 0
+        var dispatchMs = 0
+        var cleanupMs = 0
         var totalMs = 0
     }
 
@@ -111,7 +119,7 @@ struct TextInjector {
         guard let focus = driver.focus(pid: pid, bundleID: bundleID) else { return nil }
         // Keep only the field identity throughout recording; read text at delivery time.
         var target = TextInjectionFocus(pid: focus.pid, bundleID: focus.bundleID, identity: focus.identity,
-                                        snapshot: nil, scope: focus.scope)
+                                        snapshot: nil, isComposing: focus.isComposing, scope: focus.scope)
         if focus.scope == .window {
             guard let continuity = driver.monitorWindow(target), continuity.isValid else { return nil }
             target.continuity = continuity
@@ -122,19 +130,20 @@ struct TextInjector {
     func inject(text: String, target: TextInjectionFocus?,
                 shouldContinue: () -> Bool = { true },
                 onOutputAttempt: () -> Void = {},
-                onOutputDispatched: () -> Void = {}) async throws -> InjectionResult {
+                onOutputDispatched: () -> Void = {},
+                onCleanupCompleted: () -> Void = {}) async throws -> InjectionResult {
         guard driver.authorized else { throw MemoEchoError.accessibilityPermissionDenied }
         guard !driver.isInjecting else { throw failure("上一次文本写入尚未结束") }
         guard let target, !text.isEmpty else { throw failure("未找到原来的输入框，请手动复制文本") }
         driver.isInjecting = true
         defer { driver.isInjecting = false }
-        let started = Date()
+        let started = clock.now()
         var breakdown = InjectionBreakdown()
         func checkCurrent() throws {
             guard !Task.isCancelled, shouldContinue() else { throw CancellationError() }
         }
         try checkCurrent()
-        let activation = Date()
+        let activation = clock.now()
         if target.scope == .window {
             guard target.continuity?.isValid == true else {
                 throw failure("原窗口已变化，请手动复制文本")
@@ -144,9 +153,9 @@ struct TextInjector {
         }
         breakdown.activateTargetMs = millisecondsSince(activation)
         try checkCurrent()
-        let focusStart = Date()
+        let focusStart = clock.now()
         guard var before = driver.focus(pid: target.pid, bundleID: target.bundleID),
-              before.isSameField(as: target), before.snapshot?.isComposing != true else {
+              before.isSameField(as: target), !before.isComposing else {
             throw failure("输入框已变化，请手动复制文本")
         }
         before.continuity = target.continuity
@@ -154,52 +163,71 @@ struct TextInjector {
         func unchangedTarget() -> Bool {
             guard target.scope != .window || target.continuity?.isValid == true,
                   let current = driver.focus(pid: target.pid, bundleID: target.bundleID),
-                  current.isSameField(as: before), current.snapshot?.isComposing != true else { return false }
+                  current.isSameField(as: before), !current.isComposing else { return false }
             return true
         }
 
+        // Optional learning work overlaps backup/propagation and never delays the paste.
+        let learningCapture = before.scope == .field ? driver.beginLearningSnapshot(for: before) : nil
+        defer { learningCapture?.cancel() }
         let lease: InjectionPasteboardLease
+        let backupStart = clock.now()
         do { lease = try await InjectionPasteboardLease(pasteboard: driver.pasteboard) }
         catch { try checkCurrent(); throw error }
-        defer { lease.restore() }
+        breakdown.pasteboardBackupMs = millisecondsSince(backupStart)
+        var didDispatch = false
+        defer {
+            lease.restore()
+            if didDispatch { onCleanupCompleted() }
+        }
         try checkCurrent()
         guard lease.isOwned, unchangedTarget() else {
             throw failure("输入位置或剪贴板已变化，已停止写入，请手动复制文本")
         }
-        let writeStart = Date()
+        let writeStart = clock.now()
         guard lease.write(text) else { throw failure("无法准备粘贴内容，请手动复制文本") }
         breakdown.pasteboardWriteMs = millisecondsSince(writeStart)
-        let propagation = Date()
+        let propagation = clock.now()
         await driver.wait(milliseconds: 30)
         breakdown.pasteboardPropagationMs = millisecondsSince(propagation)
         try checkCurrent()
         guard lease.isOwned, unchangedTarget() else {
             throw failure("输入位置或剪贴板已变化，已停止写入，请手动复制文本")
         }
-        let dispatchStart = Date()
+        // Seal before posting: a result arriving during/after paste is never a "before" snapshot.
+        let candidate = learningCapture?.takeReadySnapshot()
+        let learningSnapshot = candidate.flatMap { snapshot in
+            snapshot.pid == before.pid && snapshot.bundleID == before.bundleID
+                && snapshot.identity == before.identity && !snapshot.isComposing ? snapshot : nil
+        }
+        let dispatchStart = clock.now()
         guard driver.postPaste(into: before) else {
             throw failure("无法发送粘贴事件，请手动复制文本")
         }
+        didDispatch = true
         breakdown.postPasteShortcutMs = millisecondsSince(dispatchStart)
+        let dispatchedAt = clock.now()
+        breakdown.dispatchMs = PipelineClock.milliseconds(from: started, to: dispatchedAt)
         onOutputAttempt()
         // Window continuity is only needed before this one-shot delivery.
         target.continuity?.invalidate()
         onOutputDispatched()
 
         // No read-back, acknowledgement polling, or second write. Drain even on cancellation.
-        let consumption = Date()
+        let consumption = clock.now()
         await driver.wait(milliseconds: 500)
         try checkCurrent()
         breakdown.pasteConsumptionMs = millisecondsSince(consumption)
-        let restoration = Date()
+        let restoration = clock.now()
         lease.restore()
         breakdown.pasteboardRestoreMs = millisecondsSince(restoration)
+        breakdown.cleanupMs = millisecondsSince(dispatchedAt)
         breakdown.totalMs = millisecondsSince(started)
-        return .init(path: .paste, breakdown: breakdown, beforeInjection: before.snapshot)
+        return .init(path: .paste, breakdown: breakdown, beforeInjection: learningSnapshot)
     }
 
     private func failure(_ detail: String) -> MemoEchoError { .textInjectionFailure(detail: detail) }
-    private func millisecondsSince(_ start: Date) -> Int { Int(Date().timeIntervalSince(start) * 1000) }
+    private func millisecondsSince(_ start: ContinuousClock.Instant) -> Int { clock.milliseconds(since: start) }
 }
 
 @MainActor
@@ -287,9 +315,14 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         let textRoles = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
         guard writable.boolValue || valueWritable.boolValue || textRoles.contains(role as? String ?? "") else { return nil }
         let identity = FocusedElementIdentity(element: element)
-        let candidate = FocusedElementTextSnapshotReader().read(targetPID: pid, targetBundleID: bundleID)
-        let snapshot = candidate?.identity == identity ? candidate : nil
-        return .init(pid: pid, bundleID: app.bundleIdentifier, identity: identity, snapshot: snapshot)
+        return .init(pid: pid, bundleID: app.bundleIdentifier, identity: identity, snapshot: nil,
+                     isComposing: FocusedElementTextSnapshotReader.isComposing(element))
+    }
+
+    func beginLearningSnapshot(for target: TextInjectionFocus) -> InjectionLearningSnapshotCapture? {
+        InjectionLearningSnapshotWorker.shared.begin { shouldStop in
+            FocusedElementTextSnapshotReader().readBeforeInjection(target: target, shouldStop: shouldStop)
+        }
     }
 
     func monitorWindow(_ target: TextInjectionFocus) -> InjectionTargetContinuity? {
@@ -312,7 +345,7 @@ private final class NativeTextInjectionDriver: TextInjectionDriver {
         down.flags = shortcut.flags
         up.flags = shortcut.flags
         guard let current = focus(pid: target.pid, bundleID: target.bundleID),
-              current.isSameField(as: target), current.snapshot?.isComposing != true else { return false }
+              current.isSameField(as: target), !current.isComposing else { return false }
         // Route only to the captured process, even if another app becomes frontmost in this gap.
         down.postToPid(target.pid)
         up.postToPid(target.pid)

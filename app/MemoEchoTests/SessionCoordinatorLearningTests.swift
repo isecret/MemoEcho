@@ -93,7 +93,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
         }
     }
 
-    func testQuickStartThenImmediateStopSilentlyCancelsWithoutProcessingHUD() throws {
+    func testQuickStartThenImmediateStopSilentlyCancelsWithoutProcessingHUD() async throws {
         let learner = MockPostInjectionLearner()
         let coordinator = makeCoordinator(
             dictionaryStore: PersonalDictionaryStore(directoryURL: tempDirectory),
@@ -121,6 +121,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
 
         coordinator.startRecording()
         coordinator.finishRecording()
+        await waitUntil { coordinator.state == .idle }
 
         XCTAssertEqual(coordinator.state, .idle)
         XCTAssertNil(coordinator.currentError)
@@ -158,6 +159,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
         await waitForRecorder(recorder, starts: 1)
         coordinator.finishRecording()
         coordinator.cancel()
+        await waitUntil { recorder.stopCount == 1 }
         XCTAssertEqual(recorder.stopCount, 1)
         coordinator.startRecording(output: .onboardingTrial { _ in true })
         await waitForRecorder(recorder, starts: 2)
@@ -176,9 +178,16 @@ final class SessionCoordinatorLearningTests: XCTestCase {
         coordinator.startRecording(output: .onboardingTrial { _ in true })
         await waitForRecorder(recorder, starts: 1)
         coordinator.finishRecording()
+        await waitUntil { coordinator.state == .idle }
         XCTAssertEqual(stoppedEvents, 0)
         XCTAssertEqual(recorder.stopCount, 1)
         XCTAssertEqual(coordinator.state, .idle)
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !condition(), ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertTrue(condition())
     }
 
     private func makeAudioCoordinator(_ recorder: FakeAudioRecorder) -> SessionCoordinator {
@@ -216,7 +225,7 @@ final class SessionCoordinatorLearningTests: XCTestCase {
             running = true
         }
         func currentLevel() -> Float { 0 }
-        func stopRecording() -> AudioRecordingResult {
+        func stopRecording() async -> AudioRecordingResult {
             stopCount += 1
             running = false
             return .init(data: Data(), durationMs: durationMs)

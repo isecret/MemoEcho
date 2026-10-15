@@ -4,6 +4,87 @@ import XCTest
 
 @MainActor
 final class SessionCoordinatorRealtimeTests: XCTestCase {
+    func testCancelledMainCaptureAndWaitingMeterCanHandBackToNewMainCaptureWithoutDeadlock() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let meterRecorder = HandoffMeterRecorder()
+        let meter = MicrophoneLevelController(recorder: meterRecorder)
+        let meterWaiting = CoordinatorRealtimeGate()
+        fixture.coordinator.beforeCaptureStart = { await meter.stopAndWait() }
+        fixture.coordinator.onFeedbackEvent = { if case .recordingStarted = $0 { meter.stop() } }
+        meter.beforeCaptureStart = {
+            await meterWaiting.open()
+            await fixture.coordinator.waitForCaptureClose()
+        }
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.recorder.pauseStop = true
+        fixture.coordinator.cancel()
+        await fixture.recorder.stopEntered.wait()
+        meter.start(device: nil, authorize: {})
+        await meterWaiting.wait()
+        XCTAssertEqual(meterRecorder.starts, 0)
+        fixture.coordinator.startRecording()
+        XCTAssertFalse(meter.isRunning)
+        fixture.recorder.pauseStop = false
+        await fixture.recorder.releaseStop.open()
+        await waitUntil { fixture.recorder.completedStarts == 2 }
+        XCTAssertEqual(fixture.coordinator.state, .recording)
+        XCTAssertEqual(meterRecorder.starts, 0, "Cancelled meter startup must not reopen after the main drain")
+        XCTAssertEqual(fixture.recorder.stops, 1)
+    }
+
+    func testCancelAndRestartWaitForSlowCloseWithoutStoppingNewCapture() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        fixture.recorder.pauseStop = true
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.recorder.emit(samples: 8_000)
+        fixture.coordinator.finishRecording()
+        await fixture.recorder.stopEntered.wait()
+        fixture.coordinator.cancel()
+        XCTAssertEqual(fixture.coordinator.state, .cancelled, "UI cancellation must not await hardware")
+        fixture.coordinator.startRecording()
+        let openedTooEarly = expectation(description: "No restart before old close")
+        openedTooEarly.isInverted = true
+        fixture.recorder.onStart = { openedTooEarly.fulfill() }
+        await fulfillment(of: [openedTooEarly], timeout: 0.05)
+        XCTAssertEqual(fixture.recorder.retainFullAudioArguments.count, 1)
+        XCTAssertEqual(fixture.recorder.stops, 1)
+        fixture.recorder.onStart = nil
+        fixture.recorder.pauseStop = false
+        await fixture.recorder.releaseStop.open()
+        await waitUntil { fixture.recorder.completedStarts == 2 }
+        XCTAssertEqual(fixture.coordinator.state, .recording)
+        XCTAssertEqual(fixture.recorder.stops, 1)
+        XCTAssertEqual(fixture.driver.pastes, 0)
+        XCTAssertEqual(fixture.probe.polishCalls, 0)
+    }
+
+    func testMainCaptureWaitsForMeterReleaseAndCancelledWaitNeverOpensCapture() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let entered = CoordinatorRealtimeGate()
+        let releaseMeter = CoordinatorRealtimeGate()
+        fixture.coordinator.beforeCaptureStart = {
+            await entered.open()
+            await releaseMeter.wait()
+        }
+        fixture.coordinator.startRecording()
+        await entered.wait()
+        XCTAssertTrue(fixture.recorder.retainFullAudioArguments.isEmpty)
+        fixture.coordinator.cancel()
+        await releaseMeter.open()
+        await waitUntil { fixture.recorder.stops == 1 }
+        XCTAssertEqual(fixture.coordinator.state, .cancelled)
+        XCTAssertTrue(fixture.recorder.retainFullAudioArguments.isEmpty)
+        fixture.coordinator.beforeCaptureStart = nil
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        XCTAssertEqual(fixture.recorder.retainFullAudioArguments.count, 1)
+    }
+
     func testRealtimeRecordingDisablesFullAudioAndShortCaptureNeverConnects() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -12,6 +93,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.recorder.retainFullAudioArguments, [false])
         fixture.recorder.emit(samples: 7_984) // 499 ms
         fixture.coordinator.finishRecording()
+        await waitUntil { fixture.coordinator.state == .idle }
         XCTAssertEqual(fixture.coordinator.state, .idle)
         XCTAssertEqual(fixture.recorder.stops, 1)
         XCTAssertEqual(fixture.factory.creationCount, 0)
@@ -127,6 +209,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         fixture.coordinator.startRecording()
         XCTAssertEqual(fixture.coordinator.state, .recording)
         fixture.coordinator.finishRecording()
+        await waitUntil { fixture.coordinator.state == .idle }
         XCTAssertEqual(fixture.coordinator.state, .idle)
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertTrue(fixture.recorder.retainFullAudioArguments.isEmpty)
@@ -143,6 +226,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         fixture.coordinator.startRecording()
         await fixture.recorder.started.wait()
         fixture.coordinator.finishRecording()
+        await waitUntil { fixture.coordinator.state == .idle }
         XCTAssertEqual(fixture.coordinator.state, .idle)
         await fixture.recorder.releaseStartup.open()
         await fixture.recorder.startReturned.wait()
@@ -171,6 +255,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
             manager.consumeEvent(.modifiersChanged([]), at: 1)
             await fixture.recorder.releaseStartup.open()
             if samples < 8_000 {
+                await waitUntil { fixture.coordinator.state == .idle }
                 XCTAssertEqual(fixture.coordinator.state, .idle)
                 XCTAssertEqual(fixture.factory.creationCount, 0)
             } else {
@@ -287,11 +372,25 @@ private final class CoordinatorRealtimeProbe {
 }
 
 @MainActor
+private final class HandoffMeterRecorder: AudioRecording {
+    var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
+    var currentDurationMs: Int { 0 }
+    var starts = 0
+    func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws { starts += 1 }
+    func stopRecording() async -> AudioRecordingResult { .init(data: Data(), durationMs: 0) }
+    func currentLevel() -> Float { 0 }
+}
+
+@MainActor
 private final class CoordinatorRealtimeRecorder: AudioRecording {
     var onCaptureEvent: (@MainActor @Sendable (AudioCaptureEvent) -> Void)?
     let started = CoordinatorRealtimeGate()
     let releaseStartup = CoordinatorRealtimeGate()
     let startReturned = CoordinatorRealtimeGate()
+    let stopEntered = CoordinatorRealtimeGate()
+    let releaseStop = CoordinatorRealtimeGate()
+    var pauseStop = false
+    var onStart: (() -> Void)?
     var pauseStartup = false
     private(set) var completedStarts = 0
     private var callback: (@Sendable (Data) -> Void)?
@@ -308,6 +407,8 @@ private final class CoordinatorRealtimeRecorder: AudioRecording {
     func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool,
                         onPCMChunk: (@Sendable (Data) -> Void)?) async throws {
         retainFullAudioArguments.append(retainFullAudio)
+        sampleCount = 0
+        onStart?()
         callback = onPCMChunk
         await started.open()
         if pauseStartup { await releaseStartup.wait() }
@@ -324,8 +425,10 @@ private final class CoordinatorRealtimeRecorder: AudioRecording {
         sampleCount += samples
         callback?(Data(Array(repeating: [UInt8(100), 0], count: samples).joined()))
     }
-    func stopRecording() -> AudioRecordingResult {
+    func stopRecording() async -> AudioRecordingResult {
         stops += 1
+        await stopEntered.open()
+        if pauseStop { await releaseStop.wait() }
         let tail = finalSamplesOnStop
         finalSamplesOnStop = 0
         if tail > 0 { emit(samples: tail) }

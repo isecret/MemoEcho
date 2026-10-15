@@ -13,7 +13,7 @@ enum StructuredPolishParser {
         guard let data = trimmed.data(using: .utf8),
               let response = try? JSONDecoder().decode(LLMStructuredResponse.self, from: data),
               response.toStructuredResult().isValid,
-              !response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              response.mode == .list || !response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .invalid
         }
         return .structured(response: response)
@@ -40,7 +40,9 @@ struct LLMStructuredResponse: Decodable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         mode = try container.decode(PolishMode.self, forKey: .mode)
-        text = try container.decode(String.self, forKey: .text)
+        // New list responses omit duplicated text; still accept and type-check the legacy field.
+        text = mode == .list ? try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+                            : try container.decode(String.self, forKey: .text)
         intro = try container.decodeIfPresent(String.self, forKey: .intro)
         items = try container.decodeIfPresent([String].self, forKey: .items)
         outro = try container.decodeIfPresent(String.self, forKey: .outro)

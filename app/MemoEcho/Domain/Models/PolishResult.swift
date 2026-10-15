@@ -37,7 +37,7 @@ struct StructuredPolishResult: Decodable, Equatable, Sendable {
             return true
         case .list:
             guard let items, !items.isEmpty else { return false }
-            return true
+            return items.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         }
     }
 }

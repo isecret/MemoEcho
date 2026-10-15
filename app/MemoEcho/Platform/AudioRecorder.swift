@@ -7,7 +7,7 @@ protocol AudioRecording: AnyObject {
     @MainActor func startRecording(device: AVCaptureDevice?, onPCMChunk: (@Sendable (Data) -> Void)?) async throws
     @MainActor func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool, onPCMChunk: (@Sendable (Data) -> Void)?) async throws
     @MainActor func currentLevel() -> Float
-    @MainActor func stopRecording() -> AudioRecordingResult
+    @MainActor func stopRecording() async -> AudioRecordingResult
 }
 
 extension AudioRecording {
@@ -33,8 +33,9 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
     private let callbackLock = NSLock()
     private var _onPCMChunk: (@Sendable (Data) -> Void)?
 
-    private var captureSession: AVCaptureSession?
-    private var audioOutput: AVCaptureAudioDataOutput?
+    @MainActor private var capture: (any AudioCaptureSessionDriving)?
+    @MainActor private var stoppingTask: Task<AudioRecordingResult, Never>?
+    @MainActor private let captureFactory: (AVCaptureDevice?) throws -> any AudioCaptureSessionDriving
     private let captureQueue = DispatchQueue(label: "memoecho.audio.capture")
     private let sampleLock = NSLock()
     private let retainsAudio: Bool
@@ -52,8 +53,11 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
     private var acceptingOutput: AVCaptureOutput?
 
     /// Level monitoring discards each PCM chunk after measuring it.
-    init(retainsAudio: Bool = true) {
+    @MainActor
+    init(retainsAudio: Bool = true,
+         captureFactory: @escaping (AVCaptureDevice?) throws -> any AudioCaptureSessionDriving = { try NativeAudioCaptureSession(device: $0) }) {
         self.retainsAudio = retainsAudio
+        self.captureFactory = captureFactory
         super.init()
     }
 
@@ -77,87 +81,35 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
     @MainActor
     func startRecording(device: AVCaptureDevice?, retainFullAudio: Bool,
                         onPCMChunk: (@Sendable (Data) -> Void)? = nil) async throws {
+        // Old hardware owns callbacks/buffers until its queue barrier has completed.
+        if let stoppingTask { _ = await stoppingTask.value }
+        try Task.checkCancellation()
         guard !recording else { return }
-
-        cleanupRecordingState()
+        guard capture == nil else { throw AudioRecorderError.startFailed }
+        let id = UUID()
+        captureID = id
         sampleLock.withLock { self.retainFullAudio = retainFullAudio && retainsAudio }
-        let id = captureID
         callbackLock.withLock { _onPCMChunk = onPCMChunk }
 
-        let captureDevice: AVCaptureDevice?
-        if let device {
-            captureDevice = device
-        } else {
-            captureDevice = AVCaptureDevice.default(for: .audio)
-        }
-
-        guard let captureDevice else {
-            throw AudioRecorderError.noInputDevice
-        }
-
-        let session = AVCaptureSession()
-
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: Self.sampleRate,
-            AVNumberOfChannelsKey: Self.channels,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
-
         do {
-            let input = try AVCaptureDeviceInput(device: captureDevice)
-            let output = AVCaptureAudioDataOutput()
-            output.audioSettings = settings
-            output.setSampleBufferDelegate(self, queue: captureQueue)
-
-            session.beginConfiguration()
-            guard session.canAddInput(input) else {
-                session.commitConfiguration()
-                throw AudioRecorderError.deviceUnavailable(captureDevice.localizedName)
+            let capture = try captureFactory(device)
+            self.capture = capture
+            capture.output.setSampleBufferDelegate(self, queue: captureQueue)
+            sampleLock.withLock { acceptingOutput = capture.output }
+            if let session = capture.session, let device = capture.device {
+                observeCapture(session: session, device: device, id: id)
             }
-            session.addInput(input)
-
-            guard session.canAddOutput(output) else {
-                session.commitConfiguration()
-                throw AudioRecorderError.startFailed
-            }
-            session.addOutput(output)
-            session.commitConfiguration()
-
-            sampleLock.withLock {
-                capturedPCMData.removeAll(keepingCapacity: false)
-                capturedSampleCount = 0
-                latestLevel = 0
-            }
-
-            captureSession = session
-            audioOutput = output
-            sampleLock.withLock { acceptingOutput = output }
-            observeCapture(session: session, device: captureDevice, id: id)
-
             let didStart = await withCheckedContinuation { continuation in
-                captureQueue.async {
-                    session.startRunning()
-                    continuation.resume(returning: session.isRunning)
-                }
+                captureQueue.async { continuation.resume(returning: capture.start()) }
             }
-
             guard id == captureID else { throw CancellationError() }
             try Task.checkCancellation()
-            guard didStart else {
-                output.setSampleBufferDelegate(nil, queue: nil)
-                captureSession = nil
-                audioOutput = nil
-                throw AudioRecorderError.startFailed
-            }
-
+            guard didStart else { throw AudioRecorderError.startFailed }
             recording = true
             startHealthMonitoring(id: id)
         } catch {
-            if id == captureID { cleanupRecordingState() }
+            // A late startup belongs to its old capture; never clean a newer recording.
+            if id == captureID { _ = await stopRecording() }
             if error is CancellationError { throw error }
             if let error = error as? AudioRecorderError { throw error }
             throw AudioRecorderError.recorderCreationFailed(underlying: error.localizedDescription)
@@ -171,68 +123,47 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
         return sampleLock.withLock { latestLevel }
     }
 
-    /// 停止录音并返回录音结果（含音频数据和录音时长）
+    /// Closing is single-flight and drains accepted PCM, including an in-progress start.
+    /// Cancellation of a caller never cancels this hardware teardown.
     @MainActor
-    func stopRecording() -> AudioRecordingResult {
-        guard recording else {
-            cleanupRecordingState()
-            return AudioRecordingResult(data: Data(), durationMs: 0)
-        }
-        recording = false
-
-
-        let session = captureSession
-        audioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        // Barrier: every already accepted PCM callback has returned before finish
-        // can flush the streaming processor. Late output is rejected by identity.
-        captureQueue.sync {
-            if let session, session.isRunning { session.stopRunning() }
-            sampleLock.withLock { acceptingOutput = nil }
-        }
-
-        let (pcmData, sampleCount) = sampleLock.withLock { (capturedPCMData, capturedSampleCount) }
-        let durationMs = sampleCount * 1_000 / Int(Self.sampleRate)
-        cleanupRecordingState()
-
-        guard !pcmData.isEmpty else {
-            return AudioRecordingResult(data: Data(), durationMs: durationMs, sampleCount: sampleCount)
-        }
-
-        let wavData = WAVAudioEncoder.encodePCM16(
-            pcmData: pcmData,
-            sampleRate: Int(Self.sampleRate),
-            channels: Self.channels
-        )
-        return AudioRecordingResult(data: wavData, durationMs: durationMs, sampleCount: sampleCount)
-    }
-
-    @MainActor
-    private func cleanupRecordingState() {
+    func stopRecording() async -> AudioRecordingResult {
+        if let stoppingTask { return await stoppingTask.value }
         captureID = UUID()
+        recording = false
         healthTask?.cancel()
         healthTask = nil
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
-        audioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        callbackLock.withLock { _onPCMChunk = nil }
-        if let captureSession {
-            // Serialize against a queued/in-progress start, even when isRunning is
-            // still false. A cancelled start must not open an orphaned microphone.
-            captureQueue.sync {
-                if captureSession.isRunning { captureSession.stopRunning() }
+        let closingCapture = capture
+        capture = nil
+        closingCapture?.output.setSampleBufferDelegate(nil, queue: nil)
+        let task = Task { @MainActor [self] in
+            let result = await withCheckedContinuation { continuation in
+                captureQueue.async { [self] in
+                    // Serializes after startRunning and every already accepted PCM callback.
+                    closingCapture?.stop()
+                    let (pcm, count) = sampleLock.withLock {
+                        acceptingOutput = nil
+                        let value = (capturedPCMData, capturedSampleCount)
+                        capturedPCMData = Data()
+                        capturedSampleCount = 0
+                        latestLevel = 0
+                        lastBufferAt = nil
+                        intervalPeakRMS = 0
+                        return value
+                    }
+                    callbackLock.withLock { _onPCMChunk = nil }
+                    let wav = pcm.isEmpty ? Data() : WAVAudioEncoder.encodePCM16(
+                        pcmData: pcm, sampleRate: Int(Self.sampleRate), channels: Self.channels)
+                    continuation.resume(returning: AudioRecordingResult(data: wav,
+                        durationMs: count * 1_000 / Int(Self.sampleRate), sampleCount: count))
+                }
             }
+            stoppingTask = nil
+            return result
         }
-        captureSession = nil
-        audioOutput = nil
-        recording = false
-        sampleLock.withLock {
-            capturedPCMData.removeAll(keepingCapacity: false)
-            capturedSampleCount = 0
-            latestLevel = 0
-            lastBufferAt = nil
-            intervalPeakRMS = 0
-            acceptingOutput = nil
-        }
+        stoppingTask = task
+        return await task.value
     }
 
     @MainActor
@@ -251,7 +182,7 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
 
     @MainActor
     private func reportInterruption(_ reason: AudioCaptureInterruption, id: UUID) {
-        guard captureID == id, captureSession != nil else { return }
+        guard captureID == id, capture != nil else { return }
         healthTask?.cancel()
         onCaptureEvent?(.interrupted(reason))
     }
@@ -288,6 +219,11 @@ final class AudioRecorder: NSObject, AudioRecording, AVCaptureAudioDataOutputSam
             return
         }
 
+        acceptPCMChunk(pcmData, from: output)
+    }
+
+    /// Called on the capture queue; internal seam also exercises callback barriers without a microphone.
+    nonisolated func acceptPCMChunk(_ pcmData: Data, from output: AVCaptureOutput) {
         let level = Self.calculateLevel(fromPCM16Data: pcmData)
         let accepted = sampleLock.withLock {
             guard acceptingOutput === output else { return false }
@@ -430,4 +366,45 @@ enum AudioRecorderError: LocalizedError {
             "录音启动失败"
         }
     }
+}
+
+/// A capture instance owns its device/output; operations run only on the recorder's serial queue.
+protocol AudioCaptureSessionDriving: Sendable {
+    var output: AVCaptureAudioDataOutput { get }
+    var session: AVCaptureSession? { get }
+    var device: AVCaptureDevice? { get }
+    func start() -> Bool
+    func stop()
+}
+
+private final class NativeAudioCaptureSession: AudioCaptureSessionDriving, @unchecked Sendable {
+    let output = AVCaptureAudioDataOutput()
+    let session: AVCaptureSession?
+    let device: AVCaptureDevice?
+
+    init(device: AVCaptureDevice?) throws {
+        guard let device = device ?? AVCaptureDevice.default(for: .audio) else { throw AudioRecorderError.noInputDevice }
+        self.device = device
+        let session = AVCaptureSession()
+        self.session = session
+        let input = try AVCaptureDeviceInput(device: device)
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: AudioRecorder.sampleRate,
+            AVNumberOfChannelsKey: AudioRecorder.channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        guard session.canAddInput(input) else { throw AudioRecorderError.deviceUnavailable(device.localizedName) }
+        session.addInput(input)
+        guard session.canAddOutput(output) else { throw AudioRecorderError.startFailed }
+        session.addOutput(output)
+    }
+
+    func start() -> Bool { session?.startRunning(); return session?.isRunning == true }
+    func stop() { if session?.isRunning == true { session?.stopRunning() } }
 }

@@ -268,6 +268,7 @@ final class SessionRecoveryTests: XCTestCase {
         let started = await gate.hasStarted
         XCTAssertTrue(started)
         recorder.onCaptureEvent?(.interrupted(.deviceDisconnected))
+        await waitUntil { session.state == .error }
         XCTAssertEqual(session.currentError, .audioCaptureInterrupted(.deviceDisconnected))
         XCTAssertEqual(session.recoveryActionTitle, "继续处理已录内容")
         XCTAssertEqual(session.recovery?.pendingSegments.map(\.index), [0, 1])
@@ -295,6 +296,7 @@ final class SessionRecoveryTests: XCTestCase {
         await waitUntil { recorder.starts == 1 }
         session.finishRecording()
         recorder.onCaptureEvent?(.interrupted(.streamFailed))
+        await waitUntil { session.state == .error }
         XCTAssertEqual(recorder.stops, 1)
         XCTAssertEqual(session.recovery?.pendingSegments.count, 1)
         try? await Task.sleep(for: .milliseconds(150))
@@ -329,6 +331,7 @@ final class SessionRecoveryTests: XCTestCase {
         session.startRecording()
         await waitUntil { recorder.starts == 1 }
         recorder.onCaptureEvent?(.interrupted(.stalled))
+        await waitUntil { session.state == .error }
         XCTAssertEqual(session.state, .error)
         XCTAssertNil(session.recovery)
         XCTAssertEqual(session.currentError, .audioCaptureInterrupted(.stalled))
@@ -811,7 +814,7 @@ private final class TailRecorder: AudioRecording {
         let samples = (0..<(seconds * 16_000)).map { index in Int16(sin(Double(index) * 0.17) * 12_000) }
         onPCMChunk?(samples.withUnsafeBytes { Data($0) })
     }
-    func stopRecording() -> AudioRecordingResult {
+    func stopRecording() async -> AudioRecordingResult {
         stops += 1
         return .init(data: Data([1, 2]), durationMs: seconds * 1000)
     }

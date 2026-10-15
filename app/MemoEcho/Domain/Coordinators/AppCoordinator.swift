@@ -138,6 +138,12 @@ final class AppCoordinator {
 
         let hud = HUDFeedbackController()
         hudFeedbackController = hud
+        sessionCoordinator.beforeCaptureStart = { [weak self] in
+            await self?.microphoneLevelController.stopAndWait()
+        }
+        microphoneLevelController.beforeCaptureStart = { [weak self] in
+            await self?.sessionCoordinator.waitForCaptureClose()
+        }
         sessionCoordinator.onStateChanged = { [weak self] oldState, state in
             guard let self else { return }
             self.onboardingCoordinator.canEditHotkey = !state.isProcessing

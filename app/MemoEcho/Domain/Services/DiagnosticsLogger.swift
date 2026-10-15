@@ -3,8 +3,7 @@ import os
 
 /// 主链路诊断日志器，使用 macOS Unified Logging 记录各阶段耗时与结果摘要
 ///
-/// - Debug 构建：输出 ASR 原文与 LLM 输出明文对照
-/// - Release 构建：仅输出长度、hash、来源等脱敏摘要
+/// All builds record only durations, sizes and classification; never user text or audio.
 final class DiagnosticsLogger: Sendable {
 
     static let shared = DiagnosticsLogger()
@@ -36,10 +35,15 @@ final class DiagnosticsLogger: Sendable {
             [\(sessionID)] session_ended \
             | recording=\(result.recordingMs)ms \
             | denoise=\(result.denoiseMs ?? -1)ms \
-            | asr=\(result.asrMs ?? -1)ms \
+            | asr_wait=\(result.asrWaitMs ?? -1)ms \
+            | asr_work=\(result.asrWorkMs ?? -1)ms \
+            | context_wait=\(result.latency?.contextWaitMs ?? -1)ms \
             | llm=\(result.llmMs ?? -1)ms \
             | injection=\(result.injectionMs ?? -1)ms \
             | total=\(result.totalMs)ms \
+            | origin=\(result.latency?.origin.rawValue ?? "unavailable", privacy: .public) \
+            | dispatch=\(result.latency?.dispatchMs ?? -1)ms \
+            | dispatch_to_cleanup=\(result.latency?.dispatchToCleanupMs ?? -1)ms \
             | source=\(source, privacy: .public) \
             | error=\(errorType, privacy: .public) \
             | target=\(result.targetBundleID ?? "unknown", privacy: .public)
@@ -58,29 +62,17 @@ final class DiagnosticsLogger: Sendable {
     // MARK: - ASR/LLM Comparison
 
     func asrCompleted(sessionID: String, text: String, durationMs: Int, coldStart: Bool = false, warmupWaitMs: Int = 0) {
-        #if DEBUG
-        logger.debug(
-            "[\(sessionID)] asr_completed | text=\"\(text, privacy: .public)\" | duration=\(durationMs)ms | cold_start=\(coldStart) | warmup_wait=\(warmupWaitMs)ms"
-        )
-        #else
         let hash = Self.textHash(text)
         logger.info(
             "[\(sessionID)] asr_completed | length=\(text.count) | hash=\(hash, privacy: .public) | duration=\(durationMs)ms | cold_start=\(coldStart) | warmup_wait=\(warmupWaitMs)ms"
         )
-        #endif
     }
 
     func llmCompleted(sessionID: String, text: String, source: String, durationMs: Int) {
-        #if DEBUG
-        logger.debug(
-            "[\(sessionID)] llm_completed | text=\"\(text, privacy: .public)\" | source=\(source, privacy: .public) | duration=\(durationMs)ms"
-        )
-        #else
         let hash = Self.textHash(text)
         logger.info(
             "[\(sessionID)] llm_completed | length=\(text.count) | hash=\(hash, privacy: .public) | source=\(source, privacy: .public) | duration=\(durationMs)ms"
         )
-        #endif
     }
 
     // MARK: - Structured Processing Diagnostics
@@ -172,14 +164,39 @@ final class DiagnosticsLogger: Sendable {
             | path=\(path.rawValue, privacy: .public) \
             | activate_target=\(breakdown.activateTargetMs)ms \
             | focus_before=\(breakdown.focusBeforeMs)ms \
+            | pasteboard_backup=\(breakdown.pasteboardBackupMs)ms \
             | pasteboard_write=\(breakdown.pasteboardWriteMs)ms \
             | pasteboard_propagation=\(breakdown.pasteboardPropagationMs)ms \
             | post_paste_shortcut=\(breakdown.postPasteShortcutMs)ms \
             | paste_consumption=\(breakdown.pasteConsumptionMs)ms \
             | pasteboard_restore=\(breakdown.pasteboardRestoreMs)ms \
+            | dispatch=\(breakdown.dispatchMs)ms \
+            | cleanup=\(breakdown.cleanupMs)ms \
             | total=\(breakdown.totalMs)ms
             """
         )
+    }
+
+    func latencyMilestone(sessionID: String, milestone: SessionLatencyTimeline.Milestone,
+                          snapshot: SessionLatencySnapshot) {
+        log(sessionID: sessionID, event: "pipeline_latency", detail:
+            "origin=\(snapshot.origin.rawValue) path=\(snapshot.path.rawValue) milestone=\(milestone.rawValue) "
+            + "elapsed_ms=\(snapshot.elapsedMs) capture_closed_ms=\(snapshot.captureClosedMs ?? -1) "
+            + "asr_final_ms=\(snapshot.asrFinalMs ?? -1) context_ready_ms=\(snapshot.contextReadyMs ?? -1) "
+            + "context_wait_ms=\(snapshot.contextWaitMs) llm_complete_ms=\(snapshot.llmCompleteMs ?? -1) "
+            + "dispatch_ms=\(snapshot.dispatchMs ?? -1) cleanup_complete_ms=\(snapshot.cleanupCompleteMs ?? -1)")
+        if milestone == .dispatched, let dispatchMs = snapshot.dispatchMs {
+            let event = snapshot.origin == .recordingStop ? "stop_to_dispatch" : "recovery_to_dispatch"
+            log(sessionID: sessionID, event: event, detail: "ms=\(dispatchMs)")
+        }
+    }
+
+    func llmRequest(sessionID: String, metrics: LLMRequestMetrics) {
+        log(sessionID: sessionID, event: "llm_request_size", detail:
+            "purpose=\(metrics.purpose.rawValue) system_chars=\(metrics.systemCharacters) input_chars=\(metrics.inputCharacters) "
+            + "dictionary_terms=\(metrics.dictionaryTerms) dictionary_chars=\(metrics.dictionaryCharacters) "
+            + "context_chars=\(metrics.contextCharacters) auxiliary_utf8_bytes=\(metrics.auxiliaryUTF8Bytes) "
+            + "request_body_bytes=\(metrics.requestBodyBytes) thinking_disabled=\(metrics.thinkingDisabled ? 1 : 0)")
     }
 
     // MARK: - General Events
@@ -207,10 +224,12 @@ final class DiagnosticsLogger: Sendable {
 struct SessionDiagnostics: Sendable {
     var recordingMs: Int = 0
     var denoiseMs: Int?
-    var asrMs: Int?
+    var asrWaitMs: Int?
+    var asrWorkMs: Int?
     var llmMs: Int?
     var injectionMs: Int?
     var totalMs: Int = 0
+    var latency: SessionLatencySnapshot?
     var resultSource: String?
     var errorClassification: String?
     var targetBundleID: String?
