@@ -660,18 +660,23 @@ final class SessionRecoveryTests: XCTestCase {
     func testRecoveryPresentationStagesPartialAndCopyBoundaries() {
         let cp = checkpoint(segments: [segment(0)], mode: .translate)
         XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试识别")
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).hudRetryTitle, "重试")
         cp.isPartialRecording = true
         XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "继续处理已录内容")
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).hudRetryTitle, "继续")
         cp.isPartialRecording = false
         cp.pendingSegments = []
         XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试整理")
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).hudRetryTitle, "重试")
         cp.polished = polished()
         XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle, "重试翻译")
+        XCTAssertEqual(RecoveryPresentation(checkpoint: cp, readiness: ready).hudRetryTitle, "重试")
         XCTAssertFalse(RecoveryPresentation(checkpoint: cp, readiness: ready).canCopy)
         cp.finalText = "最终结果"
         let output = RecoveryPresentation(checkpoint: cp, readiness: ready)
         XCTAssertTrue(output.canCopy)
         XCTAssertNil(output.retryTitle, "A missing original target must never offer another write")
+        XCTAssertNil(output.hudRetryTitle)
         cp.outputAttempted = true
         XCTAssertTrue(RecoveryPresentation(checkpoint: cp, readiness: ready).outputAttempted)
         XCTAssertNil(RecoveryPresentation(checkpoint: cp, readiness: ready).retryTitle)

@@ -14,7 +14,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
 
     func testCheckpointInvalidationClearsOnlyMatchingFailurePresentation() {
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
-        controller.recoveryActionTitle = "复制结果"
+        controller.recoveryActionTitle = "复制"
         controller.onRecoveryAction = { XCTFail("Invalidated action") }
         controller.handleEvent(.processingFailed(.injectionFailed))
         let generation = controller.presentationGeneration
@@ -25,11 +25,11 @@ final class HUDFeedbackControllerTests: XCTestCase {
         controller.handleEvent(.recordingStarted)
         controller.invalidateRecoveryFeedback(expectedGeneration: generation)
         XCTAssertEqual(controller.hudState, .recording)
-        controller.recoveryActionTitle = "重试识别"
+        controller.recoveryActionTitle = "重试"
         controller.handleEvent(.processingFailed(.recognitionFailed))
         controller.invalidateRecoveryFeedback(expectedGeneration: generation)
         XCTAssertEqual(controller.hudState, .failure(.recognitionFailed))
-        XCTAssertEqual(controller.recoveryActionTitle, "重试识别")
+        XCTAssertEqual(controller.recoveryActionTitle, "重试")
         controller.handleEvent(.processingCancelled)
     }
 
@@ -63,7 +63,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
     func testRecoveryActionOnlyRunsInFailureStateAndFitsHUD() {
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
         var calls = 0
-        controller.recoveryActionTitle = "重试翻译"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = { calls += 1 }
         controller.performRecoveryAction()
         XCTAssertEqual(calls, 0)
@@ -80,7 +80,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
 
     func testCopyConfirmationClearsActionAndShowsAcknowledgement() {
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
-        controller.recoveryActionTitle = "复制结果"
+        controller.recoveryActionTitle = "复制"
         controller.handleEvent(.processingFailed(.injectionFailed))
         controller.showCopyConfirmation()
         XCTAssertEqual(controller.hudState, .notice("已复制"))
@@ -306,7 +306,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
     func testUnverifiedPasteDismissesHUDWithoutNoticeOrRetryAction() async {
         let controller = HUDFeedbackController()
         controller.handleEvent(.recoveryStarted)
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = {}
         controller.handleEvent(.outputDispatched)
         XCTAssertEqual(controller.hudState, .processing, "Dismiss without flashing a result notice")
@@ -454,12 +454,12 @@ final class HUDFeedbackControllerTests: XCTestCase {
         controller.handleEvent(.recordingStopped)
         controller.handleEvent(.dictionaryTermLearned("另一个晚到词条"))
         XCTAssertEqual(controller.hudState, .processing)
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = {}
         controller.handleEvent(.processingFailed(.injectionFailed))
         controller.handleEvent(.dictionaryTermLearned("迟到的词条"))
         XCTAssertEqual(controller.hudState, .failure(.injectionFailed))
-        XCTAssertEqual(controller.recoveryActionTitle, "重试写入")
+        XCTAssertEqual(controller.recoveryActionTitle, "重试")
         controller.handleEvent(.processingCancelled)
     }
 
@@ -487,12 +487,12 @@ final class HUDFeedbackControllerTests: XCTestCase {
     func testOldRecoveryCallbackCannotTriggerNewFailure() {
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
         var calls = 0
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = { calls += 1 }
         controller.handleEvent(.processingFailed(.injectionFailed))
         let stale = controller.presentationGeneration
         controller.handleEvent(.recoveryStarted)
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = { calls += 1 }
         controller.handleEvent(.processingFailed(.injectionFailed))
         controller.performRecoveryAction(expectedGeneration: stale)
@@ -544,7 +544,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
 
     func testHoverAndAccessibilityFocusIndependentlyPauseFailureTimer() async throws {
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = {}
         controller.handleEvent(.processingFailed(.injectionFailed))
         let generation = controller.presentationGeneration
@@ -582,6 +582,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
             controller.handleEvent(event)
             if name == "missing-signal" { controller.handleEvent(.recordingSignalChanged(missing: true)) }
             if let action {
+                XCTAssertEqual(action.count, 2, "HUD recovery buttons use the approved two-character labels")
                 XCTAssertEqual(controller.presentation.actionLines, [action])
                 XCTAssertEqual(controller.presentation.lines.count, 1)
                 XCTAssertEqual(controller.presentation.capsuleSize.height, 34)
@@ -621,7 +622,7 @@ final class HUDFeedbackControllerTests: XCTestCase {
     func testNativeHUDBorderStaysInsideRoundedOutline() async throws {
         let previousWindows = Set(NSApp.windows.map(\.windowNumber))
         let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer())
-        controller.recoveryActionTitle = "重试写入"
+        controller.recoveryActionTitle = "重试"
         controller.onRecoveryAction = {}
         controller.handleEvent(.processingFailed(.injectionFailed))
         defer { controller.handleEvent(.processingCancelled) }

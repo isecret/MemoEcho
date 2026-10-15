@@ -109,7 +109,7 @@ final class HUDLayoutTests: XCTestCase {
     }
 
     func testRecoveryLabelsRemainWholeOnNarrowScreens() {
-        for action in ["设置", "重试", "复制", "继续", "继续处理已录内容"] {
+        for action in ["设置", "重试", "复制", "继续"] {
             for screenWidth: CGFloat in [1440, 300, 240] {
                 let layout = HUDLayout.measure(state: .failure(.recordingInterrupted), action: action, screenWidth: screenWidth)
                 XCTAssertEqual(layout.lines.joined(), "录音中断")
@@ -136,7 +136,7 @@ final class HUDLayoutTests: XCTestCase {
     }
 
     func testTransparentPanelPaddingAndRoundedCornersPassThrough() {
-        let layout = HUDLayout.measure(state: .failure(.injectionFailed), action: "重试写入")
+        let layout = HUDLayout.measure(state: .failure(.injectionFailed), action: "重试")
         let panel = layout.panelSize
         XCTAssertFalse(HUDWindow.isInsideCapsule(NSPoint(x: 2, y: panel.height / 2), panelSize: panel, capsuleSize: layout.capsuleSize))
         XCTAssertFalse(HUDWindow.isInsideCapsule(NSPoint(x: panel.width / 2, y: 2), panelSize: panel, capsuleSize: layout.capsuleSize))
@@ -147,7 +147,7 @@ final class HUDLayoutTests: XCTestCase {
     func testEveryFailureAndRecoveryActionStaysSingleLineOnDesktop() {
         let reasons: [HUDFailureReason] = [.recordingInterrupted, .permissionDenied, .resourceMissing,
             .notHeard, .recognitionFailed, .polishFailed, .translationFailed, .injectionFailed]
-        let actions = ["设置", "重试", "复制", "继续", "继续处理已录内容"]
+        let actions = ["设置", "重试", "复制", "继续"]
         for reason in reasons {
             let plain = HUDLayout.measure(state: .failure(reason))
             XCTAssertEqual(plain.lines, [reason.shortLabel])
