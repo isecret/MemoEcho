@@ -207,6 +207,24 @@ fi
 
 if [[ -n "$STAPLE_PATH" ]]; then
     echo "Stapling notarization ticket to $STAPLE_PATH..."
-    xcrun stapler staple "$STAPLE_PATH"
+    # Apple may accept the submission while its ticket delivery endpoint briefly
+    # drops the connection. Retry that lookup only; never resubmit notarization
+    # or ignore a failed validation/signature check.
+    staple_attempt=1
+    retry_delay=5
+    while true; do
+        if xcrun stapler staple "$STAPLE_PATH"; then
+            break
+        else
+            staple_status=$?
+        fi
+        if [[ "$staple_status" != "68" || "$staple_attempt" -ge 5 ]]; then
+            exit "$staple_status"
+        fi
+        echo "Ticket lookup failed (68); retrying in ${retry_delay}s (${staple_attempt}/5)." >&2
+        sleep "$retry_delay"
+        staple_attempt=$((staple_attempt + 1))
+        retry_delay=$((retry_delay * 2))
+    done
     xcrun stapler validate "$STAPLE_PATH"
 fi

@@ -32,6 +32,9 @@ jobs:
       - name: Verify Xcode environment
         run: ./scripts/ci/verify-xcode-env.sh
 
+      - name: Test notarization retry handling
+        run: python3 scripts/ci/test_notarize.py
+
       - name: Prepare build environment
         run: ./scripts/ci/prepare-macos-build.sh
 

@@ -76,6 +76,8 @@ MemoEcho 后续版本应保持 `me.wangmao.memoecho` 与相同的 `APPLE_SIGNING
 
 普通推送运行构建与测试，不需要凭据。标签发布使用以下 GitHub Actions repository secrets（当前仓库已配置）：
 
+常规测试包和公开版本通过标签触发 CI 完成签名、公证和自动更新签名。CI 发布失败时优先修复或重试流水线，避免临时切换成本机钥匙串签名。公证已接受后，票据附加遇到 `stapler` 返回 68 时最多尝试 5 次，间隔为 5、10、20、40 秒；其他错误及最终校验失败直接中止发布。
+
 | Secret | 用途 |
 | --- | --- |
 | `APPLE_DEVELOPER_ID_APP_CERT_BASE64` | Developer ID Application 证书及私钥的 P12，Base64 编码 |
