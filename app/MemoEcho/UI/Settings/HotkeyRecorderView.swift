@@ -136,7 +136,7 @@ private struct HotkeyTokenCluster: View {
     var body: some View {
         HotkeyTokenTruncatingLayout(spacing: 4) {
             ForEach(tokens) { token in
-                Text(token.visualLabel)
+                HotkeyTokenLabel(token: token)
                     .font(.system(size: 12, weight: .medium))
                     .padding(.horizontal, 6)
                     .frame(minHeight: 22)
@@ -178,7 +178,7 @@ struct OnboardingHotkeyKeycaps: View {
         HStack(spacing: 10) {
             ForEach(HotkeyPresentation(combo: combo).visualTokens) { token in
                 VStack(spacing: 6) {
-                    Text(token.visualLabel)
+                    HotkeyTokenLabel(token: token)
                         .font(.system(size: size, weight: .medium))
                     Text(token.accessibilityLabel.replacingOccurrences(of: "侧 ", with: " "))
                         .font(.system(size: 11, weight: .medium))
@@ -291,6 +291,7 @@ final class HotkeyRecorderControl: NSView {
 
     private var largestModifierSetSeen: Set<HotkeyPhysicalModifier> = []
     private var currentModifierPreview: Set<HotkeyPhysicalModifier> = []
+    private var modifierState = HotkeyModifierState()
     private var outsideClickMonitor: Any?
     private var resignObserver: NSObjectProtocol?
 
@@ -336,7 +337,8 @@ final class HotkeyRecorderControl: NSView {
             return
         }
 
-        var physicalModifiers = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+        var physicalModifiers = modifierState.consume(event)
+        guard !modifierState.hasUnresolvedModifiers else { cancel(); return }
         // Arrow/function-key events can carry .function without a physical Fn press.
         if !CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_Function)) {
             physicalModifiers.remove(.function)
@@ -357,7 +359,8 @@ final class HotkeyRecorderControl: NSView {
             return
         }
 
-        let pressed = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+        let pressed = modifierState.consume(event)
+        guard !modifierState.hasUnresolvedModifiers else { cancel(); return }
         let resolvedState = Self.resolveModifierPreviewState(
             pressed: pressed,
             previousLargest: largestModifierSetSeen
@@ -386,6 +389,7 @@ final class HotkeyRecorderControl: NSView {
     }
 
     private func startSession() {
+        modifierState.reset()
         largestModifierSetSeen = []
         currentModifierPreview = []
         installOutsideClickMonitor()
@@ -406,6 +410,7 @@ final class HotkeyRecorderControl: NSView {
     }
 
     private func stopSession(notifyCancel: Bool) {
+        modifierState.reset()
         largestModifierSetSeen = []
         currentModifierPreview = []
         removeOutsideClickMonitor()

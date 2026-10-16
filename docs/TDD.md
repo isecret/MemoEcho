@@ -170,6 +170,7 @@
 - 若候选期间参与 `Right Command + M` 等其他组合，本次候选进入取消态；修饰键释放后关闭候选 HUD，不改变 `SessionCoordinator` 状态。已有录音不会被该组合键误结束
 - `HotkeyManager.replace(with:)` 先尝试新监听，成功后由设置页持久化；失败则恢复原监听且不改配置
 - 设置页展示使用 `HotkeyPresentation` 键帽 token 与无障碍描述，不把 `displayString` 当作 UI 唯一数据源；快捷键展示文本从键码和修饰键生成，不写入 JSON
+- 设置页与引导页的 Fn 键帽共用 `HotkeyTokenLabel`，以行内单色 SF Symbols `globe` 显示 `Fn / 地球图标`；文字、斜杠和图标按字号自然排版。纯文本说明使用 `Fn`，无障碍名称保留“Fn 或地球键”。
 - MacBook `Fn`／🌐 键通过 `flagsChanged` 的 `.function` 位（0x800000）判定按住状态；录制控件通过物理键码 `kVK_Function`（63）过滤 `keyDown`，避免把 `Fn` 当普通键提交
 - 纯 `Fn` 及含 `Fn` 的组合走特殊修饰键／物理按键路径；Carbon 路径不涉及 `Fn`
 - 设置页录制控件直接采集按键事件，支持：
@@ -180,6 +181,7 @@
   - 其他左右侧修饰键组合
 - 快捷键配置模型使用带 `kind` 的当前 JSON 结构：普通组合键包含 `keyCode`、`modifiers`；纯修饰键包含 `specialModifiers`。
 - 特殊修饰键匹配要求物理按键组合精确一致；存在额外修饰键时不触发（该语义同样适用于 `Fn`，按住 `Fn` 再按 F1–F12 等功能键不会误触发纯 `Fn` 快捷键）
+- Issue #20：`HotkeyModifierState` 统一解析全局监听和设置页录制的修饰键。Command、Option、Control、Shift 优先采用设备侧别位；模拟 `flagsChanged` 仅带通用标记时，依据明确的修饰键 `keyCode` 补充侧别，并在后续事件仍携带该通用标记期间保留已知按键。重复事件不翻转状态；无设备位的双侧重叠不猜测部分释放，直到通用标记清除。无法确定侧别的修饰键使当前手势取消，不能被忽略或当作干净释放；暂停、重注册和录制结束清理解析状态。Fn 沿用 `.function` 位，不改变配置或录音方式。
 
 - Issue #8 增加 `HotkeyGestureRecognizer` 与 `triggerMode`，统一单按、双按和按住；按住以手势编号绑定 session ID，释放与启动按主线程事件顺序处理。处理态清除手势，设置与引导禁用编辑；配置事务及默认字段省略规则见 [录音方式方案](./plans/hotkey-recording-modes.md)。
 

@@ -71,6 +71,7 @@ final class HotkeyManager: @unchecked Sendable {
     private var localKeyMonitor: Any?
     private var isKeyDown = false
     private var isBlockedUntilRelease = false
+    private var modifierState = HotkeyModifierState()
     private var recognizer = HotkeyGestureRecognizer(mode: .singlePress)
     var onGestureAction: (@MainActor @Sendable (HotkeyGestureAction) -> Void)?
     var isTriggerAllowed: (@MainActor @Sendable () -> Bool)?
@@ -186,10 +187,10 @@ final class HotkeyManager: @unchecked Sendable {
         if hotkey.triggerMode != .singlePress {
             let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .flagsChanged, .systemDefined]
             globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
-                self?.handleModeEvent(event)
+                self?.handleEvent(event)
             }
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-                self?.handleModeEvent(event)
+                self?.handleEvent(event)
                 return event
             }
             guard globalKeyMonitor != nil, localKeyMonitor != nil else {
@@ -203,17 +204,17 @@ final class HotkeyManager: @unchecked Sendable {
     private func installSpecialHotkey(_ hotkey: HotkeyCombo) -> HotkeyRegistrationResult {
         let keyActivityMask: NSEvent.EventTypeMask = [.keyDown, .systemDefined]
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: keyActivityMask) { [weak self] event in
-            self?.handleSpecialEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
         }
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: keyActivityMask) { [weak self] event in
-            self?.handleSpecialEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
             return event
         }
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handleSpecialEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
         }
         localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handleSpecialEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
             return event
         }
         guard globalKeyMonitor != nil, localKeyMonitor != nil,
@@ -227,17 +228,17 @@ final class HotkeyManager: @unchecked Sendable {
     private func installPhysicalStandardHotkey(_ hotkey: HotkeyCombo) -> HotkeyRegistrationResult {
         let keyMask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .systemDefined]
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: keyMask) { [weak self] event in
-            self?.handlePhysicalStandardEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
         }
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: keyMask) { [weak self] event in
-            self?.handlePhysicalStandardEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
             return event
         }
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handlePhysicalStandardEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
         }
         localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handlePhysicalStandardEvent(event, hotkey: hotkey)
+            self?.handleEvent(event)
             return event
         }
         guard globalKeyMonitor != nil, localKeyMonitor != nil,
@@ -293,12 +294,14 @@ final class HotkeyManager: @unchecked Sendable {
         isKeyDown = false
         cancelPendingSpecialGesture()
         publish(recognizer.reset())
+        modifierState.reset()
     }
 
     private func blockCurrentlyPressedKey(_ hotkey: HotkeyCombo) {
         if hotkey.isPureModifier {
-            let pressed = HotkeyPhysicalModifier.pressedSet(from: NSEvent.modifierFlags)
-            isBlockedUntilRelease = isBlockedUntilRelease || containsTargetModifier(pressed, hotkey: hotkey)
+            let pressed = modifierState.resolve(flags: NSEvent.modifierFlags)
+            isBlockedUntilRelease = isBlockedUntilRelease || modifierState.hasUnresolvedModifiers
+                || containsTargetModifier(pressed, hotkey: hotkey)
         } else if let keyCode = hotkey.keyCode {
             isBlockedUntilRelease = isBlockedUntilRelease || CGEventSource.keyState(.combinedSessionState, key: keyCode)
         }
@@ -346,8 +349,27 @@ final class HotkeyManager: @unchecked Sendable {
         publish(recognizer.reset())
     }
 
-    private func handleModeEvent(_ event: NSEvent) {
-        let pressed = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
+    /// Shared NSEvent entry for local/global monitors and event replay tests.
+    func handleEvent(_ event: NSEvent) {
+        guard let hotkey = registeredHotkey else { return }
+        let pressed = modifierState.consume(event)
+        if modifierState.hasUnresolvedModifiers {
+            // An unqualified extra modifier must not disappear from the chord,
+            // confirm a clean release, or be guessed to be the configured side.
+            cancelPendingSpecialGesture()
+            interruptGesture(blockUntilRelease: true)
+            return
+        }
+        if hotkey.isPureModifier {
+            handleSpecialEvent(event, pressed: pressed, hotkey: hotkey)
+        } else if hotkey.hasPhysicalStandardModifiers {
+            handlePhysicalStandardEvent(event, pressed: pressed, hotkey: hotkey)
+        } else {
+            handleModeEvent(event, pressed: pressed)
+        }
+    }
+
+    private func handleModeEvent(_ event: NSEvent, pressed: Set<HotkeyPhysicalModifier>) {
         let input: HotkeyInputEvent
         switch event.type {
         case .keyDown: input = .keyDown(event.keyCode, modifiers: pressed, isRepeat: event.isARepeat)
@@ -470,14 +492,12 @@ final class HotkeyManager: @unchecked Sendable {
         return carbon
     }
 
-    private func handleSpecialEvent(_ event: NSEvent, hotkey: HotkeyCombo) {
-        if hotkey.triggerMode != .singlePress { handleModeEvent(event); return }
+    private func handleSpecialEvent(_ event: NSEvent, pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) {
+        if hotkey.triggerMode != .singlePress { handleModeEvent(event, pressed: pressed); return }
         let gestureEvent: SpecialHotkeyGestureEvent
         switch event.type {
         case .flagsChanged:
-            gestureEvent = .modifierFlagsChanged(
-                HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
-            )
+            gestureEvent = .modifierFlagsChanged(pressed)
         case .keyDown:
             gestureEvent = .keyDown(UInt16(event.keyCode))
         case .systemDefined:
@@ -566,10 +586,9 @@ final class HotkeyManager: @unchecked Sendable {
         MainActor.assumeIsolated { callback(action) }
     }
 
-    private func handlePhysicalStandardEvent(_ event: NSEvent, hotkey: HotkeyCombo) {
-        if hotkey.triggerMode != .singlePress { handleModeEvent(event); return }
+    private func handlePhysicalStandardEvent(_ event: NSEvent, pressed: Set<HotkeyPhysicalModifier>, hotkey: HotkeyCombo) {
+        if hotkey.triggerMode != .singlePress { handleModeEvent(event, pressed: pressed); return }
         if event.type == .keyDown && event.isARepeat { return }
-        let pressed = HotkeyPhysicalModifier.pressedSet(from: event.modifierFlags)
 
         switch event.type {
         case .keyDown:

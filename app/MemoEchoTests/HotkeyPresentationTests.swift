@@ -70,7 +70,9 @@ final class HotkeyPresentationTests: XCTestCase {
         let fnOnly = HotkeyPresentation(
             combo: HotkeyCombo.special(modifiers: [HotkeyModifierSpec(key: .function)])
         )
-        XCTAssertEqual(fnOnly.visualTokens.map(\.visualLabel), ["Fn / 🌐"])
+        XCTAssertEqual(fnOnly.visualTokens.map(\.visualLabel), ["Fn"])
+        XCTAssertEqual(fnOnly.visualTokens.map(\.trailingSystemImage), ["globe"])
+        XCTAssertEqual(fnOnly.compactDescription, "Fn")
         XCTAssertEqual(fnOnly.accessibilityDescription, "Fn 或地球键")
 
         let commandFn = HotkeyPresentation(
@@ -81,7 +83,8 @@ final class HotkeyPresentationTests: XCTestCase {
                 ]
             )
         )
-        XCTAssertEqual(commandFn.visualTokens.map(\.visualLabel), ["左 ⌘", "Fn / 🌐"])
+        XCTAssertEqual(commandFn.visualTokens.map(\.visualLabel), ["左 ⌘", "Fn"])
+        XCTAssertEqual(commandFn.visualTokens.map(\.trailingSystemImage), [nil, "globe"])
     }
 
     func testKnownSystemShortcutWarning() {

@@ -6,6 +6,7 @@ struct HotkeyToken: Equatable, Identifiable, Hashable, Sendable {
     let id: String
     let visualLabel: String
     let accessibilityLabel: String
+    var trailingSystemImage: String? = nil
 }
 
 struct HotkeyPresentation: Equatable, Sendable {
@@ -85,8 +86,9 @@ struct HotkeyPresentation: Equatable, Sendable {
         if spec.key == .function {
             return HotkeyToken(
                 id: "function",
-                visualLabel: "Fn / 🌐",
-                accessibilityLabel: "Fn 或地球键"
+                visualLabel: "Fn",
+                accessibilityLabel: "Fn 或地球键",
+                trailingSystemImage: "globe"
             )
         }
 

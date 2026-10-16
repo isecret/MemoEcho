@@ -77,6 +77,48 @@ enum HotkeyPhysicalModifier: UInt16, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// Resolves side-qualified modifiers across NSEvents, including software remotes
+/// that send flagsChanged with a physical keyCode but only generic modifier flags.
+struct HotkeyModifierState {
+    private var knownPressed: Set<HotkeyPhysicalModifier> = []
+    private(set) var hasUnresolvedModifiers = false
+
+    mutating func reset() {
+        knownPressed = []
+        hasUnresolvedModifiers = false
+    }
+
+    mutating func consume(_ event: NSEvent) -> Set<HotkeyPhysicalModifier> {
+        resolve(flags: event.modifierFlags,
+                changedKeyCode: event.type == .flagsChanged ? event.keyCode : nil)
+    }
+
+    mutating func resolve(flags: NSEvent.ModifierFlags,
+                          changedKeyCode: UInt16? = nil) -> Set<HotkeyPhysicalModifier> {
+        let reported = HotkeyPhysicalModifier.pressedSet(from: flags)
+        let changed = changedKeyCode.flatMap(HotkeyPhysicalModifier.init(rawValue:))
+        var pressed = reported
+        hasUnresolvedModifiers = false
+
+        for key in HotkeyModifierKey.allCases where key != .function {
+            // Device bits remain authoritative, including a physical side's release
+            // while the opposite side is still held. Never infer a new side there.
+            guard !reported.contains(where: { $0.spec.key == key }),
+                  flags.contains(key.genericFlags) else { continue }
+            var inferred = knownPressed.filter { $0.spec.key == key }
+            if let changed, changed.spec.key == key { inferred.insert(changed) }
+            // Without a device bit, repeated flagsChanged cannot distinguish a
+            // duplicate from one side releasing while the other remains held.
+            // Keep known sides until the generic flag clears; never toggle them.
+            if inferred.isEmpty { hasUnresolvedModifiers = true }
+            pressed.formUnion(inferred)
+        }
+
+        knownPressed = pressed
+        return pressed
+    }
+}
+
 extension Set where Element == HotkeyPhysicalModifier {
     var genericFlags: NSEvent.ModifierFlags {
         reduce(into: NSEvent.ModifierFlags()) { partialResult, modifier in
