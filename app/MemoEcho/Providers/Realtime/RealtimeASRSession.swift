@@ -115,10 +115,14 @@ actor URLSessionRealtimeWebSocketTransport: RealtimeWebSocketTransport {
     }
     func send(_ message: RealtimeWebSocketMessage) async throws {
         guard let task else { throw RealtimeASRError.connectionClosed }
-        switch message {
-        case .text(let value): try await task.send(.string(value))
-        case .binary(let data): try await task.send(.data(data))
-        case .closed: throw RealtimeASRError.invalidState
+        do {
+            switch message {
+            case .text(let value): try await task.send(.string(value))
+            case .binary(let data): try await task.send(.data(data))
+            case .closed: throw RealtimeASRError.invalidState
+            }
+        } catch {
+            throw probeError(error, task: task)
         }
     }
     func receive() async throws -> RealtimeWebSocketMessage {
@@ -131,8 +135,17 @@ actor URLSessionRealtimeWebSocketTransport: RealtimeWebSocketTransport {
             }
         } catch {
             if task.closeCode == .normalClosure { return .closed(normal: true) }
+            if ServiceProbeContext.budget != nil { throw probeError(error, task: task) }
             throw RealtimeASRError.connectionClosed
         }
+    }
+
+    private func probeError(_ error: Error, task: URLSessionWebSocketTask) -> any Error {
+        guard ServiceProbeContext.budget != nil else { return error }
+        if Task.isCancelled || ServiceProbeFailure.isCancellation(error) { return CancellationError() }
+        if let response = task.response as? HTTPURLResponse, response.statusCode != 101,
+           let failure = ServiceProbeFailure.http(response) { return failure }
+        return ServiceProbeFailure.classify(error)
     }
     func close() async {
         task?.cancel(with: .goingAway, reason: nil)

@@ -81,8 +81,10 @@ final class AliyunBailianValidationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try configuredStore(directory: directory)
         let gate = BailianValidationGate()
+        var newRequests = 0
         let service = CloudASRValidationService(configStore: store, validatorFactory: { input in
             if input.asrConfig.aliyunBailian.apiKey == "new-key" {
+                newRequests += 1
                 return BailianCompletedValidator()
             }
             return gate
@@ -94,9 +96,12 @@ final class AliyunBailianValidationTests: XCTestCase {
         try store.saveASRConfig(changed)
         service.syncFromConfig(for: .init(platform: .aliyunBailianASR, asrConfig: store.asrConfig))
         service.validate(.init(platform: .aliyunBailianASR, asrConfig: store.asrConfig))
-        await waitUntil { service.status == .ready }
+        XCTAssertEqual(service.status, .checking)
+        XCTAssertEqual(newRequests, 0, "The replaced connection must close before starting another validation")
         await gate.finish()
         await waitUntil { await gate.hasFinished }
+        await waitUntil { service.status == .ready }
+        XCTAssertEqual(newRequests, 1)
         XCTAssertEqual(service.status, .ready)
         XCTAssertEqual(store.asrConfig.aliyunBailian.apiKey, "new-key")
         XCTAssertEqual(store.asrConfig.aliyunBailian.validationStatus, .verified)

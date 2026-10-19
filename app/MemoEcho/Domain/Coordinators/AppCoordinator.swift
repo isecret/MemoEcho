@@ -139,6 +139,7 @@ final class AppCoordinator {
         let hud = HUDFeedbackController()
         hudFeedbackController = hud
         sessionCoordinator.beforeCaptureStart = { [weak self] in
+            await self?.cloudASRValidationService.waitForProbeClose()
             await self?.microphoneLevelController.stopAndWait()
         }
         microphoneLevelController.beforeCaptureStart = { [weak self] in
@@ -147,15 +148,29 @@ final class AppCoordinator {
         sessionCoordinator.onStateChanged = { [weak self] oldState, state in
             guard let self else { return }
             self.onboardingCoordinator.canEditHotkey = !state.isProcessing
+            self.cloudASRValidationService.setBusinessActive(state == .recording || state == .transcribing)
+            self.llmValidationService.setBusinessActive(state == .polishing)
             if (state.isProcessing && state != .recording) || (oldState == .recording && state != .recording) {
                 self.clearHotkeyInteraction()
             }
+        }
+        sessionCoordinator.beforeServiceRequest = { [weak self] stage in
+            if stage == .recognition { try await self?.cloudASRValidationService.prepareForBusinessRequest() }
+            else { try await self?.llmValidationService.prepareForBusinessRequest() }
+        }
+        sessionCoordinator.onLLMRequestPrepared = { [weak self] input in
+            var identity = input.normalized()
+            identity.omitThinkingParameter = false
+            self?.recordingValidationIdentity?.llm = identity.fingerprint
+        }
+        sessionCoordinator.onServiceSucceeded = { [weak self] stage in
+            self?.recordServiceSuccess(stage)
         }
         sessionCoordinator.onFeedbackEvent = { [weak self] event in
             if let self {
                 if case .recordingStarted = event { self.microphoneLevelController.stop() }
                 if case .processingFailed = event {
-                    self.invalidateFailedConfiguration()
+                    self.recheckFailedService()
                     let presentation = self.recoveryPresentation.flatMap {
                         $0.id == self.sessionCoordinator.currentErrorRecoveryID ? $0 : nil
                     }
@@ -228,6 +243,12 @@ final class AppCoordinator {
             if self.onboardingCoordinator.isPresented { self.onboardingCoordinator.refresh() }
         }
         lifecycleObservers = [
+            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.llmValidationService.shutdown()
+                    self?.cloudASRValidationService.shutdown()
+                }
+            },
             NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.permissionsManager.applicationDidResignActive() }
             },
@@ -303,27 +324,42 @@ final class AppCoordinator {
         return window
     }
 
-    private func invalidateFailedConfiguration() {
-        guard let error = sessionCoordinator.currentError else { return }
+    private func recheckFailedService() {
+        guard !sessionCoordinator.currentFailureIsLocal, let error = sessionCoordinator.currentError else { return }
         switch error {
         case .llmConfigurationIncomplete, .invalidLLMConfiguration, .llmNetworkFailure,
              .llmEmptyResponse, .llmInvalidResponse:
             guard recordingValidationIdentity?.llm == currentValidationIdentity.llm else { return }
-            let transient: Bool
-            switch error {
-            case .llmNetworkFailure, .llmEmptyResponse, .llmInvalidResponse: transient = true
-            default: transient = false
-            }
-            llmValidationService.invalidateCurrentValidation(isTransient: transient)
-        case .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure, .cloudASRNetworkFailure, .cloudASRInvalidResponse:
-            guard recordingValidationIdentity?.asr == currentValidationIdentity.asr else { return }
-            let transient: Bool
-            switch error {
-            case .cloudASRNetworkFailure, .cloudASRInvalidResponse: transient = true
-            default: transient = false
-            }
-            cloudASRValidationService.invalidateCurrentValidation(isTransient: transient)
+            llmValidationService.reportRuntimeFailure(currentLLMValidationInput,
+                purpose: sessionCoordinator.recovery?.stage == .translation ? .translation : .polish)
+        case .cloudASRConfigurationIncomplete, .cloudASRAuthenticationFailure, .cloudASRNetworkFailure,
+             .cloudASRInvalidResponse, .cloudASREmptyResponse:
+            guard recordingValidationIdentity?.asr == currentCloudValidationInput.fingerprint else { return }
+            cloudASRValidationService.reportRuntimeFailure(currentCloudValidationInput)
         default: break
+        }
+    }
+
+    private var currentLLMValidationInput: LLMValidationInput {
+        .init(baseURL: configStore.llmConfig.baseURL, apiKey: configStore.openAIAPIKey,
+              model: configStore.llmConfig.model, omitThinkingParameter: configStore.omitThinkingParameter)
+    }
+
+    private var currentCloudValidationInput: CloudASRValidationInput {
+        let platform = sessionCoordinator.isRecovering
+            ? sessionCoordinator.recovery?.asrPlatform ?? configStore.asrConfig.selectedPlatform
+            : configStore.asrConfig.selectedPlatform
+        return .init(platform: platform, asrConfig: configStore.asrConfig)
+    }
+
+    private func recordServiceSuccess(_ stage: SessionRecoveryCheckpoint.Stage) {
+        if stage == .recognition {
+            guard recordingValidationIdentity?.asr == currentCloudValidationInput.fingerprint else { return }
+            cloudASRValidationService.recordSuccess(currentCloudValidationInput)
+        } else if stage == .polish || stage == .translation {
+            guard recordingValidationIdentity?.llm == currentValidationIdentity.llm else { return }
+            llmValidationService.recordSuccess(currentLLMValidationInput,
+                purpose: stage == .translation ? .translation : .polish)
         }
     }
 
@@ -408,7 +444,18 @@ final class AppCoordinator {
         guard let checkpoint = sessionCoordinator.recovery,
               sessionCoordinator.actionableRecovery(id: checkpoint.id) != nil else { return nil }
         let readiness = readinessService.snapshot(asrPlatform: checkpoint.asrPlatform)
-        return RecoveryPresentation(checkpoint: checkpoint, readiness: readiness)
+        let confirmedBlocker: SettingsTab?
+        let asrInput = CloudASRValidationInput(platform: checkpoint.asrPlatform, asrConfig: configStore.asrConfig)
+        if checkpoint.stage == .recognition, cloudASRValidationService.health.state == .blocked,
+           cloudASRValidationService.health.fingerprint == asrInput.fingerprint {
+            confirmedBlocker = .asr
+        } else if checkpoint.stage == .polish || checkpoint.stage == .translation,
+                  llmValidationService.health.state == .blocked,
+                  llmValidationService.health.fingerprint == currentValidationIdentity.llm {
+            confirmedBlocker = .ai
+        } else { confirmedBlocker = nil }
+        return RecoveryPresentation(checkpoint: checkpoint, readiness: readiness,
+                                    confirmedServiceBlocker: confirmedBlocker)
     }
 
     var menuSettingsBlocker: SettingsTab? {

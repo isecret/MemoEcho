@@ -61,8 +61,9 @@ final class OpenAICompatibleASRProvider: ASRProvider, CloudASRValidating, Sendab
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await httpClient.data(for: request)
+            (data, response) = try await ServiceProbeContext.send(request, using: httpClient.data(for:))
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }

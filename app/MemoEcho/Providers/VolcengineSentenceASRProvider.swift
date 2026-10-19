@@ -54,8 +54,9 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
         let responseData: Data
         let response: URLResponse
         do {
-            (responseData, response) = try await httpClient.data(for: request)
+            (responseData, response) = try await ServiceProbeContext.send(request, using: httpClient.data(for:))
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }
@@ -112,7 +113,9 @@ final class VolcengineSentenceASRProvider: ASRProvider, CloudASRValidating, Send
 
     func validateCredentials() async throws {
         do {
-            _ = try await recognize(audioData: validationAudioLoader(), timeout: 15)
+            let probe = VolcengineSentenceASRProvider(apiKey: apiKey, httpClient: httpClient,
+                                                      validationAudioLoader: validationAudioLoader)
+            _ = try await probe.recognize(audioData: validationAudioLoader(), timeout: 15)
         } catch MemoEchoError.cloudASREmptyResponse {
             throw MemoEchoError.cloudASRInvalidResponse(detail: "文件极速版未识别出测试语音，请检查产品开通状态")
         }

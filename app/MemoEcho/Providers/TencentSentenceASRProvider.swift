@@ -100,8 +100,9 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
         let startTime = Date()
         let (responseData, response): (Data, URLResponse)
         do {
-            (responseData, response) = try await httpClient.data(for: request)
+            (responseData, response) = try await ServiceProbeContext.send(request, using: httpClient.data(for:))
         } catch let error as URLError {
+            try ServiceProbeContext.preserveFailure(error)
             CloudASRRequestLogger.requestFailed(
                 provider: "tencent",
                 endpoint: endpoint,
@@ -110,6 +111,7 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
             )
             throw MemoEchoError.cloudASRNetworkFailure(message: error.localizedDescription)
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             CloudASRRequestLogger.requestFailed(
                 provider: "tencent",
                 endpoint: endpoint,
@@ -171,8 +173,12 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
     }
 
     func validateCredentials() async throws {
-        let silentAudio = Self.validationAudioData()
-        _ = try await recognize(audioData: silentAudio, timeout: 15)
+        do {
+            let probe = TencentSentenceASRProvider(secretId: secretId, secretKey: secretKey, httpClient: httpClient)
+            _ = try await probe.recognize(audioData: ASRValidationAudio.load(), timeout: 15)
+        } catch MemoEchoError.cloudASREmptyResponse {
+            throw MemoEchoError.cloudASRInvalidResponse(detail: "服务未识别出测试语音")
+        }
     }
 
     // MARK: - Response Parsing
@@ -274,7 +280,4 @@ final class TencentSentenceASRProvider: ASRProvider, CloudASRValidating, @unchec
         return formatter.string(from: date)
     }
 
-    private static func validationAudioData() -> Data {
-        WAVAudioEncoder.encodePCM16(pcmData: Data(repeating: 0, count: 3200), sampleRate: 16_000, channels: 1)
-    }
 }

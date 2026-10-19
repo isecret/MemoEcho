@@ -147,14 +147,15 @@ struct LLMProvider: Sendable {
     func translate(
         text: String,
         targetLanguage: TranslationTargetLanguage,
-        context: WindowContextSnapshot? = nil
+        context: WindowContextSnapshot? = nil,
+        purpose: LLMRequestMetrics.Purpose = .translation
     ) async throws -> String {
         let contextSection = Self.contextPrompt(await windowContextEnabled() ? context : nil) ?? ""
         let sysPrompt = Self.translationBaseSystemPrompt(targetLanguage) + contextSection
         let userText = "请将以下文本翻译成\(targetLanguage.displayName)：\n\n\(text)"
         let url = try buildURL()
         let prepared = try buildRawRequestBody(systemPrompt: sysPrompt, userContent: userText,
-            requestMode: .plain, purpose: .translation, contextSection: contextSection)
+            requestMode: .plain, purpose: purpose, contextSection: contextSection)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -165,7 +166,7 @@ struct LLMProvider: Sendable {
 
         do {
             onRequestMetrics?(prepared.metrics)
-            let (responseData, response) = try await requestSender(request)
+            let (responseData, response) = try await ServiceProbeContext.send(request, using: requestSender)
             if let http = response as? HTTPURLResponse {
                 switch http.statusCode {
                 case 200:
@@ -189,15 +190,32 @@ struct LLMProvider: Sendable {
         } catch let error as MemoEchoError {
             throw error
         } catch let error as URLError {
+            try ServiceProbeContext.preserveFailure(error)
             throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
+            if ServiceProbeContext.budget != nil { throw ServiceProbeFailure.classify(error) }
             throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
         }
     }
 
-    func validateConfiguration() async throws {
-        _ = try await performRequest(text: "请回复 ok。", context: nil, purpose: .validation) { data in
-            _ = try parseResponse(data)
+    func validateConfiguration(purpose: LLMValidationPurpose = .polish) async throws {
+        // Intentionally rebuild a provider with only connection settings. Validation never reads
+        // the user's dictionary index, window-context preference, text, or session checkpoint.
+        let probe = LLMProvider(baseURL: baseURL, apiKey: apiKey, model: model,
+            omitThinkingParameter: omitThinkingParameter,
+            onThinkingUnsupported: onThinkingUnsupported, onRequestMetrics: onRequestMetrics,
+            windowContextEnabled: { false }, requestSender: requestSender)
+        switch purpose {
+        case .polish:
+            let result = try await probe.performRequest(text: ValidationFixture.text, context: nil,
+                purpose: .validation, responseHandler: probe.parseResponse)
+            guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw MemoEchoError.llmEmptyResponse
+            }
+        case .translation:
+            _ = try await probe.translate(text: ValidationFixture.text,
+                targetLanguage: ValidationFixture.translationTarget, purpose: .validation)
         }
     }
 
@@ -452,7 +470,8 @@ struct LLMProvider: Sendable {
 
         do {
             onRequestMetrics?(prepared.metrics)
-            let (responseData, response) = try await requestSender(request)
+            let (responseData, response) = try await ServiceProbeContext.send(request,
+                allowsThinkingFallback: prepared.metrics.thinkingDisabled, using: requestSender)
 
             if let httpResponse = response as? HTTPURLResponse {
                 switch httpResponse.statusCode {
@@ -460,6 +479,11 @@ struct LLMProvider: Sendable {
                     return responseData
                 case 400:
                     let body = String(data: responseData, encoding: .utf8) ?? ""
+                    if ServiceProbeContext.budget != nil,
+                       !(prepared.metrics.thinkingDisabled && shouldRetryWithoutThinking(message: body)),
+                       let failure = ServiceProbeFailure.http(httpResponse, data: responseData) {
+                        throw failure
+                    }
                     let reason = shouldRetryWithoutThinking(message: body) ? "HTTP 400: unsupported thinking" : "HTTP 400"
                     throw MemoEchoError.llmNetworkFailure(message: reason)
                 case 401, 403:
@@ -475,8 +499,10 @@ struct LLMProvider: Sendable {
         } catch let error as MemoEchoError {
             throw error
         } catch let error as URLError {
+            try ServiceProbeContext.preserveFailure(error)
             throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
         }
     }

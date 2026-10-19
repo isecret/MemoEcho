@@ -1,6 +1,40 @@
 import AppKit
 import SwiftUI
 
+struct LLMStatusPresentation: Equatable {
+    let status: LLMModelStatus
+    var isTransientFailure = false
+
+    var text: String {
+        switch status {
+        case .ready: return "已就绪"
+        case .checking: return "检查中…"
+        case .incomplete: return "未就绪"
+        case .failed: return isTransientFailure ? "暂不可用" : "未就绪"
+        }
+    }
+
+    var systemImage: String {
+        switch status {
+        case .ready: return "checkmark.circle.fill"
+        case .checking: return "ellipsis.circle"
+        case .incomplete: return "exclamationmark.triangle.fill"
+        case .failed: return isTransientFailure ? "exclamationmark.triangle.fill" : "xmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch status {
+        case .ready: return .green
+        case .checking: return .secondary
+        case .incomplete: return .orange
+        case .failed: return isTransientFailure ? .orange : .red
+        }
+    }
+
+    var showsRetry: Bool { status == .incomplete || status == .failed }
+}
+
 struct LLMSettingsView: View {
     let configStore: ConfigStore
     let modelListService: LLMModelListService
@@ -49,6 +83,7 @@ struct LLMSettingsView: View {
             }
         } footer: {
             Text("支持 OpenAI 兼容接口，用于整理和翻译语音识别结果。")
+            Text("请求失败后将使用内置样例检查连接。")
         }
         .onAppear {
             loadDraft()
@@ -86,19 +121,31 @@ struct LLMSettingsView: View {
         if isLoaded, draftTracker.hasPendingChanges { trySaveAndValidate() }
     }
 
-    private func trySaveAndValidate() {
+    @discardableResult
+    private func trySaveAndValidate(validateAfterSave: Bool = true) -> Bool {
         let config = LLMConfig(baseURL: baseURL, model: model)
 
         do {
             try configStore.saveLLMConfig(config, apiKey: apiKey)
             draftTracker.loaded(draftFingerprint)
             saveError = nil
-            validationService.validate(currentValidationInput())
+            if validateAfterSave { validationService.validate(currentValidationInput()) }
         } catch {
             saveError = "配置未保存，请检查输入及配置目录权限。"
+            return false
         }
 
         loadModelList()
+        return true
+    }
+
+    private func retryValidation() {
+        guard isLoaded, saveError == nil, validationService.canRetry(currentValidationInput()) else { return }
+        saveTask?.cancel()
+        saveTask = nil
+        // A retry saves immediately and starts one independent validation episode.
+        guard trySaveAndValidate(validateAfterSave: false) else { return }
+        validationService.retry(currentValidationInput())
     }
 
     private var draftFingerprint: String {
@@ -146,27 +193,31 @@ struct LLMSettingsView: View {
 
     @ViewBuilder
     private var validationStatusView: some View {
-        switch validationService.status(for: currentValidationInput()) {
-        case .incomplete:
+        let input = currentValidationInput()
+        let presentation = LLMStatusPresentation(
+            status: saveError == nil ? validationService.status(for: input) : .incomplete,
+            isTransientFailure: validationService.isTransientRuntimeFailure
+        )
+        HStack(spacing: 6) {
             statusIndicator(
-                text: "未就绪",
-                systemImage: "exclamationmark.triangle.fill",
-                color: .orange
+                text: presentation.text,
+                systemImage: presentation.systemImage,
+                color: presentation.color
             )
-        case .checking:
-            statusIndicator(text: "验证中…", systemImage: "ellipsis.circle", color: .secondary)
-        case .ready:
-            statusIndicator(
-                text: "已就绪",
-                systemImage: "checkmark.circle.fill",
-                color: .green
-            )
-        case .failed:
-            statusIndicator(
-                text: "未就绪",
-                systemImage: "xmark.circle.fill",
-                color: .red
-            )
+
+            if presentation.showsRetry {
+                Button(action: retryValidation) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(saveError != nil || !validationService.canRetry(input))
+                .accessibilityLabel("重新检查模型服务")
+                .help(validationService.health.isCoolingDown ? "稍后重试" : "重试")
+            }
         }
     }
 

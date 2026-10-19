@@ -5,6 +5,7 @@ enum ASRCloudStatusPresentation: Equatable {
     case checking
     case notReady
     case failed
+    case temporarilyUnavailable
 
     static func initial(
         isComplete: Bool,
@@ -26,7 +27,8 @@ enum ASRCloudStatusPresentation: Equatable {
     static func currentSession(
         isComplete: Bool,
         serviceStatus: CloudASRValidationDisplayStatus,
-        errorMessage: String?
+        errorMessage: String?,
+        isTransientFailure: Bool = false
     ) -> Self {
         guard isComplete else { return .notReady }
 
@@ -38,6 +40,7 @@ enum ASRCloudStatusPresentation: Equatable {
         case .checking:
             return .checking
         case .failed:
+            if isTransientFailure { return .temporarilyUnavailable }
             return normalizedErrorMessage(errorMessage) == nil ? .notReady : .failed
         }
     }
@@ -47,11 +50,13 @@ enum ASRCloudStatusPresentation: Equatable {
         case .ready:
             return "已就绪"
         case .checking:
-            return "验证中…"
+            return "检查中…"
         case .notReady:
             return "未就绪"
         case .failed:
-            return "验证失败"
+            return "未就绪"
+        case .temporarilyUnavailable:
+            return "暂不可用"
         }
     }
 
@@ -65,6 +70,8 @@ enum ASRCloudStatusPresentation: Equatable {
             return "exclamationmark.triangle.fill"
         case .failed:
             return "xmark.circle.fill"
+        case .temporarilyUnavailable:
+            return "exclamationmark.triangle.fill"
         }
     }
 
@@ -78,11 +85,17 @@ enum ASRCloudStatusPresentation: Equatable {
             return .orange
         case .failed:
             return .red
+        case .temporarilyUnavailable:
+            return .orange
         }
     }
 
     var showsErrorMessage: Bool {
-        self == .failed
+        self == .failed || self == .temporarilyUnavailable
+    }
+
+    var showsRetry: Bool {
+        self == .notReady || self == .failed || self == .temporarilyUnavailable
     }
 
     private static func normalizedErrorMessage(_ errorMessage: String?) -> String? {
@@ -203,6 +216,9 @@ struct ASRSettingsView: View {
                     }
                 } footer: {
                     Text(selectedPlatform.cloudConfigSummary)
+                    if selectedPlatform != .localSenseVoice {
+                        Text("请求失败后将使用内置样例检查连接。")
+                    }
                     if selectedPlatform == .aliyunBailianASR,
                        !bailianBaseURL.isEmpty, currentDraftConfig().aliyunBailian.requestURL == nil {
                         Text("地址格式不正确，请检查后再试。")
@@ -376,11 +392,27 @@ struct ASRSettingsView: View {
         SettingsFormRow(title: "引擎状态") {
             VStack(alignment: .leading, spacing: 4) {
                 let presentation = cloudStatusPresentation(for: platform)
-                statusIndicator(
-                    text: presentation.text,
-                    systemImage: presentation.systemImage,
-                    color: presentation.color
-                )
+                HStack(spacing: 6) {
+                    statusIndicator(
+                        text: presentation.text,
+                        systemImage: presentation.systemImage,
+                        color: presentation.color
+                    )
+
+                    if presentation.showsRetry {
+                        Button(action: retryCloudValidation) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 18, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(saveError != nil || !validationService.canRetry(currentValidationInput()))
+                        .accessibilityLabel("重新检查语音服务")
+                        .help(validationService.health.isCoolingDown ? "稍后重试" : "重试")
+                    }
+                }
 
                 if presentation.showsErrorMessage,
                    let errorMessage = cloudValidationErrorMessage(for: platform) {
@@ -556,7 +588,8 @@ struct ASRSettingsView: View {
         if isLoaded, draftTracker.hasPendingChanges { saveCloudConfig() }
     }
 
-    private func saveCloudConfig() {
+    @discardableResult
+    private func saveCloudConfig(validateAfterSave: Bool = true) -> Bool {
         let draftConfig = currentDraftConfig()
         do {
             try configStore.saveASRConfig(draftConfig)
@@ -564,14 +597,24 @@ struct ASRSettingsView: View {
             saveError = nil
         } catch {
             saveError = "配置未保存，请检查配置目录权限。"
-            return
+            return false
         }
         validationService.syncFromConfig(for: currentValidationInput())
 
         let input = currentValidationInput()
-        if input.isCloudPlatform {
+        if validateAfterSave, input.isCloudPlatform {
             validationService.validate(input)
         }
+        return true
+    }
+
+    private func retryCloudValidation() {
+        guard isLoaded, saveError == nil, validationService.canRetry(currentValidationInput()) else { return }
+        saveTask?.cancel()
+        saveTask = nil
+        // Persist this draft without launching the normal automatic validation as well.
+        guard saveCloudConfig(validateAfterSave: false) else { return }
+        validationService.retry(currentValidationInput())
     }
 
     @ViewBuilder
@@ -591,6 +634,7 @@ struct ASRSettingsView: View {
     }
 
     private func cloudStatusPresentation(for platform: ASRPlatform) -> ASRCloudStatusPresentation {
+        guard saveError == nil else { return .notReady }
         let draftConfig = currentDraftConfig()
         let input = CloudASRValidationInput(platform: platform, asrConfig: draftConfig)
         let errorMessage = cloudValidationErrorMessage(for: platform)
@@ -598,7 +642,8 @@ struct ASRSettingsView: View {
         return .currentSession(
             isComplete: input.isComplete,
             serviceStatus: validationService.status(for: input),
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            isTransientFailure: validationService.isTransientRuntimeFailure
         )
     }
 

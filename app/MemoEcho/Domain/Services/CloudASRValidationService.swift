@@ -7,30 +7,40 @@ final class CloudASRValidationService {
 
     private let validatorFactory: ValidatorFactory
     private let configStore: ConfigStore
+    let health: ServiceHealthMonitor
+    private var currentInput: CloudASRValidationInput?
 
     private var validationTask: Task<Void, Never>?
+    private var closingValidationTask: Task<Void, Never>?
     private var activeFingerprint: String?
     private var lastCompletedFingerprint: String?
     private var activeRequestID: UUID?
 
-    private(set) var status: CloudASRValidationDisplayStatus = .incomplete
-    private(set) var lastErrorMessage: String?
-    private(set) var isTransientRuntimeFailure = false
+    private var validationStatus: CloudASRValidationDisplayStatus = .incomplete
+    var status: CloudASRValidationDisplayStatus { currentInput.map { status(for: $0) } ?? validationStatus }
+    private var validationErrorMessage: String?
+    var lastErrorMessage: String? { health.failure?.message ?? validationErrorMessage }
+    private var legacyTransientFailure = false
+    var isTransientRuntimeFailure: Bool { health.state == .temporaryFailure || legacyTransientFailure }
 
     init(
         configStore: ConfigStore,
-        validatorFactory: @escaping ValidatorFactory = CloudASRValidationService.defaultValidatorFactory
+        validatorFactory: @escaping ValidatorFactory = CloudASRValidationService.defaultValidatorFactory,
+        probePolicy: ServiceHealthMonitor.Policy = .init()
     ) {
         self.configStore = configStore
         self.validatorFactory = validatorFactory
+        health = ServiceHealthMonitor(policy: probePolicy)
     }
 
     func syncFromConfig(for input: CloudASRValidationInput) {
-        if lastCompletedFingerprint != input.fingerprint { isTransientRuntimeFailure = false }
+        currentInput = input
+        health.reset(ifDifferent: input.fingerprint)
+        if lastCompletedFingerprint != input.fingerprint { legacyTransientFailure = false }
         guard input.isCloudPlatform else {
             cancelOngoingValidation()
-            status = .incomplete
-            lastErrorMessage = nil
+            validationStatus = .incomplete
+            validationErrorMessage = nil
             activeFingerprint = nil
             lastCompletedFingerprint = nil
             return
@@ -39,8 +49,8 @@ final class CloudASRValidationService {
         let cloudState = cloudState(for: input)
         if !cloudState.isComplete {
             cancelOngoingValidation()
-            status = .incomplete
-            lastErrorMessage = nil
+            validationStatus = .incomplete
+            validationErrorMessage = nil
             activeFingerprint = nil
             lastCompletedFingerprint = nil
             return
@@ -53,24 +63,32 @@ final class CloudASRValidationService {
 
         switch cloudState.validationStatus {
         case .unvalidated, .validating:
-            status = .incomplete
-            lastErrorMessage = nil
+            validationStatus = .incomplete
+            validationErrorMessage = nil
             lastCompletedFingerprint = nil
         case .verified:
-            status = .ready
-            lastErrorMessage = nil
+            validationStatus = .ready
+            validationErrorMessage = nil
             lastCompletedFingerprint = input.fingerprint
         case .failed:
-            status = .failed
-            lastErrorMessage = cloudState.lastValidationError
+            validationStatus = .failed
+            validationErrorMessage = cloudState.lastValidationError
             lastCompletedFingerprint = input.fingerprint
         }
     }
 
     func status(for input: CloudASRValidationInput) -> CloudASRValidationDisplayStatus {
         guard input.isCloudPlatform, input.isComplete, matchesSavedConfiguration(input) else { return .incomplete }
+        if health.fingerprint == input.fingerprint {
+            switch health.state {
+            case .checking: return .checking
+            case .ready: return .ready
+            case .temporaryFailure, .blocked: return .failed
+            case .idle: break
+            }
+        }
         if activeFingerprint == input.fingerprint { return .checking }
-        if activeFingerprint == nil, lastCompletedFingerprint == input.fingerprint { return status }
+        if activeFingerprint == nil, lastCompletedFingerprint == input.fingerprint { return validationStatus }
         switch cloudState(for: input).validationStatus {
         case .verified: return .ready
         case .failed: return .failed
@@ -79,17 +97,21 @@ final class CloudASRValidationService {
     }
 
     func invalidateCurrentValidation(isTransient: Bool = false) {
-        isTransientRuntimeFailure = isTransient
+        legacyTransientFailure = isTransient
         let input = CloudASRValidationInput(platform: configStore.asrConfig.selectedPlatform, asrConfig: configStore.asrConfig)
         guard input.isCloudPlatform else { return }
         cancelOngoingValidation()
         lastCompletedFingerprint = input.fingerprint
-        status = .failed
-        lastErrorMessage = "云端识别暂不可用，请检查配置并重试"
+        validationStatus = .failed
+        validationErrorMessage = "云端识别暂不可用，请检查配置并重试"
         try? configStore.updateCloudValidationState(for: input.platform, status: .failed, error: lastErrorMessage)
     }
 
     func validate(_ input: CloudASRValidationInput, force: Bool = false) {
+        currentInput = input
+        health.reset(ifDifferent: input.fingerprint)
+        if force { retry(input); return }
+        if health.state != .idle || health.businessActive { return }
         guard input.isCloudPlatform else {
             syncFromConfig(for: input)
             return
@@ -97,8 +119,8 @@ final class CloudASRValidationService {
 
         guard input.isComplete else {
             cancelOngoingValidation()
-            status = .incomplete
-            lastErrorMessage = nil
+            validationStatus = .incomplete
+            validationErrorMessage = nil
             activeFingerprint = nil
             lastCompletedFingerprint = nil
             return
@@ -107,23 +129,28 @@ final class CloudASRValidationService {
         let fingerprint = input.fingerprint
         if activeFingerprint == fingerprint { return }
         if !force {
-            if lastCompletedFingerprint == fingerprint, status != .checking {
+            if lastCompletedFingerprint == fingerprint, validationStatus != .checking {
                 return
             }
         }
 
-        validationTask?.cancel()
+        cancelOngoingValidation()
         let requestID = UUID()
         activeRequestID = requestID
         activeFingerprint = fingerprint
-        isTransientRuntimeFailure = false
-        status = .checking
-        lastErrorMessage = nil
+        legacyTransientFailure = false
+        validationStatus = .checking
+        validationErrorMessage = nil
 
         let validatorFactory = self.validatorFactory
         let configStore = self.configStore
 
+        let previousValidation = closingValidationTask
+        let health = health
         validationTask = Task { [weak self] in
+            await previousValidation?.value
+            await health.waitForClose()
+            guard !Task.isCancelled else { return }
             do {
                 try await MainActor.run {
                     guard let self, self.activeRequestID == requestID, self.matchesSavedConfiguration(input) else {
@@ -139,7 +166,7 @@ final class CloudASRValidationService {
                     guard let self, self.activeRequestID == requestID else { return }
                     guard self.matchesSavedConfiguration(input) else {
                         self.cancelOngoingValidation()
-                        self.status = .incomplete
+                        self.validationStatus = .incomplete
                         return
                     }
                     try configStore.updateCloudValidationState(for: input.platform, status: .verified)
@@ -147,8 +174,8 @@ final class CloudASRValidationService {
                     self.activeRequestID = nil
                     self.lastCompletedFingerprint = fingerprint
                     self.validationTask = nil
-                    self.status = .ready
-                    self.lastErrorMessage = nil
+                    self.validationStatus = .ready
+                    self.validationErrorMessage = nil
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -157,7 +184,7 @@ final class CloudASRValidationService {
                     guard let self, self.activeRequestID == requestID else { return }
                     guard self.matchesSavedConfiguration(input) else {
                         self.cancelOngoingValidation()
-                        self.status = .incomplete
+                        self.validationStatus = .incomplete
                         return
                     }
                     try? configStore.updateCloudValidationState(
@@ -169,15 +196,105 @@ final class CloudASRValidationService {
                     self.activeRequestID = nil
                     self.lastCompletedFingerprint = fingerprint
                     self.validationTask = nil
-                    self.status = .failed
-                    self.lastErrorMessage = errorMessage
+                    self.validationStatus = .failed
+                    self.validationErrorMessage = errorMessage
                 }
             }
         }
     }
 
+    func canRetry(_ input: CloudASRValidationInput) -> Bool {
+        input.isCloudPlatform && input.isComplete && health.canStart && activeFingerprint == nil
+    }
+
+    func retry(_ input: CloudASRValidationInput) {
+        guard canRetry(input) else { return }
+        startProbe(input, automatic: false)
+    }
+
+    func reportRuntimeFailure(_ input: CloudASRValidationInput) { startProbe(input, automatic: true) }
+
+    func readinessStatus(for input: CloudASRValidationInput) -> CloudASRValidationDisplayStatus {
+        if input.isComplete, matchesSavedConfiguration(input), health.fingerprint == input.fingerprint,
+           health.preservesReadiness { return .ready }
+        return status(for: input)
+    }
+
+    func setBusinessActive(_ active: Bool) {
+        health.setBusinessActive(active)
+        if active, validationTask != nil {
+            cancelOngoingValidation()
+            validationStatus = .incomplete
+        }
+    }
+    func waitForProbeClose() async {
+        await closingValidationTask?.value
+        await health.waitForClose()
+    }
+    func prepareForBusinessRequest() async throws {
+        await waitForProbeClose()
+        try Task.checkCancellation()
+        guard !health.isCoolingDown else {
+            throw MemoEchoError.cloudASRNetworkFailure(message: "服务限流，请稍后重试")
+        }
+        guard health.state != .blocked else {
+            throw MemoEchoError.cloudASRAuthenticationFailure
+        }
+    }
+    func shutdown() { cancelOngoingValidation(); health.cancel() }
+
+    func recordSuccess(_ input: CloudASRValidationInput) {
+        guard input.isCloudPlatform, input.isComplete, matchesSavedConfiguration(input) else { return }
+        currentInput = input
+        health.recordSuccess(for: input.fingerprint)
+        lastCompletedFingerprint = input.fingerprint
+        validationStatus = .ready
+        validationErrorMessage = nil
+        legacyTransientFailure = false
+        try? configStore.updateCloudValidationState(for: input.platform, status: .verified)
+    }
+
+    private func startProbe(_ input: CloudASRValidationInput, automatic: Bool) {
+        guard input.isCloudPlatform, input.isComplete, matchesSavedConfiguration(input), activeFingerprint == nil else { return }
+        legacyTransientFailure = false
+        currentInput = input
+        let key = input.fingerprint
+        let factory = validatorFactory
+        let previousValidation = closingValidationTask
+        let savedInput = CloudASRValidationInput(platform: input.platform, asrConfig: configStore.asrConfig)
+        let verified = cloudState(for: savedInput).validationStatus == .verified
+        health.check(fingerprint: key, verified: verified, automatic: automatic,
+                     requestTimeout: input.platform.isRealtime ? 30 : 15, operation: {
+            await previousValidation?.value
+            try Task.checkCancellation()
+            let validator = try factory(input)
+            try await validator.validateCredentials()
+        }, completion: { [weak self] result in
+            guard let self, self.matchesSavedConfiguration(input) else { return }
+            self.lastCompletedFingerprint = key
+            self.legacyTransientFailure = false
+            switch result {
+            case .success:
+                self.validationStatus = .ready
+                self.validationErrorMessage = nil
+                try? self.configStore.updateCloudValidationState(for: input.platform, status: .verified)
+            case .failure(let error):
+                self.validationErrorMessage = error.message
+                if error.kind == .confirmedBlocker {
+                    self.validationStatus = .failed
+                    try? self.configStore.updateCloudValidationState(for: input.platform, status: .failed, error: error.message)
+                }
+            }
+        })
+    }
+
     private func cancelOngoingValidation() {
-        validationTask?.cancel()
+        let previous = closingValidationTask
+        let current = validationTask
+        current?.cancel()
+        if current != nil {
+            closingValidationTask = Task { await previous?.value; await current?.value }
+        }
         validationTask = nil
         activeFingerprint = nil
         activeRequestID = nil

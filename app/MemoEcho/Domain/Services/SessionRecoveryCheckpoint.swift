@@ -165,11 +165,12 @@ struct RecoveryPresentation {
     let outputAttempted: Bool
 
     @MainActor
-    init(checkpoint: SessionRecoveryCheckpoint, readiness: VoiceInputReadiness) {
+    init(checkpoint: SessionRecoveryCheckpoint, readiness: VoiceInputReadiness,
+         confirmedServiceBlocker: SettingsTab? = nil) {
         id = checkpoint.id
         reason = checkpoint.failureReason?.shortLabel ?? (checkpoint.isPartialRecording ? "录音中断" : "处理未完成")
         detail = checkpoint.failure?.recoveryUserMessage ?? "上次输入尚未完成，可以继续处理或丢弃。"
-        let requiredTab: SettingsTab?
+        var requiredTab: SettingsTab?
         switch checkpoint.failure {
         case .llmConfigurationIncomplete, .invalidLLMConfiguration:
             requiredTab = readiness.llm.isReady ? nil : .ai
@@ -182,6 +183,7 @@ struct RecoveryPresentation {
             requiredTab = readiness.microphone.isReady ? nil : .permissions
         default: requiredTab = nil
         }
+        if let confirmedServiceBlocker { requiredTab = confirmedServiceBlocker }
         settingsTab = requiredTab
         retryTitle = checkpoint.canRetry && requiredTab == nil
             ? (checkpoint.isPartialRecording ? "继续处理已录内容" : checkpoint.stage.retryTitle) : nil

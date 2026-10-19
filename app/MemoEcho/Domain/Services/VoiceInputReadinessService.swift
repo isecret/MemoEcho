@@ -34,8 +34,8 @@ final class VoiceInputReadinessService {
             accessibility: permissionsManager.accessibilityStatus,
             asrConfig: asr,
             localModelsAvailable: ConfigStore.localModelsAvailable(),
-            cloudStatus: cloudASRValidationService.status(for: CloudASRValidationInput(platform: asrPlatform, asrConfig: asr)),
-            llmStatus: llmValidationService.status(for: llmInput)
+            cloudStatus: cloudASRValidationService.readinessStatus(for: CloudASRValidationInput(platform: asrPlatform, asrConfig: asr)),
+            llmStatus: llmValidationService.readinessStatus(for: llmInput)
         )
     }
 
@@ -44,12 +44,12 @@ final class VoiceInputReadinessService {
         var value = snapshot
         let cloudStatus = cloudASRValidationService.status(for: cloudInput)
         let llmStatus = llmValidationService.status(for: llmInput)
-        if cloudInput.isComplete,
+        if cloudInput.isComplete, !value.asr.isReady,
            cloudStatus == .incomplete || (cloudStatus == .failed && cloudASRValidationService.isTransientRuntimeFailure),
            configStore.asrConfig.selectedPlatform != .localSenseVoice {
             value.asr = .pending("尚未验证")
         }
-        if configStore.isLLMConfigured,
+        if configStore.isLLMConfigured, !value.llm.isReady,
            llmStatus == .incomplete || (llmStatus == .failed && llmValidationService.isTransientRuntimeFailure) {
             value.llm = .pending("尚未验证")
         }

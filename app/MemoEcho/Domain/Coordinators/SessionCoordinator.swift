@@ -31,8 +31,12 @@ final class SessionCoordinator {
         didSet { if state != oldValue { onStateChanged?(oldValue, state) } }
     }
     var onStateChanged: (@MainActor @Sendable (SessionState, SessionState) -> Void)?
+    var beforeServiceRequest: (@MainActor @Sendable (SessionRecoveryCheckpoint.Stage) async throws -> Void)?
+    var onLLMRequestPrepared: (@MainActor @Sendable (LLMValidationInput) -> Void)?
+    var onServiceSucceeded: (@MainActor @Sendable (SessionRecoveryCheckpoint.Stage) -> Void)?
     private(set) var lastRecordedAudio: Data?
     private(set) var currentError: MemoEchoError?
+    private(set) var currentFailureIsLocal = false
     private(set) var lastResult: SessionResult?
     private(set) var targetApplicationPID: pid_t?
     private(set) var targetApplicationBundleID: String?
@@ -61,6 +65,7 @@ final class SessionCoordinator {
     private func invalidateRecoveryPresentation(_ id: UUID) {
         if currentErrorRecoveryID == id {
             currentError = nil
+            currentFailureIsLocal = false
             currentErrorRecoveryID = nil
         }
         onRecoveryInvalidated?(id)
@@ -212,6 +217,7 @@ final class SessionCoordinator {
         }
 
         currentError = nil
+        currentFailureIsLocal = false
         currentErrorRecoveryID = nil
         recordingStopRequestedAt = nil
         latencyTimeline = nil
@@ -634,6 +640,7 @@ final class SessionCoordinator {
         do {
             let texts = try await pipeline.run()
             guard sessionGeneration == generation, !Task.isCancelled else { return }
+            onServiceSucceeded?(.recognition)
             markCurrentLatency(.asrFinal, generation: generation)
             realtimePipeline = nil
             let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: texts, asrPlatform: platform, hotwords: hotwords, generation: generation)
@@ -808,6 +815,7 @@ final class SessionCoordinator {
             let accepted = await MainActor.run {
                 guard sessionGeneration == generation, !Task.isCancelled else { return false }
                 recoveryBuffer.complete(index: segment.index, text: transcriptResult.text)
+                onServiceSucceeded?(.recognition)
                 return true
             }
             guard accepted else { return }
@@ -995,6 +1003,7 @@ final class SessionCoordinator {
         markCurrentLatency(.contextReady, generation: generation)
         textOutput = .focusedApplication
         currentError = nil
+        currentFailureIsLocal = false
         currentErrorRecoveryID = nil
         isRecovering = true
         state = checkpoint.stage == .recognition ? .transcribing : .polishing
@@ -1019,6 +1028,8 @@ final class SessionCoordinator {
         let generation = sessionGeneration
         let llmConfig = configStore.llmConfig
         let apiKey = configStore.openAIAPIKey
+        onLLMRequestPrepared?(.init(baseURL: llmConfig.baseURL, apiKey: apiKey, model: llmConfig.model,
+                                   omitThinkingParameter: configStore.omitThinkingParameter))
         let isConfigured = configStore.isLLMConfigured
         let terms = dictionaryStore?.termsForPrompt() ?? []
         let sessionID = currentSessionID
@@ -1036,7 +1047,13 @@ final class SessionCoordinator {
         }, onRequestMetrics: { metrics in logger.llmRequest(sessionID: sessionID, metrics: metrics) },
         windowContextEnabled: { [configStore] in configStore.windowContextEnabled })
         let preprocessor = audioPreprocessor
+        let beforeRequest = beforeServiceRequest
+        let reportSuccess: @MainActor @Sendable (SessionRecoveryCheckpoint.Stage) -> Void = { [weak self] stage in
+            guard let self, self.sessionGeneration == generation, !Task.isCancelled else { return }
+            self.onServiceSucceeded?(stage)
+        }
         var processor = SessionRecoveryProcessor(recognize: { segment in
+            try await beforeRequest?(.recognition)
             let audio = await Task.detached {
                 let wav = WAVAudioEncoder.encodePCM16(pcmData: segment.pcmData,
                                                        sampleRate: AudioSegmenter.sampleRate, channels: 1)
@@ -1044,20 +1061,34 @@ final class SessionCoordinator {
             }.value
             try Task.checkCancellation()
             let timeout = min(90.0, max(15.0, segment.durationSeconds * 1.3 + 10.0))
-            return try await provider.recognize(audioData: audio, timeout: timeout).text
+            let result = try await provider.recognize(audioData: audio, timeout: timeout).text
+            reportSuccess(.recognition)
+            return result
         }, polish: { transcripts, context in
             guard isConfigured else { throw MemoEchoError.llmConfigurationIncomplete }
-            return try await llm.polish(text: transcripts.joined(), segmentCount: transcripts.count,
-                                        context: WindowContextService.sanitized(context))
+            try await beforeRequest?(.polish)
+            try Task.checkCancellation()
+            let result = try await llm.polish(text: transcripts.joined(), segmentCount: transcripts.count,
+                                              context: WindowContextService.sanitized(context))
+            reportSuccess(.polish)
+            return result
         }, translate: { text, language, context in
             guard isConfigured else { throw MemoEchoError.llmConfigurationIncomplete }
-            return try await llm.translate(text: text, targetLanguage: language,
-                                           context: WindowContextService.sanitized(context))
+            try await beforeRequest?(.translation)
+            try Task.checkCancellation()
+            let result = try await llm.translate(text: text, targetLanguage: language,
+                                                 context: WindowContextService.sanitized(context))
+            reportSuccess(.translation)
+            return result
         })
         if asrConfig.selectedPlatform.isRealtime {
             let replayConfig = asrConfig
             processor.recognizeRealtime = { audio in
-                try await RealtimeRecognitionPipeline.replay(audio, config: replayConfig, hotwords: hotwords)
+                try await beforeRequest?(.recognition)
+                try Task.checkCancellation()
+                let result = try await RealtimeRecognitionPipeline.replay(audio, config: replayConfig, hotwords: hotwords)
+                reportSuccess(.recognition)
+                return result
             }
         }
         return processor
@@ -1235,6 +1266,10 @@ final class SessionCoordinator {
     }
 
     private func mapError(_ error: Error) -> MemoEchoError {
+        currentFailureIsLocal = error is RealtimePipelineError
+            || ServiceProbeFailure.isCancellation(error)
+            || (error as? RealtimeASRError) == .invalidState
+            || (error as? RealtimeASRError) == .sessionLimit
         if let realtime = error as? RealtimeASRError {
             switch realtime {
             case .authentication: return .cloudASRAuthenticationFailure

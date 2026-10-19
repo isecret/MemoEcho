@@ -85,8 +85,10 @@ final class OpenAICompatibleASRValidationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try configuredStore(directory: directory)
         let gate = OpenAIValidationGate()
+        var newRequests = 0
         let service = CloudASRValidationService(configStore: store, validatorFactory: { input in
             if input.asrConfig.openAICompatible.model == "new-model" {
+                newRequests += 1
                 return OpenAICompatibleASRProvider(config: input.asrConfig.openAICompatible,
                                               httpClient: OpenAIValidationHTTPClient(body: #"{"text":"你好，语音识别测试。"}"#, status: 200))
             }
@@ -99,9 +101,12 @@ final class OpenAICompatibleASRValidationTests: XCTestCase {
         try store.saveASRConfig(changed)
         service.syncFromConfig(for: .init(platform: .openAICompatibleASR, asrConfig: store.asrConfig))
         service.validate(.init(platform: .openAICompatibleASR, asrConfig: store.asrConfig))
-        await waitUntil { service.status == .ready }
+        XCTAssertEqual(service.status, .checking)
+        XCTAssertEqual(newRequests, 0, "The replaced connection must close before starting another validation")
         await gate.finish()
         await waitUntil { await gate.hasFinished }
+        await waitUntil { service.status == .ready }
+        XCTAssertEqual(newRequests, 1)
         XCTAssertEqual(service.status, .ready)
         XCTAssertEqual(store.asrConfig.openAICompatible.model, "new-model")
         XCTAssertEqual(store.asrConfig.openAICompatible.validationStatus, .verified)

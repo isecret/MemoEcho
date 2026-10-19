@@ -17,7 +17,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
     private var codec: RealtimeWireCodec
     private var receiver: Task<Void, Never>?
     private var state = State.idle
-    private var failure: RealtimeASRError?
+    private var failure: (any Error)?
     private var sentences: [String: String] = [:]
     private var sentenceOrder: [String] = []
     private var sentSamples: Int64 = 0
@@ -52,6 +52,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             }
             try checkFailure()
             if case .tencent = configuration { logHotwordEvent("connection_prepared") }
+            try await ServiceProbeContext.budget?.consume()
             try await bounded(seconds: remaining(until: deadline)) { [transport] in try await transport.connect(request) }
             try checkFailure()
             if let start = try codec.startMessage() {
@@ -95,7 +96,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
         guard state == .ready, pcm.count % 2 == 0 else { throw RealtimeASRError.invalidState }
         guard !pcm.isEmpty else { return }
         guard sentSamples + Int64(pcm.count / 2) <= Int64(capabilities.maximumSessionSeconds * 16_000) else {
-            await fail(.sessionLimit)
+            await fail(RealtimeASRError.sessionLimit)
             throw RealtimeASRError.sessionLimit
         }
         do {
@@ -131,7 +132,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
     func cancel() async {
         guard state != .cancelled else { return }
         state = .cancelled
-        failure = .cancelled
+        failure = RealtimeASRError.cancelled
         receiver?.cancel()
         continuation.finish(throwing: RealtimeASRError.cancelled)
         await transport.close()
@@ -186,7 +187,7 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
         try Task.checkCancellation()
         if let failure { throw failure }
     }
-    private func fail(_ error: RealtimeASRError) async {
+    private func fail(_ error: any Error) async {
         guard state != .cancelled, state != .finished, state != .failed else { return }
         state = .failed
         failure = error
@@ -194,8 +195,12 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
         receiver?.cancel()
         await transport.close()
     }
-    private func sanitized(_ error: Error) -> RealtimeASRError {
-        if error is CancellationError { return .cancelled }
+    private func sanitized(_ error: Error) -> any Error {
+        if ServiceProbeContext.budget != nil {
+            if Task.isCancelled || ServiceProbeFailure.isCancellation(error) { return CancellationError() }
+            return ServiceProbeFailure.classify(error)
+        }
+        if error is CancellationError { return RealtimeASRError.cancelled }
         return error as? RealtimeASRError ?? .connectionClosed
     }
     private func remaining(until deadline: ContinuousClock.Instant) throws -> TimeInterval {

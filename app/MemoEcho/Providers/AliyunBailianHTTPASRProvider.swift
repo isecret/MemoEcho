@@ -44,8 +44,9 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await httpClient.data(for: request)
+            (data, response) = try await ServiceProbeContext.send(request, using: httpClient.data(for:))
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }
@@ -95,7 +96,8 @@ final class AliyunBailianHTTPASRProvider: ASRProvider, CloudASRValidating, Senda
 
     func validateCredentials() async throws {
         do {
-            _ = try await recognize(audioData: ASRValidationAudio.load(), timeout: 15)
+            let probe = AliyunBailianHTTPASRProvider(config: config, httpClient: httpClient)
+            _ = try await probe.recognize(audioData: ASRValidationAudio.load(), timeout: 15)
         } catch MemoEchoError.cloudASREmptyResponse {
             // The shared validation service tolerates silence for older providers; this voiced sample must not.
             throw MemoEchoError.cloudASRInvalidResponse(detail: "服务未识别出测试语音，请检查模型和接口格式")

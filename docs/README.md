@@ -15,6 +15,7 @@
 - [单按、双按与按住录音](./plans/hotkey-recording-modes.md)
 - [OpenAI 兼容语音识别](./plans/openai-compatible-asr.md)
 - [云端实时 ASR 与 MiMo](./plans/realtime-asr.md)
+- [语音与 AI 服务闪断恢复：方案草案](./plans/transient-service-recovery.md)
 - [火山引擎各产品接入](./plans/volcengine-asr-products.md)
 - [HUD 展示](./plans/hud-display-refinement.md)
 - [菜单栏职责与展示](./plans/menu-bar-refinement.md)

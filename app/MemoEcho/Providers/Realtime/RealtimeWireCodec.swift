@@ -332,11 +332,18 @@ struct RealtimeWireCodec: Sendable {
         request.timeoutInterval = 8
         let session = URLSession(configuration: .ephemeral, delegate: RealtimeNoRedirectDelegate(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await ServiceProbeContext.send(request, isInference: false) {
+            try await session.data(for: $0)
+        }
         guard let response = response as? HTTPURLResponse else { throw RealtimeASRError.invalidResponse }
         guard response.statusCode == 200 else { throw RealtimeASRError.authentication }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = (object["Token"] as? [String: Any])?["Id"] as? String, !token.isEmpty else { throw RealtimeASRError.authentication }
+              let token = (object["Token"] as? [String: Any])?["Id"] as? String, !token.isEmpty else {
+            if ServiceProbeContext.budget != nil {
+                throw ServiceProbeFailure(kind: .invalidResponse, message: "阿里云测试鉴权响应格式异常")
+            }
+            throw RealtimeASRError.authentication
+        }
         return token
     }
 }

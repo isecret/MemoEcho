@@ -10,11 +10,14 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
     private let accessKeyId: String
     private let accessKeySecret: String
     private let appKey: String
+    private let httpClient: any OpenAIASRHTTPClient
 
-    init(accessKeyId: String, accessKeySecret: String, appKey: String) {
+    init(accessKeyId: String, accessKeySecret: String, appKey: String,
+         httpClient: any OpenAIASRHTTPClient = OpenAIASRURLSessionClient.shared) {
         self.accessKeyId = accessKeyId
         self.accessKeySecret = accessKeySecret
         self.appKey = appKey
+        self.httpClient = httpClient
     }
 
     func recognize(audioData: Data, timeout: TimeInterval? = nil) async throws -> TranscriptResult {
@@ -63,8 +66,9 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
         let startTime = Date()
         let (responseData, response): (Data, URLResponse)
         do {
-            (responseData, response) = try await URLSession.shared.data(for: request)
+            (responseData, response) = try await ServiceProbeContext.send(request, using: httpClient.data(for:))
         } catch let error as URLError {
+            try ServiceProbeContext.preserveFailure(error)
             CloudASRRequestLogger.requestFailed(
                 provider: "aliyun",
                 endpoint: endpoint,
@@ -73,6 +77,7 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
             )
             throw MemoEchoError.cloudASRNetworkFailure(message: error.localizedDescription)
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             CloudASRRequestLogger.requestFailed(
                 provider: "aliyun",
                 endpoint: endpoint,
@@ -135,7 +140,11 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
     }
 
     func validateCredentials() async throws {
-        _ = try await fetchToken()
+        do {
+            _ = try await recognize(audioData: ASRValidationAudio.load(), timeout: 15)
+        } catch MemoEchoError.cloudASREmptyResponse {
+            throw MemoEchoError.cloudASRInvalidResponse(detail: "服务未识别出测试语音")
+        }
     }
 
     private func fetchToken() async throws -> String {
@@ -167,10 +176,12 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await ServiceProbeContext.send(request, isInference: false, using: httpClient.data(for:))
         } catch let error as URLError {
+            try ServiceProbeContext.preserveFailure(error)
             throw MemoEchoError.cloudASRNetworkFailure(message: error.localizedDescription)
         } catch {
+            try ServiceProbeContext.preserveFailure(error)
             throw MemoEchoError.cloudASRNetworkFailure(message: error.localizedDescription)
         }
 
@@ -194,6 +205,9 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
             if code.lowercased().contains("invalidaccesskey") || code.lowercased().contains("signature") {
                 throw MemoEchoError.cloudASRAuthenticationFailure
             }
+            if ServiceProbeContext.budget != nil {
+                throw ServiceProbeFailure(kind: .invalidResponse, message: "阿里云未接受测试鉴权请求")
+            }
             let message = json["Message"] as? String ?? "Unknown error"
             throw MemoEchoError.cloudASRInvalidResponse(detail: "[\(code)] \(message)")
         }
@@ -215,6 +229,9 @@ final class AliyunSentenceASRProvider: ASRProvider, CloudASRValidating, @uncheck
             let message = json["message"] as? String ?? "Unknown error"
             if status == 40000004 || status == 40000005 {
                 throw MemoEchoError.cloudASRAuthenticationFailure
+            }
+            if ServiceProbeContext.budget != nil {
+                throw ServiceProbeFailure(kind: .invalidResponse, message: "阿里云未接受测试语音请求")
             }
             throw MemoEchoError.cloudASRInvalidResponse(detail: "[\(status)] \(message)")
         }
