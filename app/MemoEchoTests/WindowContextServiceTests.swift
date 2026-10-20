@@ -2,6 +2,43 @@ import XCTest
 @testable import MemoEcho
 
 final class WindowContextServiceTests: XCTestCase {
+    func testOwnProcessNeverEntersBackgroundContextProvider() async {
+        // A same-process AX request calls SwiftUI accessibility synchronously on
+        // the worker queue, which traps when it evaluates a MainActor binding.
+        let service = WindowContextService { _, _, _, _ in
+            XCTFail("MemoEcho's own UI must not enter the background AX reader")
+            return WindowContextCandidate(appName: "MemoEcho", visibleText: "synthetic settings text")
+        }
+        for bundleID in [nil, "me.wangmao.memoecho", "me.wangmao.memoecho.debug"] as [String?] {
+            let result = await service.captureContextResult(
+                targetPID: ProcessInfo.processInfo.processIdentifier, targetBundleID: bundleID,
+                onBasic: { _ in XCTFail("Own-window context must not be published") })
+            XCTAssertNil(result.snapshot)
+            XCTAssertEqual(result.event, .unavailable)
+        }
+    }
+
+    func testOtherProcessStillReceivesBasicAndExtendedContext() async {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let targetPID: pid_t = ownPID == 42 ? 43 : 42
+        let service = WindowContextService { pid, bundleID, _, phase in
+            XCTAssertEqual(pid, targetPID)
+            XCTAssertEqual(bundleID, "com.example.editor")
+            return WindowContextCandidate(appName: "Example", bundleID: bundleID,
+                visibleText: phase == .extended ? "synthetic editor text" : nil)
+        }
+        let basic = expectation(description: "Basic context arrives")
+        let result = await service.captureContextResult(targetPID: targetPID, targetBundleID: "com.example.editor",
+            onBasic: { result in
+                XCTAssertEqual(result.snapshot?.appName, "Example")
+                XCTAssertNil(result.snapshot?.visibleText)
+                basic.fulfill()
+            })
+        await fulfillment(of: [basic], timeout: 1)
+        XCTAssertEqual(result.event, .captured)
+        XCTAssertEqual(result.snapshot?.visibleText, "synthetic editor text")
+    }
+
     func testBuildSnapshotTrimsAndCapsFields() {
         let candidate = WindowContextCandidate(
             appName: "  WeChat  ",

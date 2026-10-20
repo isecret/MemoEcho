@@ -7,7 +7,8 @@ enum NativeWindowContextReader {
 
     static func capture(pid: pid_t?, bundleID: String?, identity: FocusedElementIdentity?,
                         phase: WindowContextCapturePhase) async throws -> WindowContextCandidate? {
-        guard let pid, !Task.isCancelled, AXIsProcessTrusted() else { return nil }
+        guard let pid, pid != ProcessInfo.processInfo.processIdentifier,
+              !Task.isCancelled, AXIsProcessTrusted() else { return nil }
         let metadata = await MainActor.run { () -> (String?, String?)? in
             guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier == pid,
                   bundleID == nil || app.bundleIdentifier == bundleID else { return nil }

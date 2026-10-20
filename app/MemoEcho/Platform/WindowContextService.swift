@@ -56,7 +56,11 @@ struct WindowContextService: Sendable {
     func captureContextResult(targetPID: pid_t?, targetBundleID: String?,
                               targetIdentity: FocusedElementIdentity? = nil,
                               onBasic: @Sendable (WindowContextCaptureResult) async -> Void = { _ in }) async -> WindowContextCaptureResult {
-        guard !Task.isCancelled else { return .init(snapshot: nil, event: .unavailable) }
+        // Same-process AX calls execute SwiftUI accessibility on the calling
+        // thread. Our background provider must never traverse our own UI.
+        guard targetPID != ProcessInfo.processInfo.processIdentifier, !Task.isCancelled else {
+            return .init(snapshot: nil, event: .unavailable)
+        }
         let start = ContinuousClock.now
         let basic = await boundedCapture(pid: targetPID, bundleID: targetBundleID, identity: targetIdentity,
                                          phase: .basic, timeout: .milliseconds(200))

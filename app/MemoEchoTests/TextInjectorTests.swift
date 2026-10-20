@@ -4,6 +4,18 @@ import XCTest
 
 @MainActor
 final class TextInjectorTests: XCTestCase {
+    func testOwnProcessSkipsBackgroundLearningSnapshot() async {
+        let target = TextInjectionFocus(pid: ProcessInfo.processInfo.processIdentifier,
+            bundleID: "me.wangmao.memoecho", identity: .init(token: "settings-field"), snapshot: nil)
+        let snapshot = await Task.detached {
+            FocusedElementTextSnapshotReader().readBeforeInjection(target: target, shouldStop: {
+                XCTFail("Own-process targets must be rejected before starting the AX read loop")
+                return true
+            })
+        }.value
+        XCTAssertNil(snapshot)
+    }
+
     func testMonotonicBreakdownSeparatesBackupDispatchAndClipboardCleanup() async throws {
         let driver = FakeInjectionDriver()
         let timer = ManualPipelineClock()

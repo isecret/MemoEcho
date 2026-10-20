@@ -46,7 +46,10 @@ struct FocusedElementTextSnapshotReader: Sendable {
     /// Called only by the bounded background worker. Never activate apps or read another field.
     func readBeforeInjection(target: TextInjectionFocus,
                              shouldStop: @escaping @Sendable () -> Bool) -> FocusedElementTextSnapshot? {
-        guard target.scope == .field, !shouldStop(), AXIsProcessTrusted() else { return nil }
+        // Optional learning must not invoke our own SwiftUI accessibility tree
+        // from the snapshot worker; same-process AX dispatch is synchronous.
+        guard target.pid != ProcessInfo.processInfo.processIdentifier,
+              target.scope == .field, !shouldStop(), AXIsProcessTrusted() else { return nil }
         let reader = BeforeInjectionReader(shouldStop: shouldStop)
         let application = AXUIElementCreateApplication(target.pid)
         guard let element = reader.element(application, kAXFocusedUIElementAttribute),
