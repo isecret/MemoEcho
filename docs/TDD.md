@@ -350,9 +350,11 @@
 ### 5.6 LLMProvider
 
 - 使用固定 Prompt 生成 Chat Completions 请求
-- 默认优先发送 `thinking: { "type": "disabled" }` 关闭长思考
+- 润色、翻译、词典学习及配置验证共用请求兼容策略，默认优先发送 `thinking: { "type": "disabled" }` 关闭长思考（Issue #25）
 - 若 state.json 的当前配置指纹命中不支持 thinking 参数的能力缓存，则直接发送普通请求
 - 若上游明确返回 `thinking` 字段或其 `disabled` 值不支持（含网关将字段名脱敏成 `***.type` 的错误），则回退一次普通请求，并将当前配置的 SHA-256 指纹写入 `~/.memoecho/state.json` 的 `llmWithoutThinkingParameter`；普通 `not supported` 错误不触发此兼容重试
+- 同一 Provider 及其验证副本共享当前连接配置的内存兼容结果；润色回退后，后续翻译直接省略该参数，不再重复探测。业务与验证共用 thinking 不支持的判定，无关字段错误、鉴权失败、超时或取消不触发兼容回退。
+- 每次实际发送前重新检查取消和窗口上下文开关，回退也不复用已关闭的窗口参考；请求仍使用 15 秒超时。翻译保持非空纯文本解析，`llm_request_size` 用途为 `translation`，独立验证为 `validation`，词典学习为 `dictionaryLearning`；验证回退计入同一请求预算，遵守 `Retry-After`。
 - 返回保守型结构化处理后的最终文本
 - 解析结构化 JSON 结果；格式错误时直接报错
 - 不支持独立 `message` 模式；短消息口述、回复口述、转发口述统一保持 `plain_text`

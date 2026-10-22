@@ -85,6 +85,61 @@ final class ServiceProbeProviderTests: XCTestCase {
         XCTAssertNil(body["thinking"])
     }
 
+    @MainActor
+    func testTranslationProbeThinkingFallbackPreservesPrivacyAndValidationMetrics() async throws {
+        let client = ProbeHTTPClient(replies: [
+            .init(status: 400, body: #"{"error":{"message":"***.type `disabled` is not supported by this model"}}"#),
+            .init(body: #"{"choices":[{"message":{"content":"Meet tomorrow at three."}}]}"#)
+        ])
+        let metrics = ProbeMetricsRecorder()
+        var cacheWrites = 0
+        let provider = LLMProvider(baseURL: "https://example.invalid/v1", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false,
+            dictionaryTerms: [.init(term: "PRIVATE_TERM", pronunciationHint: "PRIVATE_HINT")],
+            onThinkingUnsupported: { cacheWrites += 1 }, onRequestMetrics: { metrics.append($0) },
+            windowContextEnabled: { XCTFail("Probes must not read window context settings"); return true },
+            requestSender: { try await client.data(for: $0) })
+        let budget = ServiceProbeBudget(maximumRequests: 2)
+        try await ServiceProbeContext.$budget.withValue(budget) {
+            try await provider.validateConfiguration(purpose: .translation)
+        }
+        let requests = await client.requests
+        let used = await budget.requestsUsed
+        XCTAssertEqual(used, 2)
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(cacheWrites, 1)
+        XCTAssertEqual(metrics.values.map(\.purpose), [.validation, .validation])
+        XCTAssertEqual(metrics.values.map(\.thinkingDisabled), [true, false])
+        for request in requests {
+            let body = try object(XCTUnwrap(request.httpBody))
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            XCTAssertEqual(messages[0]["content"], LLMProvider.translateSystemPrompt(targetLanguage: .english, context: nil))
+            XCTAssertTrue(messages[1]["content"]?.contains(ValidationFixture.text) == true)
+            XCTAssertFalse(String(decoding: request.httpBody!, as: UTF8.self).contains("PRIVATE_"))
+        }
+        XCTAssertEqual(metrics.values.map(\.contextCharacters), [0, 0])
+        XCTAssertEqual(metrics.values.map(\.dictionaryTerms), [0, 0])
+    }
+
+    func testTranslationProbeThinkingFallbackCannotExceedBudget() async throws {
+        let client = ProbeHTTPClient(replies: [
+            .init(status: 400, body: #"{"error":{"message":"unsupported thinking"}}"#),
+            .init(body: #"{"choices":[{"message":{"content":"Meet tomorrow at three."}}]}"#)
+        ])
+        let provider = makeLLM(client: client, omitThinking: false)
+        let budget = ServiceProbeBudget(maximumRequests: 1)
+        do {
+            try await ServiceProbeContext.$budget.withValue(budget) {
+                try await provider.validateConfiguration(purpose: .translation)
+            }
+            XCTFail("Fallback must use the same request budget")
+        } catch { XCTAssertEqual((error as? ServiceProbeFailure)?.kind, .budgetExhausted) }
+        let requests = await client.requests
+        let used = await budget.requestsUsed
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(used, 1)
+    }
+
     func testLLMProbesRejectWrongPolishStructureAndEmptyTranslation() async throws {
         for purpose in [LLMValidationPurpose.polish, .translation] {
             let body = purpose == .polish
@@ -100,12 +155,14 @@ final class ServiceProbeProviderTests: XCTestCase {
         let client = ProbeHTTPClient(replies: [
             .init(status: 400, body: #"{"error":{"message":"unsupported thinking"}}"#),
             .init(status: 503, body: "private response"),
-            .init(status: 400, body: #"{"error":{"message":"unsupported thinking"}}"#),
+            .init(status: 503, body: "private response"),
             .init(body: Self.polishResponse)
         ])
         let provider = makeLLM(client: client, omitThinking: false)
         let budget = ServiceProbeBudget(maximumRequests: 3)
         await ServiceProbeContext.$budget.withValue(budget) {
+            do { try await provider.validateConfiguration(); XCTFail("503 must fail this attempt") }
+            catch { XCTAssertEqual((error as? ServiceProbeFailure)?.kind, .transient) }
             do { try await provider.validateConfiguration(); XCTFail("503 must fail this attempt") }
             catch { XCTAssertEqual((error as? ServiceProbeFailure)?.kind, .transient) }
             do { try await provider.validateConfiguration(); XCTFail("Fourth send must be denied") }
@@ -117,6 +174,7 @@ final class ServiceProbeProviderTests: XCTestCase {
         XCTAssertEqual(used, 3)
         XCTAssertNotNil(try object(requests[0].httpBody!)["thinking"])
         XCTAssertNil(try object(requests[1].httpBody!)["thinking"])
+        XCTAssertNil(try object(requests[2].httpBody!)["thinking"])
     }
 
     func testHTTPProbeClassificationAndRetryAfterArePreservedWithoutServerText() async throws {
@@ -180,15 +238,17 @@ final class ServiceProbeProviderTests: XCTestCase {
     }
 
     func testThinkingFallbackCannotBypassServerRetryAfter() async throws {
-        let client = ProbeHTTPClient(replies: [.init(status: 400, body: #"{"error":{"message":"unsupported thinking"}}"#,
-                                                   headers: ["Retry-After": "30"])])
-        let provider = makeLLM(client: client, omitThinking: false)
-        do {
-            try await ServiceProbeContext.$budget.withValue(ServiceProbeBudget()) { try await provider.validateConfiguration() }
-            XCTFail("Compatibility fallback must respect the server deadline")
-        } catch { XCTAssertEqual((error as? ServiceProbeFailure)?.retryAfter, 30) }
-        let requests = await client.requests
-        XCTAssertEqual(requests.count, 1)
+        for purpose in [LLMValidationPurpose.polish, .translation] {
+            let client = ProbeHTTPClient(replies: [.init(status: 400, body: #"{"error":{"message":"unsupported thinking"}}"#,
+                                                       headers: ["Retry-After": "30"])])
+            let provider = makeLLM(client: client, omitThinking: false)
+            do {
+                try await ServiceProbeContext.$budget.withValue(ServiceProbeBudget()) { try await provider.validateConfiguration(purpose: purpose) }
+                XCTFail("Compatibility fallback must respect the server deadline")
+            } catch { XCTAssertEqual((error as? ServiceProbeFailure)?.retryAfter, 30) }
+            let requests = await client.requests
+            XCTAssertEqual(requests.count, 1)
+        }
     }
 
     func testProviderCancellationIsNeverConvertedToServiceFailure() async throws {
@@ -250,6 +310,13 @@ final class ServiceProbeProviderTests: XCTestCase {
     }
 
     private static let polishResponse = #"{"choices":[{"message":{"content":"{\"mode\":\"plain_text\",\"text\":\"明天下午三点开会。\",\"correction_applied\":false}"}}]}"#
+}
+
+private final class ProbeMetricsRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [LLMRequestMetrics] = []
+    var values: [LLMRequestMetrics] { lock.withLock { stored } }
+    func append(_ value: LLMRequestMetrics) { lock.withLock { stored.append(value) } }
 }
 
 private actor ProbeHTTPClient: OpenAIASRHTTPClient {

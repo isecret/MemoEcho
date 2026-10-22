@@ -47,6 +47,222 @@ final class LLMProviderTests: XCTestCase {
         for (value, body) in zip(values, bodies) { try assertPayloadMetrics(value, body: body) }
     }
 
+    func testTranslationDisablesThinkingAndPreservesPayloadAndTimeout() async throws {
+        let network = ContextRequestRecorder(responseContent: " \nTranslated sample.\n ")
+        let metrics = RequestMetricsRecorder()
+        let provider = LLMProvider(baseURL: "https://example.invalid/v1", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false, dictionaryTerms: [.init(term: "PRIVATE_TERM", pronunciationHint: nil)],
+            onRequestMetrics: { metrics.append($0) }, requestSender: { try await network.send($0) })
+        let context = WindowContextService.buildSnapshot(from: .init(selectedText: "参考")).snapshot
+        let result = try await provider.translate(text: "合成测试", targetLanguage: .english, context: context)
+        XCTAssertEqual(result, "Translated sample.")
+        let requests = await network.requests
+        XCTAssertEqual(requests.count, 1)
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.timeoutInterval, 15)
+        XCTAssertEqual(request.url?.path, "/v1/chat/completions")
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
+        let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+        XCTAssertEqual(messages[0]["content"], LLMProvider.translateSystemPrompt(targetLanguage: .english, context: context))
+        XCTAssertEqual(messages[1]["content"], "请将以下文本翻译成English：\n\n合成测试")
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("PRIVATE_TERM"))
+        let value = try XCTUnwrap(metrics.values.first)
+        XCTAssertEqual(value.purpose, .translation)
+        XCTAssertEqual(value.dictionaryTerms, 0)
+        XCTAssertTrue(value.thinkingDisabled)
+        XCTAssertGreaterThan(value.contextCharacters, 0)
+        try assertPayloadMetrics(value, body: String(decoding: body, as: UTF8.self))
+    }
+
+    @MainActor
+    func testTranslationFallbackCachesCompatibilityForSubsequentRequests() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ConfigStore(configDirectory: directory)
+        let config = LLMConfig(baseURL: "https://example.invalid", model: "test")
+        try store.saveLLMConfig(config, apiKey: "synthetic")
+        let network = ContextRequestRecorder(rejectThinking: true,
+            rejectionMessage: "***.type `disabled` is not supported by this model", responseContent: "Translated sample.")
+        let provider = LLMProvider(baseURL: config.baseURL, apiKey: "synthetic", model: config.model,
+            omitThinkingParameter: store.omitThinkingParameter,
+            onThinkingUnsupported: { try? store.markThinkingParameterUnsupported(for: config, apiKey: "synthetic") },
+            requestSender: { try await network.send($0) })
+        _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+        XCTAssertTrue(store.omitThinkingParameter)
+        let cached = LLMProvider(baseURL: config.baseURL, apiKey: "synthetic", model: config.model,
+            omitThinkingParameter: store.omitThinkingParameter, requestSender: { try await network.send($0) })
+        let result = try await cached.translate(text: "合成测试", targetLanguage: .english)
+        XCTAssertEqual(result, "Translated sample.")
+        let bodies = await network.bodies
+        XCTAssertEqual(bodies.count, 3)
+        let thinkingParameters = try bodies.map {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+            return json["thinking"] != nil
+        }
+        XCTAssertEqual(thinkingParameters, [true, false, false])
+    }
+
+    @MainActor
+    func testTranslationReusesThinkingFallbackFromPolishAndValidationOnSameProvider() async throws {
+        for validation in [false, true] {
+            let network = ContextRequestRecorder(rejectThinking: true)
+            var cacheWrites = 0
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: false, onThinkingUnsupported: { cacheWrites += 1 },
+                requestSender: { try await network.send($0) })
+            if validation { try await provider.validateConfiguration() }
+            else { _ = try await provider.polish(text: "合成测试") }
+            _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+            let bodies = await network.bodies
+            let thinkingParameters = try bodies.map {
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+                return json["thinking"] != nil
+            }
+            XCTAssertEqual(thinkingParameters, [true, false, false])
+            XCTAssertEqual(cacheWrites, 1)
+        }
+    }
+
+    func testCancellationBetweenThinkingAttemptsPreventsFallbackSend() async throws {
+        let network = ContextRequestRecorder(rejectThinking: true)
+        let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false,
+            onThinkingUnsupported: { withUnsafeCurrentTask { $0?.cancel() } },
+            requestSender: { try await network.send($0) })
+        let task = Task { try await provider.translate(text: "合成测试", targetLanguage: .english) }
+        do { _ = try await task.value; XCTFail("Cancellation must stop the fallback") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let requests = await network.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    @MainActor
+    func testTranslationFallbackRechecksContextAndReportsEachRequest() async throws {
+        var contextEnabled = true
+        let network = ContextRequestRecorder(rejectThinking: true, responseContent: "Translated sample.")
+        let metrics = RequestMetricsRecorder()
+        let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false, onThinkingUnsupported: { contextEnabled = false },
+            onRequestMetrics: { metrics.append($0) }, windowContextEnabled: { contextEnabled },
+            requestSender: { try await network.send($0) })
+        let context = WindowContextService.buildSnapshot(from: .init(appName: "CONTEXT_SENTINEL", visibleText: "WINDOW_BODY")).snapshot
+        _ = try await provider.translate(text: "合成测试", targetLanguage: .english, context: context)
+        let bodies = await network.bodies
+        XCTAssertEqual(bodies.count, 2)
+        guard bodies.count == 2 else { return }
+        XCTAssertTrue(bodies[0].contains("CONTEXT_SENTINEL"))
+        for sentinel in ["CONTEXT_SENTINEL", "WINDOW_BODY", "BEGIN_WINDOW_CONTEXT_JSON"] {
+            XCTAssertFalse(bodies[1].contains(sentinel))
+        }
+        let values = metrics.values
+        XCTAssertEqual(values.map(\.purpose), [.translation, .translation])
+        XCTAssertEqual(values.map(\.thinkingDisabled), [true, false])
+        XCTAssertEqual(values.last?.contextCharacters, 0)
+        XCTAssertEqual(values.last?.auxiliaryUTF8Bytes, 0)
+        for (value, body) in zip(values, bodies) { try assertPayloadMetrics(value, body: body) }
+    }
+
+    @MainActor
+    func testTranslationDoesNotRetryUnrelatedHTTPFailures() async throws {
+        for (status, message) in [(400, "model is not supported"), (400, "unsupported input format"),
+                                  (400, "unknown parameter: response_format"), (400, "thinking service temporarily unavailable"),
+                                  (401, "unsupported thinking"), (403, "unsupported thinking"), (503, "unsupported thinking")] {
+            let network = ContextRequestRecorder(rejectThinking: true, rejectionMessage: message, rejectionStatus: status)
+            var cached = false
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: false, onThinkingUnsupported: { cached = true },
+                requestSender: { try await network.send($0) })
+            do {
+                _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+                XCTFail("Unrelated failure must propagate: \(status), \(message)")
+            } catch {
+                if status == 401 || status == 403 {
+                    XCTAssertEqual(error as? MemoEchoError, .invalidLLMConfiguration(detail: "认证失败，请检查 API Key"))
+                } else {
+                    XCTAssertEqual(error as? MemoEchoError, .llmNetworkFailure(message: "HTTP \(status)"))
+                }
+            }
+            let requests = await network.requests
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertFalse(cached)
+        }
+    }
+
+    @MainActor
+    func testTranslationRetriesThinkingRejectionAtMostOnce() async throws {
+        for omitThinking in [false, true] {
+            let network = ContextRequestRecorder(rejectThinking: true, rejectEveryRequest: true)
+            var cacheWrites = 0
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: omitThinking, onThinkingUnsupported: { cacheWrites += 1 },
+                requestSender: { try await network.send($0) })
+            do {
+                _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+                XCTFail("Fallback failure must propagate")
+            } catch { XCTAssertTrue(error is MemoEchoError) }
+            let requests = await network.requests
+            XCTAssertEqual(requests.count, omitThinking ? 1 : 2)
+            XCTAssertEqual(cacheWrites, omitThinking ? 0 : 1)
+        }
+    }
+
+    @MainActor
+    func testTranslationTimeoutAndCancellationDoNotRetryOrCache() async throws {
+        for error in [URLError(.timedOut), URLError(.cancelled)] {
+            let network = ContextRequestRecorder()
+            var cached = false
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: false, onThinkingUnsupported: { cached = true },
+                requestSender: { request in
+                    _ = try await network.send(request)
+                    throw error
+                })
+            do {
+                _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+                XCTFail("Transport error must propagate")
+            } catch let received {
+                if error.code == .cancelled { XCTAssertTrue(received is CancellationError) }
+                else { XCTAssertEqual(received as? MemoEchoError, .llmNetworkFailure(message: error.localizedDescription)) }
+            }
+            let requests = await network.requests
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertFalse(cached)
+        }
+    }
+
+    func testTranslationRejectsEmptyContentAfterThinkingFallback() async throws {
+        let network = ContextRequestRecorder(rejectThinking: true, responseContent: " \n ")
+        let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false, requestSender: { try await network.send($0) })
+        do {
+            _ = try await provider.translate(text: "合成测试", targetLanguage: .english)
+            XCTFail("Empty translation must fail")
+        } catch { XCTAssertEqual(error as? MemoEchoError, .llmEmptyResponse) }
+        let requests = await network.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    @MainActor
+    func testDictionaryLearningKeepsItsPurposeAndDoesNotReadWindowContext() async throws {
+        let network = ContextRequestRecorder(rejectThinking: true, responseContent: #"{"decision":"reject"}"#)
+        let metrics = RequestMetricsRecorder()
+        let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+            omitThinkingParameter: false, onRequestMetrics: { metrics.append($0) },
+            windowContextEnabled: { XCTFail("Dictionary learning must not read window context settings"); return true },
+            requestSender: { try await network.send($0) })
+        let candidate = try XCTUnwrap(PostInjectionDictionaryLearner.makeCandidate(from: "使用 MemoEko", to: "使用 MemoEcho"))
+        let result = try await provider.classifyProperNounLearningCandidate(candidate)
+        XCTAssertEqual(result, .reject)
+        let bodies = await network.bodies
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(metrics.values.map(\.purpose), [.dictionaryLearning, .dictionaryLearning])
+        XCTAssertEqual(metrics.values.map(\.thinkingDisabled), [true, false])
+        XCTAssertEqual(metrics.values.map(\.contextCharacters), [0, 0])
+        for (value, body) in zip(metrics.values, bodies) { try assertPayloadMetrics(value, body: body) }
+    }
+
     func testDictionarySelectionUsesSpokenTextWithoutSegmentInstructions() async throws {
         let network = ContextRequestRecorder()
         let terms = (0..<129).map { TermReference(term: "合成术语\($0)", pronunciationHint: nil) }
@@ -272,21 +488,30 @@ private final class RequestMetricsRecorder: @unchecked Sendable {
 
 private actor ContextRequestRecorder {
     var bodies: [String] = []
+    var requests: [URLRequest] = []
     let rejectThinking: Bool
     let rejectionMessage: String
-    init(rejectThinking: Bool = false, rejectionMessage: String = "unsupported thinking") {
+    let rejectionStatus: Int
+    let rejectEveryRequest: Bool
+    let responseContent: String
+    init(rejectThinking: Bool = false, rejectionMessage: String = "unsupported thinking",
+         rejectionStatus: Int = 400, rejectEveryRequest: Bool = false,
+         responseContent: String = #"{"mode":"plain_text","text":"result","correction_applied":false}"#) {
         self.rejectThinking = rejectThinking
         self.rejectionMessage = rejectionMessage
+        self.rejectionStatus = rejectionStatus
+        self.rejectEveryRequest = rejectEveryRequest
+        self.responseContent = responseContent
     }
 
     func send(_ request: URLRequest) throws -> (Data, URLResponse) {
+        requests.append(request)
         bodies.append(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "")
-        let failure = rejectThinking && bodies.count == 1
-        let response = HTTPURLResponse(url: request.url!, statusCode: failure ? 400 : 200,
+        let failure = rejectThinking && (bodies.count == 1 || rejectEveryRequest)
+        let response = HTTPURLResponse(url: request.url!, statusCode: failure ? rejectionStatus : 200,
                                        httpVersion: nil, headerFields: nil)!
         if failure { return (Data(rejectionMessage.utf8), response) }
-        let content = #"{"mode":"plain_text","text":"result","correction_applied":false}"#
-        let data = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]])
+        let data = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": responseContent]]]])
         return (data, response)
     }
 }

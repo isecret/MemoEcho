@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// OpenAI Chat Completions 兼容 LLM Provider，用于文本润色
+/// OpenAI Chat Completions 兼容 LLM Provider，用于润色、翻译和词典学习
 struct LLMProvider: Sendable {
 
     private static let timeout: TimeInterval = 15
@@ -94,7 +94,7 @@ struct LLMProvider: Sendable {
     let baseURL: String
     let apiKey: String
     let model: String
-    let omitThinkingParameter: Bool
+    private var thinkingCompatibility: ThinkingCompatibility
     let dictionaryTerms: [TermReference]
     let preparedTermIndex: PreparedTermIndex?
     private let windowContextEnabled: @MainActor @Sendable () -> Bool
@@ -119,7 +119,7 @@ struct LLMProvider: Sendable {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.model = model
-        self.omitThinkingParameter = omitThinkingParameter
+        self.thinkingCompatibility = ThinkingCompatibility(omitParameter: omitThinkingParameter)
         self.dictionaryTerms = dictionaryTerms
         self.preparedTermIndex = preparedTermIndex
         self.onThinkingUnsupported = onThinkingUnsupported
@@ -150,62 +150,22 @@ struct LLMProvider: Sendable {
         context: WindowContextSnapshot? = nil,
         purpose: LLMRequestMetrics.Purpose = .translation
     ) async throws -> String {
-        let contextSection = Self.contextPrompt(await windowContextEnabled() ? context : nil) ?? ""
-        let sysPrompt = Self.translationBaseSystemPrompt(targetLanguage) + contextSection
-        let userText = "请将以下文本翻译成\(targetLanguage.displayName)：\n\n\(text)"
-        let url = try buildURL()
-        let prepared = try buildRawRequestBody(systemPrompt: sysPrompt, userContent: userText,
-            requestMode: .plain, purpose: purpose, contextSection: contextSection)
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = prepared.bodyData
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = Self.timeout
-
-        do {
-            onRequestMetrics?(prepared.metrics)
-            let (responseData, response) = try await ServiceProbeContext.send(request, using: requestSender)
-            if let http = response as? HTTPURLResponse {
-                switch http.statusCode {
-                case 200:
-                    let resp = try JSONDecoder().decode(LLMResponse.self, from: responseData)
-                    if let apiError = resp.error {
-                        throw MemoEchoError.llmNetworkFailure(message: apiError.message)
-                    }
-                    guard let content = resp.choices?.first?.message.content,
-                          !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        throw MemoEchoError.llmEmptyResponse
-                    }
-                    return content.trimmingCharacters(in: .whitespacesAndNewlines)
-                case 401, 403:
-                    throw MemoEchoError.invalidLLMConfiguration(detail: "认证失败，请检查 API Key")
-                default:
-                    let body = String(data: responseData, encoding: .utf8) ?? ""
-                    throw MemoEchoError.llmNetworkFailure(message: "HTTP \(http.statusCode): \(body)")
-                }
-            }
-            throw MemoEchoError.llmNetworkFailure(message: "Invalid response")
-        } catch let error as MemoEchoError {
-            throw error
-        } catch let error as URLError {
-            try ServiceProbeContext.preserveFailure(error)
-            throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
-        } catch {
-            try ServiceProbeContext.preserveFailure(error)
-            if ServiceProbeContext.budget != nil { throw ServiceProbeFailure.classify(error) }
-            throw MemoEchoError.llmNetworkFailure(message: error.localizedDescription)
-        }
+        try await performRawContentRequest(
+            systemPrompt: Self.translationBaseSystemPrompt(targetLanguage),
+            userContent: "请将以下文本翻译成\(targetLanguage.displayName)：\n\n\(text)",
+            context: context,
+            purpose: purpose
+        )
     }
 
     func validateConfiguration(purpose: LLMValidationPurpose = .polish) async throws {
         // Intentionally rebuild a provider with only connection settings. Validation never reads
         // the user's dictionary index, window-context preference, text, or session checkpoint.
-        let probe = LLMProvider(baseURL: baseURL, apiKey: apiKey, model: model,
-            omitThinkingParameter: omitThinkingParameter,
+        var probe = LLMProvider(baseURL: baseURL, apiKey: apiKey, model: model,
+            omitThinkingParameter: await thinkingCompatibility.omitParameter,
             onThinkingUnsupported: onThinkingUnsupported, onRequestMetrics: onRequestMetrics,
             windowContextEnabled: { false }, requestSender: requestSender)
+        probe.thinkingCompatibility = thinkingCompatibility
         switch purpose {
         case .polish:
             let result = try await probe.performRequest(text: ValidationFixture.text, context: nil,
@@ -225,7 +185,8 @@ struct LLMProvider: Sendable {
         let userContent = try Self.properNounLearningUserContent(candidate)
         let content = try await performRawContentRequest(
             systemPrompt: Self.properNounLearningSystemPrompt,
-            userContent: userContent
+            userContent: userContent,
+            purpose: .dictionaryLearning
         )
         let decision = try Self.parseProperNounLearningDecision(from: content)
         return decision
@@ -263,83 +224,66 @@ struct LLMProvider: Sendable {
         purpose: LLMRequestMetrics.Purpose = .polish,
         responseHandler: (Data) throws -> T
     ) async throws -> T {
-        let url = try buildURL()
-
-        if omitThinkingParameter {
-            let data = try await sendChatCompletionRequest(
-                url: url,
-                text: text,
-                referenceText: referenceText,
-                context: context,
-                requestMode: .plain,
-                purpose: purpose
-            )
-            return try responseHandler(data)
-        }
-
-        do {
-            let data = try await sendChatCompletionRequest(
-                url: url,
-                text: text,
-                referenceText: referenceText,
-                context: context,
-                requestMode: .disableThinking,
-                purpose: purpose
-            )
-            return try responseHandler(data)
-        } catch let error as MemoEchoError {
-            if case let .llmNetworkFailure(message) = error,
-               shouldRetryWithoutThinking(message: message) {
-                await onThinkingUnsupported?()
-                let fallbackData = try await sendChatCompletionRequest(
-                    url: url,
-                    text: text,
-                    referenceText: referenceText,
-                    context: context,
-                    requestMode: .plain,
-                    purpose: purpose
-                )
-                return try responseHandler(fallbackData)
-            }
-            throw error
-        }
+        try await performCompletionRequest(prepare: { mode in
+            try buildRequestBody(text: text, referenceText: referenceText,
+                context: await windowContextEnabled() ? context : nil,
+                requestMode: mode, purpose: purpose)
+        }, responseHandler: responseHandler)
     }
 
     private func performRawContentRequest(
         systemPrompt: String,
-        userContent: String
+        userContent: String,
+        context: WindowContextSnapshot? = nil,
+        purpose: LLMRequestMetrics.Purpose
     ) async throws -> String {
-        let url = try buildURL()
-
-        if omitThinkingParameter {
-            return try await sendRawChatCompletionRequest(
-                url: url,
-                systemPrompt: systemPrompt,
-                userContent: userContent,
-                requestMode: .plain
-            )
-        }
-
-        do {
-            return try await sendRawChatCompletionRequest(
-                url: url,
-                systemPrompt: systemPrompt,
-                userContent: userContent,
-                requestMode: .disableThinking
-            )
-        } catch let error as MemoEchoError {
-            if case let .llmNetworkFailure(message) = error,
-               shouldRetryWithoutThinking(message: message) {
-                await onThinkingUnsupported?()
-                return try await sendRawChatCompletionRequest(
-                    url: url,
-                    systemPrompt: systemPrompt,
-                    userContent: userContent,
-                    requestMode: .plain
-                )
+        try await performCompletionRequest(prepare: { mode in
+            // Recheck the privacy switch for each send, including compatibility fallback.
+            let contextSection: String
+            if let context, await windowContextEnabled() {
+                contextSection = Self.contextPrompt(context) ?? ""
+            } else {
+                contextSection = ""
             }
-            throw error
+            return try buildRawRequestBody(systemPrompt: systemPrompt + contextSection,
+                userContent: userContent, requestMode: mode, purpose: purpose,
+                contextSection: contextSection)
+        }, responseHandler: extractMessageContent)
+    }
+
+    private func performCompletionRequest<T>(
+        prepare: (RequestMode) async throws -> PreparedRequest,
+        responseHandler: (Data) throws -> T
+    ) async throws -> T {
+        let url = try buildURL()
+        func send(_ mode: RequestMode) async throws -> T {
+            try Task.checkCancellation()
+            let prepared = try await prepare(mode)
+            let data = try await sendCompletionRequest(url: url, prepared: prepared)
+            return try responseHandler(data)
         }
+
+        if await thinkingCompatibility.omitParameter {
+            return try await send(.plain)
+        }
+        do {
+            return try await send(.disableThinking)
+        } catch let error as MemoEchoError {
+            guard case let .llmNetworkFailure(message) = error,
+                  shouldRetryWithoutThinking(message: message) else { throw error }
+            try Task.checkCancellation()
+            await thinkingCompatibility.markUnsupported()
+            await onThinkingUnsupported?()
+            return try await send(.plain)
+        }
+    }
+
+    /// Shared by provider copies and validation probes for these immutable connection settings.
+    /// A polish fallback also applies to translation later in the same session.
+    private actor ThinkingCompatibility {
+        private(set) var omitParameter: Bool
+        init(omitParameter: Bool) { self.omitParameter = omitParameter }
+        func markUnsupported() { omitParameter = true }
     }
 
     static func polishInputText(text: String, segmentCount: Int) -> String {
@@ -424,41 +368,6 @@ struct LLMProvider: Sendable {
             requestBodyBytes: bodyData.count, thinkingDisabled: thinkingDisabled))
     }
 
-    private func sendChatCompletionRequest(
-        url: URL,
-        text: String,
-        referenceText: String?,
-        context: WindowContextSnapshot?,
-        requestMode: RequestMode,
-        purpose: LLMRequestMetrics.Purpose
-    ) async throws -> Data {
-        let prepared = try buildRequestBody(
-            text: text,
-            referenceText: referenceText,
-            context: await windowContextEnabled() ? context : nil,
-            requestMode: requestMode,
-            purpose: purpose
-        )
-
-        return try await sendCompletionRequest(url: url, prepared: prepared)
-    }
-
-    private func sendRawChatCompletionRequest(
-        url: URL,
-        systemPrompt: String,
-        userContent: String,
-        requestMode: RequestMode
-    ) async throws -> String {
-        let prepared = try buildRawRequestBody(
-            systemPrompt: systemPrompt,
-            userContent: userContent,
-            requestMode: requestMode,
-            purpose: .dictionaryLearning
-        )
-        let responseData = try await sendCompletionRequest(url: url, prepared: prepared)
-        return try extractMessageContent(from: responseData)
-    }
-
     private func sendCompletionRequest(url: URL, prepared: PreparedRequest) async throws -> Data {
 
         var request = URLRequest(url: url)
@@ -469,9 +378,11 @@ struct LLMProvider: Sendable {
         request.timeoutInterval = Self.timeout
 
         do {
+            try Task.checkCancellation()
             onRequestMetrics?(prepared.metrics)
             let (responseData, response) = try await ServiceProbeContext.send(request,
                 allowsThinkingFallback: prepared.metrics.thinkingDisabled, using: requestSender)
+            try Task.checkCancellation()
 
             if let httpResponse = response as? HTTPURLResponse {
                 switch httpResponse.statusCode {
@@ -495,7 +406,7 @@ struct LLMProvider: Sendable {
                 }
             }
 
-            return responseData
+            throw MemoEchoError.llmNetworkFailure(message: "Invalid response")
         } catch let error as MemoEchoError {
             throw error
         } catch let error as URLError {
@@ -508,18 +419,7 @@ struct LLMProvider: Sendable {
     }
 
     private func shouldRetryWithoutThinking(message: String) -> Bool {
-        let lowered = message.lowercased()
-        // Some gateways redact thinking as "***.type" while retaining the rejected value.
-        // Require the type and disabled value together, not a generic "not supported" error.
-        let rejectsDisabledType = lowered.contains(".type")
-            && lowered.contains("`disabled`")
-            && lowered.contains("not supported")
-        return lowered.contains("thinking")
-            || rejectsDisabledType
-            || lowered.contains("unsupported")
-            || lowered.contains("unknown parameter")
-            || lowered.contains("unknown field")
-            || lowered.contains("extra inputs are not permitted")
+        ServiceProbeContext.isThinkingRejection(message)
     }
 
     // MARK: - Response
