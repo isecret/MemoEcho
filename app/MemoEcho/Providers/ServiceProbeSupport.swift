@@ -149,7 +149,7 @@ enum ServiceProbeContext {
                 // Its second request still passes through this method and consumes this same budget.
                 if !(allowsThinkingFallback && http.statusCode == 400 && failure.kind == .invalidResponse
                      && (failure.retryAfter ?? 0) <= 0
-                     && isThinkingRejection(result.0)) { throw failure }
+                     && isThinkingRejection(String(decoding: result.0, as: UTF8.self))) { throw failure }
             }
             return result
         } catch {
@@ -163,8 +163,8 @@ enum ServiceProbeContext {
         if let failure = error as? ServiceProbeFailure { throw failure }
     }
 
-    private static func isThinkingRejection(_ data: Data) -> Bool {
-        let body = String(decoding: data, as: UTF8.self).lowercased()
+    static func isThinkingRejection(_ message: String) -> Bool {
+        let body = message.lowercased()
         let explicitlyRejected = body.contains("unsupported") || body.contains("not supported")
             || body.contains("unknown") || body.contains("not permitted") || body.contains("invalid")
         return (body.contains("thinking") && explicitlyRejected)
