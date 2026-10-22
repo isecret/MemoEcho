@@ -1365,7 +1365,7 @@ beta.12 发布前回归（2026-10-10）：完整宿主测试 788 项、0 失败�
 
 ## Issue #25：翻译请求统一 thinking 兼容策略
 
-状态：本地修复与自动回归完成；2026-10-22 用户授权发布 `1.0.0-beta.23`，发布前执行 CI 构建与全量测试，再走签名、公证和更新源校验。Issue：https://github.com/isecret/MemoEcho/issues/25 。
+状态：[PR #26](https://github.com/isecret/MemoEcho/pull/26) 已合入，修复随 [1.0.0-beta.23](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.23) 发布。Issue：https://github.com/isecret/MemoEcho/issues/25 。
 
 - [x] 翻译与润色共用请求策略：默认关闭思考，明确不支持时只回退一次，已缓存配置直接省略参数。
 - [x] 当前 Provider 与验证副本共享内存兼容结果；同一次流程润色回退后，翻译不再重复发送不支持的参数。持久缓存仍按现有配置指纹保存。
@@ -1375,3 +1375,5 @@ beta.12 发布前回归（2026-10-10）：完整宿主测试 788 项、0 失败�
 - [ ] 真实服务翻译模式及前后耗时手工验收。
 
 自动验证（2026-10-22）：新增 12 项回归测试；修复前先复现翻译首发参数、兼容回退及验证预算问题。最终定向 XCTest 共 146 项、0 失败，覆盖 Provider、验证与健康监测、窗口上下文、辅助参考预算、词典学习和会话恢复/输出；`git diff --check` 通过。测试仅使用合成文本与模拟 transport，未发送真实用户内容，未替换已安装应用，不据此宣称真实翻译提速。
+
+发布验证（2026-10-22）：用户授权发布 beta.23。PR CI 全量 936 项 XCTest，9 项外部服务测试按条件跳过，0 失败；发布流水线签名、公证及更新签名全部通过。下载公开 DMG / ZIP 后复核 SHA-256、Developer ID 身份、App / DMG 公证票据、Gatekeeper、双架构及二者 App 内容一致性；Sparkle 使用 beta.22 的相同公钥验签通过。DMG 为 18,493,767 bytes，ZIP 为 24,317,516 bytes。真实翻译效果与端到端提速尚未实测。
