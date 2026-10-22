@@ -80,9 +80,13 @@ swift scripts/generate_app_icon.swift assets/branding app/MemoEcho/Resources/Ass
 ./scripts/ci/verify-macos-release.sh
 ```
 
+签名前会自动清理归档中 ONNX Runtime 与 sherpa 库的本地符号，保留 arm64/x86_64 及全部导出 API；仓库原始库不变，供复现和排障使用。保护测试可运行 `python3 scripts/ci/test_strip_asr_runtime.py`。不得对已公证产物直接清理符号后分发，应重新走签名、公证流程。
+
+DMG 默认使用 ULMO / LZMA；应用内更新仍使用 ZIP。四张引导背景的 PNG 母图位于 `assets/onboarding-backgrounds/`，应用只打包质量 95、原尺寸 JPEG，可运行 `python3 scripts/encode-onboarding-backgrounds.py` 重新编码。视觉规格见[引导演示背景素材](./onboarding-demo-background.md)。
+
 MemoEcho 后续版本应保持 `me.wangmao.memoecho` 与相同的 `APPLE_SIGNING_IDENTITY`，以便延续本应用的系统授权。首次安装 MemoEcho 时需要重新授予麦克风与辅助功能权限。
 
-本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.21`，内部构建号为 `1.0.0b21`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`，构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
+本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.22`，内部构建号为 `1.0.0b22`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`、构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
 
 如需发布可被应用内自动更新识别的正式版本，必须在 CI 中配置 `SPARKLE_PRIVATE_KEY` secret。其值应为 Sparkle `generate_keys -x` 导出的私钥文件内容；若缺失，release workflow 会直接失败，避免发布出 GitHub Release 已生成但 `updates/appcast.xml` 仍为空的版本。
 

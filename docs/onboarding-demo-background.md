@@ -2,18 +2,18 @@
 
 - 用途：欢迎页聊天演示、第 2 步模型对比、第 4 步快捷键、第 5 步试用的静态背景。语音识别和权限页保留原有卡片。
 - 来源：2026-09-22 使用内置 imagegen 工具生成，未使用 CLI。欢迎页原图无外部参考，其余三张以该原图为风格参考，分别生成不同构图。
-- 规格：PNG，统一显示在 640 × 366pt、20pt 圆角的演示区内，等比填充裁切；外层主视觉区高 390pt。
+- 规格：应用打包原尺寸、质量 95 的 JPEG，统一显示在 640 × 366pt、20pt 圆角的演示区内，等比填充裁切；外层主视觉区高 390pt。2026-10-22 仅调整编码，不重绘、缩放或改变构图。
 - 视觉：沿用原生界面的蓝灰色和低对比纸张纹理，细节集中在边缘，不增加人物、Logo 或图中文字。聊天窗口、模型对比卡片和试用输入卡片使用独立的实色背景，提示不直接叠在图片上。
 - 深浅色：每页使用自己的图片，深色模式由 SwiftUI 叠加 72% 黑色遮罩，不改变原始图片或前景控件。
 
-所有文件均保存在 `app/MemoEcho/Resources/Assets.xcassets/` 下，通过 asset 名称访问，不依赖生成工具的输出目录。
+应用资源保存在 `app/MemoEcho/Resources/Assets.xcassets/` 下，通过原有 asset 名称访问。PNG 母图保留在 `assets/onboarding-backgrounds/<asset 名称>.png`，不随应用分发。运行 `python3 scripts/encode-onboarding-backgrounds.py` 使用 macOS `sips` 重新编码；不依赖生成工具的输出目录。
 
 | 页面 | 保存路径（相对上述目录） | 原始尺寸 | 构图 |
 | --- | --- | --- | --- |
-| 欢迎页 | `OnboardingDemoBackground.imageset/background.png` | 1774 × 887 | 层叠纸张与远景曲线 |
-| 第 2 步模型 | `OnboardingModelBackground.imageset/background.png` | 1672 × 941 | 对角折面与纸张叠层 |
-| 第 4 步快捷键 | `OnboardingHotkeyBackground.imageset/background.png` | 1672 × 941 | 宽幅弧线与柔和阴影 |
-| 第 5 步试用 | `OnboardingTrialBackground.imageset/background.png` | 1672 × 941 | 偏暖象牙白与纸带曲线 |
+| 欢迎页 | `OnboardingDemoBackground.imageset/background.jpg` | 1774 × 887 | 层叠纸张与远景曲线 |
+| 第 2 步模型 | `OnboardingModelBackground.imageset/background.jpg` | 1672 × 941 | 对角折面与纸张叠层 |
+| 第 4 步快捷键 | `OnboardingHotkeyBackground.imageset/background.jpg` | 1672 × 941 | 宽幅弧线与柔和阴影 |
+| 第 5 步试用 | `OnboardingTrialBackground.imageset/background.jpg` | 1672 × 941 | 偏暖象牙白与纸带曲线 |
 
 ## 生成提示词
 

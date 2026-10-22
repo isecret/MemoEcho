@@ -89,6 +89,9 @@ if [[ -d "$SHERPA_ROOT" ]]; then
         echo "error: $SHERPA_ROOT/libonnxruntime.dylib must be a symlink to libonnxruntime.1.24.4.dylib" >&2
         exit 1
     fi
+    # Only trim archived copies, before signing. Preserve the source libraries
+    # and all exported APIs needed by the dlopen/dlsym bridge.
+    python3 "$SCRIPT_DIR/strip-asr-runtime.py" --app "$APP_PATH"
     sign_code_path "$SHERPA_ROOT/libonnxruntime.1.24.4.dylib"
     sign_code_path "$SHERPA_ROOT/libsherpa-onnx-c-api.dylib"
 fi
