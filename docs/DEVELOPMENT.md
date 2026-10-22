@@ -28,6 +28,18 @@ scripts/  资源准备、构建、签名相关脚本
 ./scripts/setup-rnnoise.sh
 ```
 
+RNNoise 使用独立 C 核心。脚本按 `scripts/rnnoise/source-lock.json` 固定的提交获取源码，校验文件和模型哈希后，只编译锁定文件；不会执行上游构建脚本或导入本机音频插件。产物包含 arm64/x86_64、许可证和 `build-info.json`，经静态校验及本地签名后替换资源。正式发布仍按既有流程使用 Developer ID 签名和公证。
+
+如本机同时安装多套工具链，可在命令前设置 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`。脚本显式选择该工具链的 macOS SDK。离线重建可使用 `./scripts/setup-rnnoise.sh --source-dir /path/to/external/rnnoise`，源码仍须通过全部哈希校验。旧的 `RNNOISE_LIB_PATH` 任意库导入已移除；不能将 AU/VST 插件改名为 dylib 使用。
+
+无需执行库即可检查资源：
+
+```bash
+python3 scripts/ci/verify-rnnoise.py app/MemoEcho/Resources/rnnoise/lib/librnnoise.dylib
+```
+
+默认启用 `DISABLE_DEBUG_FLOAT`，构建清单标记 `mixed-int8`；2026-10-22 用户根据实测确认采用约 3.02 MB 的量化核心。源资源校验拒绝浮点清单或缺少量化编译标志的产物。浮点对照可用 `./scripts/setup-rnnoise.sh --inference float --output-dir .runtime/rnnoise/float-baseline` 构建，禁止输出到应用 RNNoise 资源目录。性能与质量边界见[量化实测](./research/rnnoise-int8-benchmark.md)，组件精简过程见[降噪调研记录](./research/denoising-options.md)。
+
 本地 `SenseVoice` 运行时随应用打包；模型文件首次使用时通过引导或设置页下载到用户目录：
 
 ```text
@@ -70,7 +82,7 @@ swift scripts/generate_app_icon.swift assets/branding app/MemoEcho/Resources/Ass
 
 MemoEcho 后续版本应保持 `me.wangmao.memoecho` 与相同的 `APPLE_SIGNING_IDENTITY`，以便延续本应用的系统授权。首次安装 MemoEcho 时需要重新授予麦克风与辅助功能权限。
 
-本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.20`，内部构建号为 `1.0.0b20`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`，构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
+本地构建使用 `app/project.yml` 中的版本号，当前版本为 `1.0.0-beta.21`，内部构建号为 `1.0.0b21`。发布支持 `vX.Y.Z` 和 `vX.Y.Z-beta.N` 标签（N 为 1–255）：正式版的显示版本与构建号均为 `X.Y.Z`；beta 显示版本为 `X.Y.Z-beta.N`，构建号为 `X.Y.ZbN`，GitHub Release 标记为预发布。发布流程还会生成 Sparkle 所需的 `.zip` 更新包与 `updates/appcast.xml`。
 
 如需发布可被应用内自动更新识别的正式版本，必须在 CI 中配置 `SPARKLE_PRIVATE_KEY` secret。其值应为 Sparkle `generate_keys -x` 导出的私钥文件内容；若缺失，release workflow 会直接失败，避免发布出 GitHub Release 已生成但 `updates/appcast.xml` 仍为空的版本。
 

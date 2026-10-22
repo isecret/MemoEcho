@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/werman/noise-suppression-for-voice.git",
+  "revision": "9c4e5c28d8950e2cef837d8a0abd36c2fd9b5c2d",
+  "source_lock_sha256": "ccb9ff1b63cd12c07422535699984cb110ad6f05505ff504d9b9a57bd93a58cc",
+  "model_sha256": "522b6a64fded05bf85e58c06206eafe57ce7d94f3af58c725b17628b481d7890",
+  "inference": "mixed-int8",
+  "architectures": [
+    "arm64",
+    "x86_64"
+  ],
+  "minimum_macos": "14.0",
+  "frame_samples": 480,
+  "sample_rate": 48000,
+  "delay_samples": 960,
+  "cflags": [
+    "-O3",
+    "-fPIC",
+    "-dynamiclib",
+    "-mmacosx-version-min=14.0",
+    "-Wl,-install_name,@rpath/librnnoise.dylib",
+    "-DDISABLE_DEBUG_FLOAT"
+  ],
+  "compiler": "Apple clang version 17.0.0 (clang-1700.6.4.2)",
+  "sdk": "MacOSX26.2.sdk",
+  "library_bytes": 3023184,
+  "library_sha256_before_app_signing": "3df350f3af9cdd32c64e158e080116b47d472cb5f487f4237fb4a88ecf322b3f"
+}

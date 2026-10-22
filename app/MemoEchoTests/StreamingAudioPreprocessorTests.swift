@@ -113,6 +113,52 @@ final class StreamingAudioPreprocessorTests: XCTestCase {
         }
     }
 
+    func testStrictPipelinePropagatesLoadingAndFrameErrors() throws {
+        XCTAssertThrowsError(try StreamingAudioPreprocessor.requiringDenoising(delaySamples48k: 960, loader: {
+            throw TestError.synthetic
+        })) { XCTAssertTrue($0 is TestError) }
+
+        let processor = try StreamingAudioPreprocessor.requiringDenoising(delaySamples48k: 960, loader: {
+            { _ in throw TestError.synthetic }
+        })
+        XCTAssertThrowsError(try processor.process(pcm([Int16](repeating: 7, count: 200)))) {
+            XCTAssertTrue($0 is TestError)
+        }
+        XCTAssertNil(processor.fallbackCode)
+        XCTAssertEqual(processor.bufferedSampleCount, 0)
+        XCTAssertThrowsError(try processor.process(pcm([1]))) {
+            XCTAssertEqual($0 as? StreamingAudioPreprocessor.ProcessingError, .alreadyFinished)
+        }
+    }
+
+    func testStrictPipelineReleasesFrameProcessorAfterFinishOrFailure() throws {
+        for fails in [false, true] {
+            weak var lifetime: FrameProcessorLifetime?
+            let processor = try StreamingAudioPreprocessor.requiringDenoising(delaySamples48k: 0, loader: {
+                let instance = FrameProcessorLifetime()
+                lifetime = instance
+                return { [instance] frame in
+                    try instance.process(frame, fails: fails)
+                }
+            })
+            XCTAssertNotNil(lifetime)
+            _ = try processor.process(pcm([1, 2, 3]))
+            if fails {
+                XCTAssertThrowsError(try processor.finish()) { XCTAssertTrue($0 is TestError) }
+            } else {
+                XCTAssertEqual(try processor.finish(), pcm([1, 2, 3]))
+            }
+            XCTAssertNil(lifetime, "Finish must release the runtime even while the pipeline is retained")
+        }
+    }
+
+    private final class FrameProcessorLifetime {
+        func process(_ frame: [Float], fails: Bool) throws -> [Float] {
+            if fails { throw TestError.synthetic }
+            return frame
+        }
+    }
+
     private func delayedProcessor(frames: Int) -> StreamingAudioPreprocessor {
         var delayed = [[Float]](repeating: [Float](repeating: 0, count: 480), count: frames)
         return StreamingAudioPreprocessor(delaySamples48k: frames * 480, frameProcessor: { frame in

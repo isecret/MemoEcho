@@ -25,6 +25,8 @@
 
 ## 验证与原型
 
+- [降噪组件轻量化调研](./research/denoising-options.md)
+- [RNNoise 3 MB 量化候选实测](./research/rnnoise-int8-benchmark.md)
 - [实时 ASR 验证记录](./validation-realtime-asr.md)
 - [端到端验证清单](./validation-e2e.md)
 - [失败处理验证](./validation-failure-handling.md)

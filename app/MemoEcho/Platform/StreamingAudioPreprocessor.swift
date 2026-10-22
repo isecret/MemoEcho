@@ -13,7 +13,9 @@ final class StreamingAudioPreprocessor {
     }
 
     private static let frameSize = 480
+    static let rnnoiseDelaySamples48k = 960
     private let delaySamples: Int
+    private let throwsOnFailure: Bool
     private let onFallback: ((String) -> Void)?
     private var frameProcessor: FrameProcessor?
     private var pendingByte: UInt8?
@@ -32,10 +34,8 @@ final class StreamingAudioPreprocessor {
     /// The bundled RNNoise has the overlap/add and delayed-spectrum stages (20ms).
     /// A different runtime must have its delay revalidated before replacing it.
     convenience init(onFallback: ((String) -> Void)? = nil) {
-        self.init(delaySamples48k: 960, loader: {
-            let processor = try RNNoiseFrameProcessor()
-            return { try processor.process($0) }
-        }, onFallback: onFallback)
+        self.init(delaySamples48k: Self.rnnoiseDelaySamples48k,
+                  loader: Self.loadFrameProcessor, onFallback: onFallback)
     }
 
     /// Injection points for deterministic delay, chunk-boundary and failure tests.
@@ -44,17 +44,43 @@ final class StreamingAudioPreprocessor {
         self.init(delaySamples48k: delaySamples48k, loader: { frameProcessor }, onFallback: onFallback)
     }
 
-    init(delaySamples48k: Int, loader: () throws -> FrameProcessor,
-         onFallback: ((String) -> Void)? = nil) {
-        precondition(delaySamples48k >= 0 && delaySamples48k <= 4 * Self.frameSize)
-        delaySamples = delaySamples48k
-        self.onFallback = onFallback
+    convenience init(delaySamples48k: Int, loader: () throws -> FrameProcessor,
+                     onFallback: ((String) -> Void)? = nil) {
         do {
-            frameProcessor = try loader()
+            let processor = try loader()
+            self.init(delaySamples48k: delaySamples48k, processor: processor,
+                      throwsOnFailure: false, onFallback: onFallback)
         } catch {
+            self.init(delaySamples48k: delaySamples48k, processor: nil,
+                      throwsOnFailure: false, onFallback: onFallback)
             fallbackCode = "rnnoise_load_failed"
             onFallback?("rnnoise_load_failed")
         }
+    }
+
+    /// Batch callers must not receive a partially denoised result on failure.
+    /// Loading throws here; frame errors terminate this instance and propagate.
+    static func requiringDenoising(delaySamples48k: Int, loader: () throws -> FrameProcessor) throws
+        -> StreamingAudioPreprocessor {
+        let processor = try loader()
+        return StreamingAudioPreprocessor(delaySamples48k: delaySamples48k, processor: processor,
+                                          throwsOnFailure: true, onFallback: nil)
+    }
+
+    static func loadFrameProcessor() throws -> FrameProcessor {
+        let processor = try RNNoiseFrameProcessor()
+        return { try processor.process($0) }
+    }
+
+    private init(delaySamples48k: Int, processor: FrameProcessor?, throwsOnFailure: Bool,
+                 onFallback: ((String) -> Void)?) {
+        precondition(delaySamples48k >= 0 && delaySamples48k <= 4 * Self.frameSize)
+        delaySamples = delaySamples48k
+        self.throwsOnFailure = throwsOnFailure
+        self.onFallback = onFallback
+        frameProcessor = processor
+        frame.reserveCapacity(Self.frameSize)
+        uncommitted.reserveCapacity((delaySamples48k + Self.frameSize) / 3 + 1)
     }
 
     /// A PCM sample may straddle two Data values. No chunk boundary is audible.
@@ -80,7 +106,7 @@ final class StreamingAudioPreprocessor {
                 for phase in 0..<3 {
                     frame.append(previousSample + (next - previousSample) * Float(phase) / 3)
                 }
-                if frame.count == Self.frameSize { processFrame(into: &output) }
+                if frame.count == Self.frameSize { try processFrame(into: &output) }
             }
             previousSample = frameProcessor == nil ? nil : Float(sample)
         }
@@ -100,7 +126,7 @@ final class StreamingAudioPreprocessor {
         previousSample = nil
         while frameProcessor != nil && outputSampleCount < inputSampleCount {
             frame.append(contentsOf: repeatElement(0, count: Self.frameSize - frame.count))
-            processFrame(into: &output)
+            try processFrame(into: &output)
         }
         frame.removeAll(keepingCapacity: false)
         uncommitted.removeAll(keepingCapacity: false)
@@ -108,7 +134,7 @@ final class StreamingAudioPreprocessor {
         return output
     }
 
-    private func processFrame(into output: inout Data) {
+    private func processFrame(into output: inout Data) throws {
         guard let processor = frameProcessor else { return }
         do {
             let processed = try processor(frame)
@@ -127,6 +153,14 @@ final class StreamingAudioPreprocessor {
             processedSamples48k += Self.frameSize
             frame.removeAll(keepingCapacity: true)
         } catch {
+            if throwsOnFailure {
+                frameProcessor = nil
+                frame.removeAll(keepingCapacity: false)
+                uncommitted.removeAll(keepingCapacity: false)
+                previousSample = nil
+                finished = true
+                throw error
+            }
             // None of this frame was committed. Re-emit only the pending original
             // samples, then remain in passthrough for the rest of this recording.
             frameProcessor = nil
@@ -157,6 +191,7 @@ private final class RNNoiseFrameProcessor {
     private let state: OpaquePointer
     private let destroy: Destroy
     private let process: Process
+    private var output = [Float](repeating: 0, count: 480)
 
     init() throws {
         guard let path = Bundle.main.resourceURL?.appendingPathComponent("rnnoise/lib/librnnoise.dylib").path,
@@ -187,7 +222,7 @@ private final class RNNoiseFrameProcessor {
     }
 
     func process(_ samples: [Float]) throws -> [Float] {
-        var output = [Float](repeating: 0, count: 480)
+        guard samples.count == 480 else { throw StreamingAudioPreprocessor.ProcessingError.invalidFrame }
         let probability = samples.withUnsafeBufferPointer { input in
             output.withUnsafeMutableBufferPointer { output in
                 process(state, output.baseAddress, input.baseAddress)

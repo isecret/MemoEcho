@@ -42,8 +42,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: me.wangmao.memoecho
         APP_DISPLAY_NAME: MemoEcho
         CODE_SIGN_ENTITLEMENTS: MemoEcho/MemoEcho.entitlements
-        MARKETING_VERSION: "1.0.0-beta.20"
-        CURRENT_PROJECT_VERSION: "1.0.0b20"
+        MARKETING_VERSION: "1.0.0-beta.21"
+        CURRENT_PROJECT_VERSION: "1.0.0b21"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: MemoEcho/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: MemoEcho/Platform/SherpaOnnxBridge.h
@@ -53,6 +53,7 @@ targets:
           APP_DISPLAY_NAME: MemoEcho Dev
     preBuildScripts:
       - name: "Validate Source Resources"
+        basedOnDependencyAnalysis: false
         outputFiles:
           - "$(DERIVED_FILE_DIR)/validate-source-resources.stamp"
         script: |
@@ -62,6 +63,8 @@ targets:
             echo "error: RNNoise library not found. Run ./scripts/setup-rnnoise.sh first."
             exit 1
           fi
+          python3 "${SRCROOT}/../scripts/ci/verify-rnnoise.py" "${RNNOISE_DIR}/lib/librnnoise.dylib" \
+            --manifest "${RNNOISE_DIR}/build-info.json" || exit 1
 
           # sherpa-onnx runtime（SenseVoice 本地 ASR）
           SHERPA_DIR="${SRCROOT}/MemoEcho/Resources/sherpa-onnx"

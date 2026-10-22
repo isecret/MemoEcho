@@ -92,6 +92,9 @@ app/MemoEcho/Resources/rnnoise/
 !app/MemoEcho/Resources/rnnoise/
 !app/MemoEcho/Resources/rnnoise/lib/
 !app/MemoEcho/Resources/rnnoise/lib/librnnoise.dylib
+!app/MemoEcho/Resources/rnnoise/COPYING
+!app/MemoEcho/Resources/rnnoise/AUTHORS
+!app/MemoEcho/Resources/rnnoise/build-info.json
 
 # Keep project-local agent skills tracked, but ignore transient caches if added later
 .agents/cache/

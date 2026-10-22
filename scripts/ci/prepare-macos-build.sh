@@ -66,10 +66,14 @@ echo ""
 echo "--- Step 3: 准备 RNNoise 资源 ---"
 RNNOISE_RESOURCE_DIR="${APP_DIR}/MemoEcho/Resources/rnnoise/lib"
 
-if [ "${SKIP_RNNOISE:-0}" = "1" ]; then
+if [ "${SKIP_RNNOISE:-0}" = "1" ] && [ "${RELEASE_BUILD:-0}" = "1" ]; then
+    echo "  error: RELEASE_BUILD=1 does not allow SKIP_RNNOISE=1"
+    exit 1
+elif [ "${SKIP_RNNOISE:-0}" = "1" ]; then
     echo "  → SKIP_RNNOISE=1, skipping RNNoise setup"
 elif [ -f "${RNNOISE_RESOURCE_DIR}/librnnoise.dylib" ]; then
-    echo "  ✓ RNNoise 已存在，跳过"
+    python3 "${SCRIPT_DIR}/verify-rnnoise.py" "${RNNOISE_RESOURCE_DIR}/librnnoise.dylib" \
+        --manifest "${RNNOISE_RESOURCE_DIR}/../build-info.json"
 else
     echo "  error: RNNoise 资源缺失: ${RNNOISE_RESOURCE_DIR}/librnnoise.dylib"
     echo "  error: 请先运行 ./scripts/setup-rnnoise.sh 并将结果提交到仓库"

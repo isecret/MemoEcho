@@ -636,6 +636,9 @@ Segment 级诊断字段（每段独立记录）：
 
 ### 9.2 RNNoise 降噪
 
+- Issue #22：RNNoise 仅打包独立 C 核心（arm64 + x86_64 的 `MH_DYLIB`），不打包 AU/JUCE 插件与界面依赖。源码、模型与许可证由 `scripts/rnnoise/source-lock.json` 固定，资源目录保留构建清单；CI/Xcode 在加载前静态校验架构、依赖和导出 API。
+- 2026-10-22 用户确认采用量化版本：默认构建启用 `DISABLE_DEBUG_FLOAT`，构建清单标记 `mixed-int8`；conv2/GRU 大矩阵使用 int8，部分层仍为浮点。此决策包含推理路径变化，不仅是删除插件包装。CI/Xcode 校验默认产物必须为量化构建；浮点版仅作为隔离基准对照，不增加用户设置或运行时自动切换。
+- 分段和实时共用有界帧处理及库句柄生命周期，批量处理补齐尾帧、排空 20ms 算法延迟并裁剪到原采样数。M4 性能与合成中文结果见[量化实测](./research/rnnoise-int8-benchmark.md)，真实语音、Intel 与发布验收仍单独跟踪。
 - 输入：录音得到的 16k mono WAV。
 - 处理：转换为 RNNoise 所需采样格式，执行降噪，再转换回 16k mono WAV。
 - 输出：ASR 可消费的 WAV 数据。
