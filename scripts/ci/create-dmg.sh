@@ -153,7 +153,9 @@ sync
 hdiutil detach "$MOUNT_POINT" -quiet
 
 echo "Converting DMG..."
-hdiutil convert "$RW_DMG_PATH" -ov -format UDZO -o "$OUTPUT_BASE" -quiet
+# LZMA reduces the download size without changing the signed app contents.
+# Keep conversion before DMG signing and notarization.
+hdiutil convert "$RW_DMG_PATH" -ov -format ULMO -o "$OUTPUT_BASE" -quiet
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
     CODESIGN_ARGS=(--force --sign "$SIGNING_IDENTITY")

@@ -35,6 +35,9 @@ jobs:
       - name: Test notarization retry handling
         run: python3 scripts/ci/test_notarize.py
 
+      - name: Test ASR runtime symbol stripping
+        run: python3 scripts/ci/test_strip_asr_runtime.py
+
       - name: Test RNNoise source isolation and static validation
         run: |
           python3 scripts/rnnoise/test_build.py

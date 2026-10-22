@@ -1077,6 +1077,13 @@ Issue #21 独立复测新增验证：业务拒绝但样例成功、业务 401 �
 - 注入失败时文本不会丢失
 - 配置、权限在重启后行为正确
 
+### 安装包精简（2026-10-22）
+
+- 发布仍为 arm64 + x86_64 Universal。`sign-macos-app.sh` 在最终签名前对归档中的 ONNX Runtime 与 sherpa C API 库执行 `strip -x`，保留全部导出 API。两库候选均通过各架构导出符号校验后才替换；失败中止签名。仓库原始库保留，RNNoise 构建清单及 Sparkle 不参与符号清理。
+- DMG 使用 ULMO / LZMA 压缩，转换在 DMG 签名、公证之前完成；Sparkle 继续使用原有 ZIP 格式。不得把压缩率收益计为安装后的磁盘或运行内存收益。
+- 四张不透明引导背景使用原尺寸、质量 95 的 JPEG，asset 名称、SwiftUI 填充裁切及深色遮罩不变。PNG 母图保存在 `assets/onboarding-backgrounds/`，不进入应用资源；编码由 `scripts/encode-onboarding-backgrounds.py` 复现。
+- 验证覆盖符号清理失败保护、Universal 架构和导出、实际 SenseVoice 解码对照、编译后的背景加载与浅深色渲染、DMG 挂载及包内文件/签名一致性。Intel 原生运行、macOS 14 挂载和正式公证仍需对应环境验证，不能由本机静态检查替代。
+
 
 ### 录音采集健康监测与故障检查点（2026-09-25）
 
