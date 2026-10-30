@@ -93,6 +93,7 @@ struct SessionRecoveryProcessor {
     var recognizeRealtime: ((RealtimeRecoveryAudio) async throws -> [String])? = nil
 
     func process(_ checkpoint: SessionRecoveryCheckpoint,
+                 retryRecognition: Bool = true,
                  shouldContinue: () -> Bool,
                  onStage: (SessionRecoveryCheckpoint.Stage) -> Void) async throws -> String {
         func check() throws {
@@ -102,7 +103,10 @@ struct SessionRecoveryProcessor {
         if let audio = checkpoint.realtimeAudio {
             guard let recognizeRealtime else { throw RealtimeASRError.configuration }
             onStage(.recognition)
-            let texts = try await recognizeRealtime(audio)
+            let texts = try await ServiceRequestRetry.perform(automaticallyRetry: retryRecognition,
+                shouldContinue: { shouldContinue() && checkpoint.isValid(at: Date()) }) {
+                try await recognizeRealtime(audio)
+            }
             try check()
             checkpoint.transcripts.append(contentsOf: texts)
             checkpoint.realtimeAudio = nil
@@ -110,7 +114,10 @@ struct SessionRecoveryProcessor {
         while let segment = checkpoint.pendingSegments.first {
             onStage(.recognition)
             if segment.voicedDetected {
-                let text = try await recognize(segment)
+                let text = try await ServiceRequestRetry.perform(
+                    shouldContinue: { shouldContinue() && checkpoint.isValid(at: Date()) }) {
+                    try await recognize(segment)
+                }
                 try check()
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw MemoEchoError.asrEmptyTranscript
@@ -126,7 +133,10 @@ struct SessionRecoveryProcessor {
                 throw MemoEchoError.asrEmptyTranscript
             }
             onStage(.polish)
-            let result = try await polish(checkpoint.transcripts, checkpoint.context)
+            let result = try await ServiceRequestRetry.perform(
+                shouldContinue: { shouldContinue() && checkpoint.isValid(at: Date()) }) {
+                try await polish(checkpoint.transcripts, checkpoint.context)
+            }
             try check()
             checkpoint.polished = result
             // The original transcript is no longer needed once polishing succeeded.
@@ -135,7 +145,10 @@ struct SessionRecoveryProcessor {
         }
         if checkpoint.finalText == nil, let polished = checkpoint.polished {
             onStage(.translation)
-            let text = try await translate(polished.text, checkpoint.language, checkpoint.context)
+            let text = try await ServiceRequestRetry.perform(
+                shouldContinue: { shouldContinue() && checkpoint.isValid(at: Date()) }) {
+                try await translate(polished.text, checkpoint.language, checkpoint.context)
+            }
             try check()
             checkpoint.finalText = text
         }

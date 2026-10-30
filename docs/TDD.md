@@ -188,7 +188,7 @@
 
 ### 5.1.2 服务独立复测与运行期健康（Issue #21）
 
-按 2026-10-19 用户确认实施。此节覆盖此前业务网络错误 / 空响应直接使配置失效的行为，保持业务请求只允许用户主动恢复，不引入 HTTP 自动重发或实时自动重连。
+按 2026-10-19 用户确认实施。此节覆盖此前业务网络错误 / 空响应直接使配置失效的行为，业务请求在一次静默自动重试仍失败后才进入手动恢复（2026-10-30 用户要求）；独立样例复测不叠加业务重试。实时断线先停止采集，再重放未确认音频，不实现录音不中断重连。
 
 - 验证服务保存当前配置的成功证据；独立的运行期健康层管理 checking、临时不可用、确认阻塞和失败用途，临时状态仅存内存，不把后台 checking / 临时失败写成持久配置失败。设置、菜单、`VoiceInputReadinessService` 与 `RecordingStartGate` 共用结果，不能只改文案而继续用旧 `.failed` 锁住已验证配置。
 - 业务错误只触发出错服务及实际用途的复测；云端拒绝、空响应或结构无效可以触发，取消、设备 / 降噪 / 本地模型、空音频、文本超长和注入失败不触发。等待原请求 / WebSocket 与既有字段兼容回退结束后再测试。测试 purpose 与业务分开，测试失败不得递归生成新一轮复测。
@@ -226,6 +226,8 @@
 
 ### 5.2.1 SessionRecoveryCheckpoint / SessionRecoveryProcessor
 
+- `ServiceRequestRetry` 统一在业务编排层处理一次自动重试：网络中断、超时及 HTTP 408 / 429 / 5xx 等临时错误至少等待 300ms 后重试，响应带 `Retry-After` 时遵守服务端冷却时间，单段 ASR、整理、翻译各自最多两次尝试。首次调用及手动恢复均使用本机制；本地模型错误、配置/鉴权错误、非临时 HTTP 错误、空结果/格式错误、取消及注入错误不重试。Provider 不叠加网络重试，独立样例测试继续使用原预算；thinking 协议兼容回退保留。重试期间保持处理态，不发失败反馈；取消、会话代次变化或恢复到期禁止下一次发送。每次 LLM 重试重新检查上下文开关。
+- 实时链路遇到可重试错误时停止采集并封存最后回调，取消旧连接，仅对未确认 PCM 按原实时协议自动重放一次，已确认窗口不重放、旧 partial 不拼接。原实时请求已计为首次尝试，自动重放内部不再重试；再次失败才保留检查点并显示现有恢复入口。录音期间分段请求则在两次尝试均失败后停止采集。
 - `SessionRecoveryCheckpoint` 是 MainActor 内存对象，记录待识别 sealed segments、有序成功转写、润色结果、最终文本、原模式/语言/ASR 平台、输入框身份和原上下文；不遵循 Codable、不持久化密钥或音频。
 - `stage` 从尚未完成的数据推导为 recognition / polish / translation / output；`SessionRecoveryProcessor` 用于首次 ASR 完成后的处理和所有阶段恢复。每段 ASR 成功后移除对应音频；润色成功后释放原转写；翻译只消费已有润色结果。
 - 录音期 ASR 失败时，取消待执行的停止延迟，停止录音、finalize 尾段并 finish stream；当前消费者排空剩余分段，合并失败段后再清理 segmenter。保留成功前缀，禁止部分转写进入 LLM。整个原始录音副本不用于恢复，进入后处理或失败时释放。
@@ -1138,7 +1140,7 @@ OpenAI 兼容 ASR 的接口契约、局域网 HTTP、配置验证及小米删除
 - 验证指纹包含平台、规范化后的最终请求地址、模型和 Key，使用结构化编码避免换行分隔歧义。连接变化后失效旧验证，迟到结果不能覆盖新配置。
 - 使用 `Authorization: Bearer`、`Content-Type: application/json`、`X-DashScope-SSE: disable`。请求为 `model` + `input.messages[].content[].input_audio.data`（WAV Data URL）+ `parameters.format: wav` / `parameters.sample_rate: "16000"`。
 - 仅解析 `output.text` 和可选 `request_id`；显式空文本与缺失/错误类型字段区分。凭据验证使用随包合成语音，验证和实际识别的空文本均失败；200 错误对象、HTML、无效 JSON 均不算验证成功。
-- 沿用分段动态超时与串行 ASR；取消透传 CancellationError，取消后的结果丢弃。其他错误映射现有云 ASR 错误，不做自动重发、换域名或平台回退。
+- 沿用分段动态超时与串行 ASR；取消透传 CancellationError，取消后的结果丢弃。其他错误映射现有云 ASR 错误，由业务编排层对临时网络错误自动重试一次，不换域名或平台回退。
 - 百炼会以 HTTP 400 / `ASR_RESPONSE_HAVE_NO_WORDS` 拒绝纯静音，不能沿用其他平台的静音探测。验证样本为 `Resources/ASRValidation/asr-validation.wav`：macOS Tingting 语音、语速 160 合成“你好，语音识别测试。”，转换为 16kHz、单声道 PCM16 WAV，时长 2.34s；不包含用户录音。资源缺失明确失败，空识别结果转换为验证失败，不能被公共验证服务当作静音成功。
 - 诊断仅记录固定平台/接口标识、HTTP 状态、固定错误类别、字节数、耗时；不记录自定义域名、地址、凭据、音频、转写文字或原始错误正文。
 - 官方契约参考：https://help.aliyun.com/en/model-studio/fun-asr-flash-recorded-speech-recognition-http-api 。真实百炼及输入框端到端验收完成前不宣称可用。

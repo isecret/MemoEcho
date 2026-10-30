@@ -148,7 +148,7 @@ final class ServiceRecoveryIntegrationTests: XCTestCase {
         }
 
         let businessCalls = await fixture.business.calls
-        XCTAssertEqual(businessCalls, 1, "Probe success must not resubmit retained user audio")
+        XCTAssertEqual(businessCalls, 2, "One business retry; probe success must not submit user audio again")
         XCTAssertEqual(failedEvents, 1)
         XCTAssertEqual(fixture.session.recovery?.id, checkpoint.id)
         XCTAssertEqual(checkpoint.stage, .recognition)

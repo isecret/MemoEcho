@@ -31,14 +31,14 @@ final class SessionRecoveryTests: XCTestCase {
         worker.polish = { [self] text, _ in
             calls += 1
             XCTAssertEqual(text, ["已有转写"])
-            if calls == 1 { throw MemoEchoError.llmNetworkFailure(message: "synthetic") }
+            if calls <= 2 { throw MemoEchoError.llmNetworkFailure(message: "synthetic") }
             return polished()
         }
         do { _ = try await process(worker, cp); XCTFail("Expected failure") } catch {}
         XCTAssertEqual(cp.stage, .polish)
         let result = try await process(worker, cp)
         XCTAssertEqual(result, "整理结果")
-        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(calls, 3)
         XCTAssertTrue(cp.transcripts.isEmpty)
     }
 
@@ -61,6 +61,93 @@ final class SessionRecoveryTests: XCTestCase {
         _ = try await process(worker, cp)
         XCTAssertEqual(polishCalls, 1)
         XCTAssertEqual(translateCalls, 2)
+    }
+
+    func testTransientStageFailuresRetryOnceWithoutRepeatingSuccessfulStages() async throws {
+        let cp = checkpoint(segments: [segment(1), segment(2)], mode: .translate)
+        var recognized: [Int] = []
+        var polishCalls = 0
+        var translationCalls = 0
+        var stages: [SessionRecoveryCheckpoint.Stage] = []
+        let worker = SessionRecoveryProcessor(recognize: { segment in
+            recognized.append(segment.index)
+            if recognized == [1, 2] { throw MemoEchoError.cloudASRNetworkFailure(message: "HTTP 503") }
+            return "段\(segment.index)"
+        }, polish: { [self] transcripts, _ in
+            polishCalls += 1
+            XCTAssertEqual(transcripts, ["已有转写", "段1", "段2"])
+            if polishCalls == 1 { throw MemoEchoError.llmNetworkFailure(message: "HTTP 502") }
+            return polished()
+        }, translate: { text, language, _ in
+            translationCalls += 1
+            XCTAssertEqual(text, "整理结果")
+            XCTAssertEqual(language, .japanese)
+            if translationCalls == 1 { throw URLError(.networkConnectionLost) }
+            return "翻译结果"
+        })
+        let result = try await worker.process(cp, shouldContinue: { true }, onStage: { stages.append($0) })
+        XCTAssertEqual(result, "翻译结果")
+        XCTAssertEqual(recognized, [1, 2, 2])
+        XCTAssertEqual(polishCalls, 2)
+        XCTAssertEqual(translationCalls, 2)
+        XCTAssertEqual(stages, [.recognition, .recognition, .polish, .translation, .output])
+    }
+
+    func testSecondRecognitionFailurePreservesOnlyUnfinishedSegmentsForManualRecovery() async {
+        let cp = checkpoint(segments: [segment(1), segment(2), segment(3)])
+        var recognized: [Int] = []
+        var worker = processor()
+        worker.recognize = { segment in
+            recognized.append(segment.index)
+            if segment.index == 2 { throw MemoEchoError.cloudASRNetworkFailure(message: "HTTP 503") }
+            return "段1"
+        }
+        worker.polish = { [self] _, _ in XCTFail("No partial output"); return polished() }
+        do { _ = try await process(worker, cp); XCTFail("Expected failure") }
+        catch { XCTAssertEqual(error as? MemoEchoError, .cloudASRNetworkFailure(message: "HTTP 503")) }
+        XCTAssertEqual(recognized, [1, 2, 2])
+        XCTAssertEqual(cp.pendingSegments.map(\.index), [2, 3])
+        XCTAssertEqual(cp.transcripts, ["已有转写", "段1"])
+    }
+
+    func testExpiredOrStaleCheckpointCannotSendAutomaticRetry() async {
+        for expire in [false, true] {
+            let cp = checkpoint()
+            var active = true
+            var calls = 0
+            var worker = processor()
+            worker.polish = { _, _ in
+                calls += 1
+                if expire { cp.retainUntilExpiration(now: .distantPast, lifetime: 0) }
+                else { active = false }
+                throw MemoEchoError.llmNetworkFailure(message: "HTTP 503")
+            }
+            do {
+                _ = try await worker.process(cp, shouldContinue: { active }, onStage: { _ in })
+                XCTFail("Expected cancellation")
+            } catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertEqual(calls, 1)
+            XCTAssertNil(cp.polished)
+        }
+    }
+
+    func testInitialSegmentRecognitionRetriesSameAudioAndTimeout() async throws {
+        let asr = TransientASR()
+        let (session, recorder, directory) = try makeCaptureSession(seconds: 1, asr: asr)
+        defer { session.cancel(); session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        session.startRecording()
+        await waitUntil { recorder.starts == 1 }
+        session.finishRecording()
+        await waitUntil { session.state == .error }
+        let requests = await asr.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.first?.audio, requests.last?.audio)
+        XCTAssertEqual(requests.map(\.timeout), [15, 15])
+        XCTAssertEqual(session.currentError, .llmConfigurationIncomplete)
+        XCTAssertEqual(session.recovery?.transcripts, ["合成转写"])
+        XCTAssertEqual(session.recovery?.stage, .polish)
+        XCTAssertEqual(recorder.starts, 1)
+        XCTAssertEqual(recorder.stops, 1)
     }
 
     func testRecognitionRetryOnlyRepeatsFailedSegmentThenContinuesInOrder() async throws {
@@ -401,7 +488,7 @@ final class SessionRecoveryTests: XCTestCase {
         worker.polish = { [self] transcripts, _ in
             XCTAssertEqual(transcripts, ["synthetic transcript"])
             polishCalls += 1
-            if polishCalls == 1 { throw MemoEchoError.llmNetworkFailure(message: "synthetic") }
+            if polishCalls <= 2 { throw MemoEchoError.llmNetworkFailure(message: "synthetic") }
             return polished()
         }
         let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
@@ -419,7 +506,7 @@ final class SessionRecoveryTests: XCTestCase {
         await waitUntil { !session.isRecovering }
         let asrCalls = await asr.calls
         XCTAssertEqual(asrCalls, 1)
-        XCTAssertEqual(polishCalls, 2)
+        XCTAssertEqual(polishCalls, 3)
         XCTAssertEqual(recorder.starts, 1)
         XCTAssertEqual(driver.pastes, 1)
         XCTAssertEqual(session.state, .done)
@@ -797,6 +884,19 @@ final class SessionRecoveryTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Timed out")
+    }
+}
+
+private actor TransientASR: ASRProvider {
+    struct Request: Sendable {
+        let audio: Data
+        let timeout: TimeInterval?
+    }
+    private(set) var requests: [Request] = []
+    func recognize(audioData: Data, timeout: TimeInterval?) async throws -> TranscriptResult {
+        requests.append(.init(audio: audioData, timeout: timeout))
+        if requests.count == 1 { throw MemoEchoError.cloudASRNetworkFailure(message: "HTTP 503") }
+        return .init(text: "合成转写", requestId: nil, durationMs: 1)
     }
 }
 
