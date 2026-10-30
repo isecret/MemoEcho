@@ -118,8 +118,8 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.driver.pastes, 0)
         fixture.service.emitPartial("不能提前润色")
         await fixture.service.releaseFinal.open()
-        await waitUntil { fixture.probe.polishCalls == 1 && fixture.coordinator.state == .error }
-        XCTAssertEqual(fixture.probe.transcripts, [["合成最终转写"]])
+        await waitUntil { fixture.probe.polishCalls == 2 && fixture.coordinator.state == .error }
+        XCTAssertEqual(fixture.probe.transcripts, [["合成最终转写"], ["合成最终转写"]])
         XCTAssertEqual(fixture.coordinator.currentError, .llmNetworkFailure(message: "synthetic_polish_failure"))
         XCTAssertEqual(fixture.coordinator.recovery?.stage, .polish)
         XCTAssertTrue(fixture.coordinator.recovery?.pendingSegments.isEmpty == true)
@@ -152,8 +152,8 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.state, .transcribing)
         XCTAssertEqual(fixture.probe.polishCalls, 0)
         await fixture.service.releaseFinal.open()
-        await waitUntil { fixture.probe.polishCalls == 1 && fixture.coordinator.state == .error }
-        XCTAssertEqual(fixture.probe.transcripts, [["合成最终转写"]])
+        await waitUntil { fixture.probe.polishCalls == 2 && fixture.coordinator.state == .error }
+        XCTAssertEqual(fixture.probe.transcripts, [["合成最终转写"], ["合成最终转写"]])
         XCTAssertEqual(fixture.driver.pastes, 0)
     }
 
@@ -177,6 +177,61 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.probe.polishCalls, 0)
         XCTAssertEqual(fixture.driver.pastes, 0)
         XCTAssertNil(fixture.coordinator.lastResult)
+    }
+
+    func testRealtimeDisconnectAutomaticallyReplaysUnconfirmedAudioOnce() async throws {
+        let fixture = try makeFixture(sendError: .connectionClosed)
+        defer { fixture.cleanup() }
+        var failedEvents = 0
+        fixture.coordinator.onFeedbackEvent = { if case .processingFailed = $0 { failedEvents += 1 } }
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.recorder.emit(samples: 16_000)
+        await waitUntil { fixture.recorder.stops == 1 }
+        XCTAssertEqual(fixture.coordinator.state, .transcribing)
+        XCTAssertNil(fixture.coordinator.currentError)
+        XCTAssertEqual(failedEvents, 0)
+        await waitUntil { fixture.coordinator.state == .error }
+        XCTAssertEqual(fixture.probe.replayCalls, 1)
+        let audio = try XCTUnwrap(fixture.probe.replayedAudio)
+        XCTAssertEqual(audio.processedPCM.count + audio.rawPCM.count, 32_000)
+        XCTAssertEqual(fixture.probe.transcripts, [["合成恢复转写"], ["合成恢复转写"]])
+        XCTAssertEqual(fixture.coordinator.recovery?.stage, .polish)
+        XCTAssertNil(fixture.coordinator.recovery?.realtimeAudio)
+        XCTAssertEqual(failedEvents, 1, "Only the exhausted LLM stage reports a failure")
+        XCTAssertEqual(fixture.recorder.retainFullAudioArguments.count, 1)
+        XCTAssertEqual(fixture.driver.pastes, 0)
+    }
+
+    func testSecondRealtimeFailureOffersManualRecoveryWithoutThirdAttempt() async throws {
+        let fixture = try makeFixture(sendError: .connectionClosed, replayError: .connectionClosed)
+        defer { fixture.cleanup() }
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.recorder.emit(samples: 16_000)
+        await waitUntil { fixture.coordinator.state == .error }
+        XCTAssertEqual(fixture.probe.replayCalls, 1)
+        XCTAssertEqual(fixture.probe.polishCalls, 0)
+        XCTAssertEqual(fixture.recorder.stops, 1)
+        XCTAssertEqual(fixture.coordinator.recovery?.stage, .recognition)
+        XCTAssertNotNil(fixture.coordinator.recovery?.realtimeAudio)
+        XCTAssertTrue(fixture.coordinator.canRetryRecovery)
+        XCTAssertEqual(fixture.driver.pastes, 0)
+    }
+
+    func testCancelDuringRealtimeRetryDelayNeverReplaysOrPublishesRecovery() async throws {
+        let fixture = try makeFixture(sendError: .connectionClosed)
+        defer { fixture.cleanup() }
+        fixture.coordinator.startRecording()
+        await fixture.recorder.started.wait()
+        fixture.recorder.emit(samples: 16_000)
+        await waitUntil { fixture.recorder.stops == 1 }
+        fixture.coordinator.cancel()
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(fixture.probe.replayCalls, 0)
+        XCTAssertEqual(fixture.probe.polishCalls, 0)
+        XCTAssertNil(fixture.coordinator.recovery)
+        XCTAssertEqual(fixture.coordinator.state, .cancelled)
     }
 
     func testCancelIgnoresLateFinalWithoutPolishOrInjection() async throws {
@@ -294,7 +349,8 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         }
     }
 
-    private func makeFixture(sendError: RealtimeASRError? = nil, platform: ASRPlatform = .volcengineRealtime) throws -> CoordinatorRealtimeFixture {
+    private func makeFixture(sendError: RealtimeASRError? = nil, platform: ASRPlatform = .volcengineRealtime,
+                             replayError: RealtimeASRError? = nil) throws -> CoordinatorRealtimeFixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
@@ -323,6 +379,11 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         }, translate: { _, _, _ in
             XCTFail("Synthetic polish failure cannot reach translation")
             throw MemoEchoError.llmEmptyResponse
+        }, recognizeRealtime: { audio in
+            probe.replayCalls += 1
+            probe.replayedAudio = audio
+            if let replayError { throw replayError }
+            return ["合成恢复转写"]
         })
         let coordinator = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
             audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder, dictionaryStore: dictionary,
@@ -369,6 +430,8 @@ private struct CoordinatorRealtimeFixture {
 private final class CoordinatorRealtimeProbe {
     var polishCalls = 0
     var transcripts: [[String]] = []
+    var replayCalls = 0
+    var replayedAudio: RealtimeRecoveryAudio?
 }
 
 @MainActor

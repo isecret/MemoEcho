@@ -216,9 +216,6 @@ struct ASRSettingsView: View {
                     }
                 } footer: {
                     Text(selectedPlatform.cloudConfigSummary)
-                    if selectedPlatform != .localSenseVoice {
-                        Text("请求失败后将使用内置样例检查连接。")
-                    }
                     if selectedPlatform == .aliyunBailianASR,
                        !bailianBaseURL.isEmpty, currentDraftConfig().aliyunBailian.requestURL == nil {
                         Text("地址格式不正确，请检查后再试。")

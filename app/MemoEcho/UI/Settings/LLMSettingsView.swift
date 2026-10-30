@@ -83,7 +83,6 @@ struct LLMSettingsView: View {
             }
         } footer: {
             Text("支持 OpenAI 兼容接口，用于整理和翻译语音识别结果。")
-            Text("请求失败后将使用内置样例检查连接。")
         }
         .onAppear {
             loadDraft()

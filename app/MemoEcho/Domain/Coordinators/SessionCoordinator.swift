@@ -666,7 +666,8 @@ final class SessionCoordinator {
             let snapshot = await pipeline.snapshot()
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             let mapped = mapError(error)
-            if !isOnboardingTrial, recordingDurationMs >= 500,
+            var failedCheckpoint: SessionRecoveryCheckpoint?
+            if recordingDurationMs >= 500,
                !snapshot.audio.processedPCM.isEmpty || !snapshot.audio.rawPCM.isEmpty || !snapshot.transcripts.isEmpty {
                 if case .transcriptTooLong = mapped {} else {
                     let checkpoint = await makeRecoveryCheckpoint(segments: [], transcripts: snapshot.transcripts,
@@ -676,12 +677,25 @@ final class SessionCoordinator {
                         checkpoint.realtimeAudio = snapshot.audio
                     }
                     checkpoint.isPartialRecording = wasRecording || error is RealtimePipelineError
-                    retainRecovery(checkpoint)
+                    failedCheckpoint = checkpoint
                 }
             }
             await pipeline.cancel()
             guard sessionGeneration == generation, !Task.isCancelled else { return }
             realtimePipeline = nil
+            if let checkpoint = failedCheckpoint, checkpoint.realtimeAudio != nil,
+               ServiceRequestRetry.isRetryable(error) {
+                // The live request already used the first attempt. Replay only unconfirmed PCM once.
+                checkpoint.retainUntilExpiration(now: Date(), lifetime: recoveryLifetime)
+                state = .transcribing
+                do { try await ServiceRequestRetry.waitBeforeRetry() }
+                catch { checkpoint.discard(); return }
+                guard sessionGeneration == generation, !Task.isCancelled else { checkpoint.discard(); return }
+                await runCheckpoint(checkpoint, generation: generation, sessionID: sessionID,
+                                    retryRecognition: false)
+                return
+            }
+            if let checkpoint = failedCheckpoint, !isOnboardingTrial { retainRecovery(checkpoint) }
             diagnostics.sessionError(sessionID: sessionID, error: mapped)
             handleError(mapped)
         }
@@ -785,7 +799,9 @@ final class SessionCoordinator {
             let asrStart = clock.now()
             let transcriptResult: TranscriptResult
             do {
-                transcriptResult = try await asrProvider.recognize(audioData: processedAudio, timeout: dynamicTimeout)
+                transcriptResult = try await ServiceRequestRetry.perform {
+                    try await asrProvider.recognize(audioData: processedAudio, timeout: dynamicTimeout)
+                }
                 guard !transcriptResult.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw MemoEchoError.asrEmptyTranscript
                 }
@@ -1095,7 +1111,8 @@ final class SessionCoordinator {
     }
 
     private func runCheckpoint(_ checkpoint: SessionRecoveryCheckpoint, generation: UInt64,
-                               sessionID: String, diagnostics initial: SessionDiagnostics = .init()) async {
+                               sessionID: String, diagnostics initial: SessionDiagnostics = .init(),
+                               retryRecognition: Bool = true) async {
         var diag = initial
         let recoveryAttempt = isRecovering
         diagnostics.log(sessionID: sessionID, event: "recovery_attempt", detail: recoveryAttempt ? "1" : "0")
@@ -1114,7 +1131,8 @@ final class SessionCoordinator {
         }
         do {
             let processor = makeRecoveryProcessor(checkpoint)
-            let text = try await processor.process(checkpoint, shouldContinue: { self.sessionGeneration == generation }, onStage: { stage in
+            let text = try await processor.process(checkpoint, retryRecognition: retryRecognition,
+                shouldContinue: { self.sessionGeneration == generation }, onStage: { stage in
                 finishStageTiming()
                 if activeStage == .recognition, stage != .recognition {
                     self.markCurrentLatency(.asrFinal, generation: generation)

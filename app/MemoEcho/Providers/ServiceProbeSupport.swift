@@ -137,7 +137,13 @@ enum ServiceProbeContext {
         allowsThinkingFallback: Bool = false,
         using sender: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     ) async throws -> (Data, URLResponse) {
-        guard let budget else { return try await sender(request) }
+        guard let budget else {
+            let result = try await sender(request)
+            if let delay = ServiceRequestRetry.currentDelay, let response = result.1 as? HTTPURLResponse {
+                await delay.observe(response)
+            }
+            return result
+        }
         try Task.checkCancellation()
         if isInference { try await budget.consume() }
         do {
