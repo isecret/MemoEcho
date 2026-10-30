@@ -183,15 +183,20 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         let fixture = try makeFixture(sendError: .connectionClosed)
         defer { fixture.cleanup() }
         var failedEvents = 0
+        var enteredSilentRetry = false
         fixture.coordinator.onFeedbackEvent = { if case .processingFailed = $0 { failedEvents += 1 } }
+        fixture.coordinator.onStateChanged = { _, state in
+            guard state == .transcribing else { return }
+            enteredSilentRetry = true
+            XCTAssertEqual(fixture.recorder.stops, 1)
+            XCTAssertNil(fixture.coordinator.currentError)
+            XCTAssertEqual(failedEvents, 0)
+        }
         fixture.coordinator.startRecording()
         await fixture.recorder.started.wait()
         fixture.recorder.emit(samples: 16_000)
-        await waitUntil { fixture.recorder.stops == 1 }
-        XCTAssertEqual(fixture.coordinator.state, .transcribing)
-        XCTAssertNil(fixture.coordinator.currentError)
-        XCTAssertEqual(failedEvents, 0)
         await waitUntil { fixture.coordinator.state == .error }
+        XCTAssertTrue(enteredSilentRetry)
         XCTAssertEqual(fixture.probe.replayCalls, 1)
         let audio = try XCTUnwrap(fixture.probe.replayedAudio)
         XCTAssertEqual(audio.processedPCM.count + audio.rawPCM.count, 32_000)
