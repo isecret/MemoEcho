@@ -24,6 +24,22 @@ final class SessionRecoveryTests: XCTestCase {
         try await processor.process(checkpoint, shouldContinue: { true }, onStage: { _ in })
     }
 
+    func testEmptyPolishFromAlternateProcessorKeepsCheckpointBeforeTranslation() async throws {
+        for mode in [TextProcessingMode.polish, .translate] {
+            let cp = checkpoint(mode: mode)
+            var worker = processor()
+            var calls = 0
+            worker.polish = { [self] _, _ in calls += 1; return polished(" \n ") }
+            worker.translate = { _, _, _ in XCTFail("Must not translate empty polish"); return "" }
+            do { _ = try await process(worker, cp); XCTFail("Expected empty result error") }
+            catch { XCTAssertEqual(error as? MemoEchoError, .llmEmptyResponse) }
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(cp.stage, .polish)
+            XCTAssertNil(cp.polished)
+            XCTAssertEqual(cp.transcripts, ["已有转写"])
+        }
+    }
+
     func testPolishRetryKeepsTranscriptAndSkipsRecognition() async throws {
         let cp = checkpoint()
         var worker = processor()
