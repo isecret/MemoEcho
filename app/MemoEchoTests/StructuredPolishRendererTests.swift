@@ -94,35 +94,17 @@ final class StructuredPolishRendererTests: XCTestCase {
         XCTAssertEqual(rendered, "也不是列表")
     }
 
-    // MARK: - sanitizer
-
-    func testFillerWordSanitizerRemovesLeadingPureFillers() {
-        let rendered = FillerWordSanitizer.sanitize("嗯我想确认一下明天的会议。")
-        XCTAssertEqual(rendered, "我想确认一下明天的会议。")
+    func testNormalizationPreservesModelApprovedWordsAndPunctuation() {
+        for text in ["嗯", "嗯。", "啊？", "唉！", "嗯我想确认一下明天的会议。",
+                     "然后就是我们先对一下。", "先保存，然后退出。", "这个就是我要的。",
+                     "他说：‘嗯。’", "1. 嗯\n2. 好", "啊啊啊", "……", "保留  间隔"] {
+            XCTAssertEqual(PolishTextNormalizer.normalize(text), text)
+        }
     }
 
-    func testFillerWordSanitizerRemovesLeadingFillerPhrase() {
-        let rendered = FillerWordSanitizer.sanitize("然后就是我们先对一下。")
-        XCTAssertEqual(rendered, "我们先对一下。")
-    }
-
-    func testFillerWordSanitizerPreservesSequentialThen() {
-        let rendered = FillerWordSanitizer.sanitize("先保存文件，然后再退出。")
-        XCTAssertEqual(rendered, "先保存文件，然后再退出。")
-    }
-
-    func testFillerWordSanitizerPreservesSemanticThisAndThat() {
-        let rendered = FillerWordSanitizer.sanitize("这个事情我来处理。")
-        XCTAssertEqual(rendered, "这个事情我来处理。")
-    }
-
-    // MARK: - prompt
-
-    func testLLMProviderSystemPromptIncludesFillerRules() {
-        let prompt = LLMProvider.systemPrompt(terms: [])
-        XCTAssertTrue(prompt.contains("然后\" 仅在充当口头衔接"))
-        XCTAssertTrue(prompt.contains("保留 \"然后\""))
-        XCTAssertTrue(prompt.contains("然后就是"))
+    func testNormalizationOnlyTrimsEdgesAndNormalizesLineEndings() {
+        XCTAssertEqual(PolishTextNormalizer.normalize(" \r\n嗯。\r\n  好。\r收到。\n "), "嗯。\n  好。\n收到。")
+        XCTAssertEqual(PolishTextNormalizer.normalize(" \r\n\t"), "")
     }
 
     // MARK: - Helpers

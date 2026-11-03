@@ -86,7 +86,7 @@ enum MemoEchoError: Error, Equatable, Sendable {
         case .llmNetworkFailure:
             "LLM 请求失败，请检查配置或网络"
         case .llmEmptyResponse:
-            "LLM 返回空结果，请检查模型或网关配置"
+            "LLM 未返回有效文本，请重试或重新录音"
         case .llmInvalidResponse:
             "LLM 返回格式错误，请检查模型是否支持结构化输出"
         case .textInjectionFailure(let detail):

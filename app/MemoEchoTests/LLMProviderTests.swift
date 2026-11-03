@@ -2,6 +2,83 @@ import XCTest
 @testable import MemoEcho
 
 final class LLMProviderTests: XCTestCase {
+    @MainActor
+    func testModelApprovedShortRepliesReachOutputAndTranslationWithoutBeingDeleted() async throws {
+        for text in ["嗯", "嗯。", "好", "收到", "嗯，可以。", "啊？", "先保存，然后退出。", "然后，退出。"] {
+            for mode in [TextProcessingMode.polish, .translate] {
+                let json = try JSONSerialization.data(withJSONObject: ["mode": "plain_text", "text": text,
+                                                                        "correction_applied": false])
+                let network = ContextRequestRecorder(responseContent: String(decoding: json, as: UTF8.self))
+                let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                    omitThinkingParameter: true, requestSender: { try await network.send($0) })
+                let cp = SessionRecoveryCheckpoint(transcripts: [text], mode: mode, language: .english,
+                    asrPlatform: .openAICompatibleASR, target: nil, context: nil)
+                var stages: [SessionRecoveryCheckpoint.Stage] = []
+                let worker = SessionRecoveryProcessor(recognize: { _ in XCTFail("Must not rerun ASR"); return "" },
+                    polish: { texts, context in try await provider.polish(text: texts.joined(), context: context) },
+                    translate: { polished, _, _ in
+                        XCTAssertEqual(polished, text)
+                        return "Synthetic translation."
+                    })
+                let result = try await worker.process(cp, shouldContinue: { true }, onStage: { stages.append($0) })
+                XCTAssertEqual(result, mode == .polish ? text : "Synthetic translation.")
+                XCTAssertEqual(stages, mode == .polish ? [.polish, .output] : [.polish, .translation, .output])
+            }
+        }
+    }
+
+    @MainActor
+    func testEmptyPolishStaysRecoverableAndNeverReachesTranslationOrOutput() async throws {
+        for mode in [TextProcessingMode.polish, .translate] {
+            for empty in ["", " \n "] {
+                let json = try JSONSerialization.data(withJSONObject: ["mode": "plain_text", "text": empty,
+                                                                        "correction_applied": false])
+                let network = ContextRequestRecorder(responseContent: String(decoding: json, as: UTF8.self))
+                let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                    omitThinkingParameter: true, requestSender: { try await network.send($0) })
+                let cp = SessionRecoveryCheckpoint(transcripts: ["嗯"], mode: mode, language: .english,
+                    asrPlatform: .openAICompatibleASR, target: nil, context: nil)
+                var stages: [SessionRecoveryCheckpoint.Stage] = []
+                var worker = SessionRecoveryProcessor(recognize: { _ in XCTFail("Must not rerun ASR"); return "" },
+                    polish: { texts, context in try await provider.polish(text: texts.joined(), context: context) },
+                    translate: { _, _, _ in XCTFail("Empty polish must not be translated"); return "" })
+                do {
+                    _ = try await worker.process(cp, shouldContinue: { true }, onStage: { stages.append($0) })
+                    XCTFail("Empty polish must fail")
+                } catch { XCTAssertEqual(error as? MemoEchoError, .llmEmptyResponse) }
+                XCTAssertEqual(cp.stage, .polish)
+                XCTAssertEqual(cp.transcripts, ["嗯"])
+                XCTAssertNil(cp.polished)
+                XCTAssertNil(cp.finalText)
+                XCTAssertEqual(stages, [.polish])
+                let requests = await network.requests
+                XCTAssertEqual(requests.count, 1, "Empty results must not automatically retry")
+                let recoveryNetwork = ContextRequestRecorder(responseContent:
+                    #"{"mode":"plain_text","text":"嗯。","correction_applied":false}"#)
+                let recoveryProvider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                    omitThinkingParameter: true, requestSender: { try await recoveryNetwork.send($0) })
+                worker.polish = { texts, context in
+                    XCTAssertEqual(texts, ["嗯"])
+                    return try await recoveryProvider.polish(text: texts.joined(), context: context)
+                }
+                worker.translate = { text, _, _ in XCTAssertEqual(text, "嗯。"); return "Yes." }
+                let recovered = try await worker.process(cp, shouldContinue: { true }, onStage: { _ in })
+                XCTAssertEqual(recovered, mode == .polish ? "嗯。" : "Yes.")
+            }
+        }
+    }
+
+    func testMalformedPolishRemainsInvalidRatherThanEmpty() async throws {
+        for content in ["嗯", #"{"mode":"plain_text","text":null,"correction_applied":false}"#,
+                        #"{"mode":"plain_text","text":"嗯"}"#] {
+            let network = ContextRequestRecorder(responseContent: content)
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: true, requestSender: { try await network.send($0) })
+            do { _ = try await provider.polish(text: "嗯"); XCTFail("Malformed response must fail") }
+            catch { XCTAssertEqual(error as? MemoEchoError, .llmInvalidResponse) }
+        }
+    }
+
     func testRequestMetricsDescribeActualEncodedPayloadBeforeSending() async throws {
         let network = ContextRequestRecorder()
         let metrics = RequestMetricsRecorder()

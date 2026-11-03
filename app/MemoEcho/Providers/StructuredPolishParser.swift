@@ -5,6 +5,7 @@ enum StructuredPolishParser {
 
     enum ParseResult: Sendable {
         case structured(response: LLMStructuredResponse)
+        case emptyContent
         case invalid
     }
 
@@ -12,9 +13,11 @@ enum StructuredPolishParser {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = trimmed.data(using: .utf8),
               let response = try? JSONDecoder().decode(LLMStructuredResponse.self, from: data),
-              response.toStructuredResult().isValid,
-              response.mode == .list || !response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              response.toStructuredResult().isValid else {
             return .invalid
+        }
+        if response.mode == .plainText && response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .emptyContent
         }
         return .structured(response: response)
     }

@@ -138,6 +138,9 @@ struct SessionRecoveryProcessor {
                 try await polish(checkpoint.transcripts, checkpoint.context)
             }
             try check()
+            guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw MemoEchoError.llmEmptyResponse
+            }
             checkpoint.polished = result
             // The original transcript is no longer needed once polishing succeeded.
             checkpoint.transcripts.removeAll()

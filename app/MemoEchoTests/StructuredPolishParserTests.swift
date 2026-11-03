@@ -44,6 +44,15 @@ final class StructuredPolishParserTests: XCTestCase {
         XCTAssertEqual(StructuredPolishRenderer.render(response: compact), "出差要带的东西：\n1. 苹果\n2. 香蕉\n明天出门。")
     }
 
+    func testValidPlainTextWithEmptyBodyIsClassifiedSeparately() {
+        for json in [#"{"mode":"plain_text","text":"","correction_applied":false}"#,
+                     #"{"mode":"plain_text","text":" \n ","correction_applied":false}"#] {
+            guard case .emptyContent = StructuredPolishParser.parse(content: json) else {
+                return XCTFail("Expected empty content, not a format failure")
+            }
+        }
+    }
+
     func testInvalidOrIncompleteResponsesAreRejected() {
         let invalid = [
             "这是一段普通文本",
@@ -56,8 +65,6 @@ final class StructuredPolishParserTests: XCTestCase {
             #"{"mode":"list","text":42,"items":["条目"],"correction_applied":false}"#,
             #"{"mode":"list","items":["条目"]}"#,
             #"{"mode":"plain_text","text":"缺少修正字段"}"#,
-            #"{"mode":"plain_text","text":"","correction_applied":false}"#,
-            #"{"mode":"plain_text","text":" \n ","correction_applied":false}"#,
             #"{"mode":"plain_text","text":null,"correction_applied":false}"#,
             #"{"mode":"plain_text","correction_applied":false}"#,
             "   "
