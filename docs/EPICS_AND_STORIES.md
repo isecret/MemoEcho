@@ -1381,14 +1381,15 @@ beta.12 发布前回归（2026-10-10）：完整宿主测试 788 项、0 失败�
 
 ## Issue #28 / #29：短回应处理与润色提示词优化
 
-状态（2026-11-03）：本地 Release 已构建、签名、替换并重启。用户试用反馈“效果还可以”，已授权发布 `1.0.0-beta.25`，发布验证进行中。此反馈代表本机试用，不扩展为所有模型、语言与设备矩阵验收。
+状态（2026-11-03）：[PR #30](https://github.com/isecret/MemoEcho/pull/30) 已合入，[1.0.0-beta.25](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.25) 已发布，Issue #28 / #29 已关闭。用户本机试用反馈“效果还可以”并授权发布；此确认不扩展为所有模型、语言与设备矩阵验收。
 
 - [x] 用户确认保留独立回应“嗯”，由 LLM 按语义去赘词；客户端只规范换行/边缘空白，不再二次正则删词。
 - [x] 合法 JSON 的空正文归为 `llmEmptyResponse`，与格式错误分开；仍报错，不静默成功。会话在接受润色成功前检查非空，保留原转写供手动恢复，不将空内容传入翻译/注入。
 - [x] 提示词统一保真优先级、短回应/语气保留、改口与普通对比的区分、术语替换证据、素材不可信边界；保持 `plain_text` / `list` 和原有协议。
 - [x] 增加 Provider → 会话的短回应、空正文分类、恢复和翻译回归；实际 Swift 解析/渲染/规范化回放模型响应。
 - [x] 合成样例的新旧提示词真实调用对照，覆盖有无参考信息及易波动短回应的重复抽测。
-- [ ] 真实录音 → ASR → LLM → 目标输入框手工验收（润色、翻译、短回应和长句）。
+- [x] 本机签名 Release 安装重启与用户试用确认（2026-11-03）。
+- 后续覆盖：更多模型/设备以及完整润色、翻译、短回应、长句矩阵；本机反馈不等价于全矩阵通过。
 
 ### 验证记录
 
@@ -1412,3 +1413,11 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 ```
 
 脚本使用与本次真实调用一致的 `thinking: disabled`，不模拟应用的参数兼容回退；不支持该参数的服务会记录 HTTP 错误，不能用该失败替代应用兼容性结论。
+
+
+发布复核（2026-11-03）：[PR CI](https://github.com/isecret/MemoEcho/actions/runs/41589360540) 与合并后主分支 CI 通过，951 项 XCTest、9 项按条件跳过、0 失败。[发布流水线](https://github.com/isecret/MemoEcho/actions/runs/41589890915) 完成 Developer ID 签名、应用/DMG 公证、Gatekeeper 检查及 Sparkle 更新签名。下载公开包再次校验 GitHub 资产 SHA-256/大小、双架构（arm64 / x86_64）、版本号、签名身份、App/DMG 公证票据；ZIP/DMG 的完整 App 文件及符号链接清单一致，Sparkle 使用原公钥验签通过。
+
+- DMG：18,489,839 bytes；SHA-256 `45c4c6b4ee17a758beaf42fa23701534e76521caaa4e40a3ff5d33cdf11d8029`。
+- ZIP：24,329,340 bytes；SHA-256 `0a7517e9500ba81f744ef1ed6ba042aab80bdf16b2a2182e21fbb07a86f06ae9`。
+- `updates/appcast.xml` 已由发布工作流更新为 beta.25；[Homebrew 更新任务](https://github.com/isecret/homebrew-tap/actions/runs/41590687577) 成功，cask 版本与 DMG 哈希一致。
+- 官网源码下载地址已提交，Cloudflare Pages 生产部署完成；`https://memoecho.app/` 与 `https://www.memoecho.app/` 的公开下载链接均核验为 beta.25。发布验证不额外替换用户本机当前试用应用。
