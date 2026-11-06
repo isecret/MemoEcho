@@ -451,6 +451,77 @@ final class ServiceHealthMonitorTests: XCTestCase {
         XCTAssertTrue(service.canRetry(input))
     }
 
+    func testLLMBusinessAfterRuntimeFailureDrainsQueuedValidationAndProbe() async {
+        let gate = ProbeGate()
+        let script = ProbeScript(outcomes: [.success], gate: gate)
+        let service = LLMValidationService(validator: { _, _ in try await script.run() },
+                                           probePolicy: immediatePolicy())
+        defer { service.shutdown() }
+        let input = llmInput()
+        service.validate(input)
+        await waitUntil { await script.calls == 1 }
+
+        // A cancelled validation may still be closing when another validation is queued.
+        service.setBusinessActive(true)
+        service.setBusinessActive(false)
+        service.validate(input)
+        for _ in 0..<10 { await Task.yield() }
+        service.setBusinessActive(true)
+        service.setBusinessActive(false)
+
+        // The failed model request starts a probe. The next input preempts that probe.
+        service.reportRuntimeFailure(input)
+        for _ in 0..<10 { await Task.yield() }
+        service.setBusinessActive(true)
+        var businessPrepared = false
+        let business = Task {
+            do {
+                try await service.prepareForBusinessRequest()
+                businessPrepared = true
+            } catch { XCTFail("Unexpected preparation error: \(error)") }
+        }
+        await gate.open()
+        await waitUntil { businessPrepared }
+        business.cancel()
+        let calls = await script.calls
+        XCTAssertEqual(calls, 1, "Cancelled validation and probe must not start another request")
+    }
+
+    func testCloudBusinessAfterRuntimeFailureDrainsQueuedValidationAndProbe() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try cloudStore(directory: directory)
+        let gate = ProbeGate()
+        let script = ProbeScript(outcomes: [.success], gate: gate)
+        let service = CloudASRValidationService(configStore: store,
+            validatorFactory: { _ in ScriptedCloudProbe(script: script) }, probePolicy: immediatePolicy())
+        defer { service.shutdown() }
+        let input = CloudASRValidationInput(platform: .openAICompatibleASR, asrConfig: store.asrConfig)
+        service.validate(input)
+        await waitUntil { await script.calls == 1 }
+        service.setBusinessActive(true)
+        service.setBusinessActive(false)
+        service.validate(input)
+        for _ in 0..<10 { await Task.yield() }
+        service.setBusinessActive(true)
+        service.setBusinessActive(false)
+        service.reportRuntimeFailure(input)
+        for _ in 0..<10 { await Task.yield() }
+        service.setBusinessActive(true)
+        var businessPrepared = false
+        let business = Task {
+            do {
+                try await service.prepareForBusinessRequest()
+                businessPrepared = true
+            } catch { XCTFail("Unexpected preparation error: \(error)") }
+        }
+        await gate.open()
+        await waitUntil { businessPrepared }
+        business.cancel()
+        let calls = await script.calls
+        XCTAssertEqual(calls, 1, "Cancelled validation and probe must not start another request")
+    }
+
     func testLLMDoesNotClearAnotherPendingPurposeWhenOneBusinessStageSucceeds() async {
         let gate = ProbeGate()
         let script = ProbeScript(outcomes: [.success], gate: gate)

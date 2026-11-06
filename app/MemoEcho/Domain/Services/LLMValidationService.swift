@@ -108,6 +108,9 @@ final class LLMValidationService {
         let health = health
         validationTask = Task { [weak self] in
             await previousValidation?.value
+            // A later probe may be waiting for this cancelled validation to drain.
+            // Do not let the old task join that probe's close chain in return.
+            guard !Task.isCancelled else { return }
             await health.waitForClose()
             guard !Task.isCancelled else { return }
             let result: Result<Void, Error>
@@ -210,10 +213,11 @@ final class LLMValidationService {
         var omitThinking = input.omitThinkingParameter
         let validator = validator
         let useDefault = usesDefaultValidator
+        let previousValidation = closingValidationTask
         health.check(fingerprint: key, verified: verifiedFingerprint == key,
                      automatic: automatic, requestTimeout: 15, operation: { [weak self] in
             guard let self else { throw CancellationError() }
-            await self.closingValidationTask?.value
+            await previousValidation?.value
             try Task.checkCancellation()
             let callback: @MainActor @Sendable () -> Void = { [weak self] in
                 guard let self, self.health.fingerprint == key, !Task.isCancelled else { return }
