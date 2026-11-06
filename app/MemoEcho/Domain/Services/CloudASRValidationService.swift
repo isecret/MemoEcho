@@ -149,6 +149,8 @@ final class CloudASRValidationService {
         let health = health
         validationTask = Task { [weak self] in
             await previousValidation?.value
+            // A later probe can depend on this task closing; cancelled work must not wait back on it.
+            guard !Task.isCancelled else { return }
             await health.waitForClose()
             guard !Task.isCancelled else { return }
             do {
