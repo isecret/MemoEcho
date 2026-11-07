@@ -351,7 +351,10 @@
 
 ### 5.6 LLMProvider
 
+Issue #34：`LLMValidationService` 保留现有验证任务取消／收尾屏障，首次验证与 `ServiceHealthMonitor` 共用有限探测执行器（3 次实际推理请求、每请求最多 15 秒、整轮最多 100 秒、默认 2／5 秒退避）。`Retry-After` 与兼容回退共享本轮预算；临时失败独立标记，默认 60 秒自动检查冷却后允许普通验证入口恢复。配置／鉴权或无效响应不自动重试，不新增持久化格式或后台无界轮询。启动探测日志只记录固定触发类型、计数、结果与耗时，不包含配置地址、凭据或正文。
+
 - 使用固定 Prompt 生成 Chat Completions 请求
+- 口述技术文本还原（Issue #33）由固定润色 Prompt 按语境处理，支持文件名、域名、邮箱、明确路径及 IP／端口／版本、显式符号标识符；纯技术文本不附加末尾标点或 Markdown 包装。保持 JSON 协议、素材不可信边界和现有解析／渲染／规范化链路，不增加正则纠错或第二次模型请求。精确字符保真通过合成模型评测与 Provider 输出回归验证，不能用删除点号的比较验收技术字串。
 - 润色、翻译、词典学习及配置验证共用请求兼容策略，默认优先发送 `thinking: { "type": "disabled" }` 关闭长思考（Issue #25）
 - 若 state.json 的当前配置指纹命中不支持 thinking 参数的能力缓存，则直接发送普通请求
 - 若上游明确返回 `thinking` 字段或其 `disabled` 值不支持（含网关将字段名脱敏成 `***.type` 的错误），则回退一次普通请求，并将当前配置的 SHA-256 指纹写入 `~/.memoecho/state.json` 的 `llmWithoutThinkingParameter`；普通 `not supported` 错误不触发此兼容重试
