@@ -4,6 +4,125 @@ import XCTest
 final class LLMValidationServiceTests: XCTestCase {
 
     @MainActor
+    func testStartupTimeoutRecoversWithinInitialValidationWithoutManualRefresh() async {
+        let counter = Counter()
+        let service = LLMValidationService(validator: { _, _ in
+            await counter.increment()
+            if await counter.currentValue() == 1 { throw URLError(.timedOut) }
+        }, probePolicy: immediatePolicy())
+        defer { service.shutdown() }
+        let input = makeInput()
+        service.validate(input)
+        await waitUntil { service.status(for: input) == .ready }
+        let count = await counter.currentValue()
+        XCTAssertEqual(count, 2)
+        XCTAssertFalse(service.isTransientRuntimeFailure)
+    }
+
+    @MainActor
+    func testExhaustedStartupTimeoutIsTemporaryAndOrdinaryRefreshCanRecoverAfterCooldown() async {
+        let counter = Counter()
+        let service = LLMValidationService(validator: { _, _ in
+            await counter.increment()
+            if await counter.currentValue() <= 3 { throw URLError(.timedOut) }
+        }, probePolicy: immediatePolicy())
+        defer { service.shutdown() }
+        let input = makeInput()
+        service.validate(input)
+        await waitUntil { service.status(for: input) == .failed }
+        let initialCount = await counter.currentValue()
+        XCTAssertEqual(initialCount, 3)
+        XCTAssertEqual(LLMStatusPresentation(status: service.status(for: input),
+            isTransientFailure: service.isTransientRuntimeFailure).text, "暂不可用")
+        service.validate(input)
+        await waitUntil { service.status(for: input) == .ready }
+        let recoveredCount = await counter.currentValue()
+        XCTAssertEqual(recoveredCount, 4)
+    }
+
+    @MainActor
+    func testStartupFailureDoesNotLoopDuringCooldownButExplicitRetryCanRecover() async {
+        let counter = Counter()
+        let service = LLMValidationService(validator: { _, _ in
+            await counter.increment()
+            if await counter.currentValue() <= 3 { throw URLError(.timedOut) }
+        }, probePolicy: immediatePolicy(cooldown: 60))
+        defer { service.shutdown() }
+        let input = makeInput()
+        service.validate(input)
+        await waitUntil { service.status(for: input) == .failed }
+        for _ in 0..<5 { service.validate(input) }
+        let count = await counter.currentValue()
+        XCTAssertEqual(count, 3)
+        service.retry(input)
+        await waitUntil { service.status(for: input) == .ready }
+    }
+
+    @MainActor
+    func testStartupRetryAfterCannotBeBypassedByRefreshOrBusinessSend() async {
+        let counter = Counter()
+        let service = LLMValidationService(validator: { _, _ in
+            await counter.increment()
+            throw ServiceProbeFailure(kind: .transient, message: "服务限流，请稍后重试",
+                                      retryAfter: 60, httpStatus: 429)
+        }, probePolicy: immediatePolicy())
+        defer { service.health.reset(ifDifferent: "cleanup"); service.shutdown() }
+        let input = makeInput()
+        service.validate(input)
+        await waitUntil { service.status(for: input) == .failed }
+        XCTAssertTrue(service.isTransientRuntimeFailure)
+        XCTAssertFalse(service.canRetry(input))
+        service.validate(input)
+        service.retry(input)
+        do {
+            try await service.prepareForBusinessRequest()
+            XCTFail("The startup probe's server cooldown must protect business sends")
+        } catch {
+            XCTAssertEqual(error as? MemoEchoError, .llmNetworkFailure(message: "服务限流，请稍后重试"))
+        }
+        let count = await counter.currentValue()
+        XCTAssertEqual(count, 1)
+    }
+
+    @MainActor
+    func testStartupThinkingFallbackStaysOmittedOnNetworkRetryWithinOneBudget() async {
+        let transport = StartupThinkingTransport()
+        let service = makeTransportService(transport)
+        defer { service.shutdown() }
+        service.validate(makeInput())
+        await waitUntil { service.status == .ready }
+        let thinking = await transport.thinkingRequests
+        XCTAssertEqual(thinking, [true, false, false])
+    }
+
+    @MainActor
+    func testStartupThinkingFallbackAndPersistentNetworkFailureStopAtThreeActualSends() async {
+        let transport = StartupThinkingTransport(persistentFailure: true)
+        let service = makeTransportService(transport)
+        defer { service.shutdown() }
+        service.validate(makeInput())
+        await waitUntil { service.status == .failed }
+        XCTAssertTrue(service.isTransientRuntimeFailure)
+        let thinking = await transport.thinkingRequests
+        XCTAssertEqual(thinking, [true, false, false])
+    }
+
+    @MainActor
+    private func makeTransportService(_ transport: StartupThinkingTransport) -> LLMValidationService {
+        LLMValidationService(validator: { input, callback in
+            let provider = LLMProvider(baseURL: input.baseURL, apiKey: input.apiKey, model: input.model,
+                omitThinkingParameter: input.omitThinkingParameter, onThinkingUnsupported: callback,
+                requestSender: { try await transport.send($0) })
+            try await provider.validateConfiguration()
+        }, probePolicy: immediatePolicy())
+    }
+
+    private func immediatePolicy(cooldown: TimeInterval = 0) -> ServiceHealthMonitor.Policy {
+        .init(delays: [0, 0], cooldown: cooldown, episodeTimeout: 5, jitter: { 0 },
+              sleep: { _ in try Task.checkCancellation() }, waitForNetwork: { try Task.checkCancellation() })
+    }
+
+    @MainActor
     func testThinkingFallbackKeepsCurrentConfigurationReadyWithoutAnotherRequest() async {
         let counter = Counter()
         let service = LLMValidationService(validator: { _, onThinkingUnsupported in
@@ -204,5 +323,26 @@ private actor Counter {
 
     func currentValue() -> Int {
         value
+    }
+}
+
+private actor StartupThinkingTransport {
+    private let persistentFailure: Bool
+    private(set) var thinkingRequests: [Bool] = []
+
+    init(persistentFailure: Bool = false) { self.persistentFailure = persistentFailure }
+
+    func send(_ request: URLRequest) throws -> (Data, URLResponse) {
+        let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]
+        let hasThinking = body?["thinking"] != nil
+        thinkingRequests.append(hasThinking)
+        if hasThinking {
+            return (Data(#"{"error":{"message":"thinking is not supported"}}"#.utf8),
+                    HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!)
+        }
+        if persistentFailure || thinkingRequests.count == 2 { throw URLError(.networkConnectionLost) }
+        let content = #"{"mode":"plain_text","text":"合成验证。","correction_applied":false}"#
+        let data = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]])
+        return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
 }

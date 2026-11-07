@@ -45,6 +45,8 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
     func connect() async throws {
         guard state == .idle else { throw RealtimeASRError.invalidState }
         state = .connecting
+        let started = ContinuousClock.now
+        var stage = "request_preparation"
         let deadline = ContinuousClock.now + .seconds(connectTimeout)
         do {
             let request = try await bounded(seconds: remaining(until: deadline)) { [configuration, requestBuilder] in
@@ -53,10 +55,12 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             try checkFailure()
             if case .tencent = configuration { logHotwordEvent("connection_prepared") }
             try await ServiceProbeContext.budget?.consume()
+            stage = "transport_connect"
             try await bounded(seconds: remaining(until: deadline)) { [transport] in try await transport.connect(request) }
             try checkFailure()
             if let start = try codec.startMessage() {
                 logHotwordEvent("start_prepared")
+                stage = "start_send"
                 try await bounded(seconds: min(sendTimeout, remaining(until: deadline))) { [transport] in try await transport.send(start) }
                 logHotwordEvent("start_sent")
             }
@@ -64,11 +68,17 @@ actor RealtimeCloudASRSession: RealtimeASRSession {
             // IAT returns recognition only after its first audio frame, with no started event.
             if codec.readyAfterTransportConnect { state = .ready }
             receiver = Task { await self.receiveLoop() }
+            stage = "protocol_ready"
             try await waitUntil(seconds: remaining(until: deadline)) { self.state != .connecting }
             try checkFailure()
             guard state == .ready else { throw RealtimeASRError.invalidState }
             if case .tencent = configuration { logHotwordEvent("connection_established") }
         } catch {
+            let duration = started.duration(to: .now)
+            let elapsed = Int(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
+            let timeout = (error as? RealtimeASRError) == .timeout
+            let cancelled = Task.isCancelled || error is CancellationError || (error as? RealtimeASRError) == .cancelled
+            Self.hotwordLogger.info("event=connection_failed request=\(self.diagnosticID, privacy: .public) stage=\(stage, privacy: .public) elapsed_ms=\(elapsed) timeout=\(timeout) cancelled=\(cancelled)")
             await fail(sanitized(error))
             throw sanitized(error)
         }
