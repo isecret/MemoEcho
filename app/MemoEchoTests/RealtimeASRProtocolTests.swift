@@ -275,6 +275,25 @@ final class RealtimeASRProtocolTests: XCTestCase {
         XCTAssertTrue(closed)
     }
 
+    func testVolcanoStartupSendTimeoutClosesSocketAndSameConfigurationCanStartAgain() async throws {
+        let configuration = RealtimeCloudASRConfiguration.volcengine(apiKey: "test")
+        let stalledSocket = ScriptedRealtimeSocket(mode: .blockedSend)
+        let stalled = RealtimeCloudASRSession(configuration: configuration,
+            transport: stalledSocket, sendTimeout: 0.02)
+        do { try await stalled.connect(); XCTFail("A stalled first send must time out") }
+        catch { XCTAssertEqual(error as? RealtimeASRError, .timeout) }
+        let closed = await stalledSocket.isClosed
+        XCTAssertTrue(closed)
+
+        // A new recording creates a new session without changing the selected engine.
+        let socket = ScriptedRealtimeSocket(mode: .volcanoSuccess)
+        let next = RealtimeCloudASRSession(configuration: configuration, transport: socket)
+        try await next.connect()
+        try await next.send(Data(repeating: 0, count: 3200))
+        let result = try await next.finish()
+        XCTAssertEqual(result, "合成测试。第二句。")
+    }
+
     func testNormalCloseAfterEndIsNotTencentFinal() async throws {
         let socket = ScriptedRealtimeSocket(mode: .closeAtFinish)
         let session = RealtimeCloudASRSession(configuration: .tencent(appID: "1", secretID: "test", secretKey: "test"), transport: socket)

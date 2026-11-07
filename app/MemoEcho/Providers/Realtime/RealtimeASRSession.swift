@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct RealtimeASRCapabilities: Sendable, Equatable {
     let preferredFrameBytes: Int
@@ -155,7 +156,46 @@ actor URLSessionRealtimeWebSocketTransport: RealtimeWebSocketTransport {
     }
 }
 
-final class RealtimeNoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+final class RealtimeNoRedirectDelegate: NSObject, URLSessionWebSocketDelegate, Sendable {
+    private let connectionID = UUID().uuidString
+    private let logger = Logger(subsystem: "me.wangmao.memoecho", category: "ASRTransport")
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didOpenWithProtocol protocol: String?) {
+        logger.info("transport_opened | connection=\(self.connectionID, privacy: .public)")
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        for transaction in metrics.transactionMetrics {
+            let dns = Self.milliseconds(from: transaction.domainLookupStartDate, to: transaction.domainLookupEndDate)
+            let connect = Self.milliseconds(from: transaction.connectStartDate, to: transaction.connectEndDate)
+            let tls = Self.milliseconds(from: transaction.secureConnectionStartDate, to: transaction.secureConnectionEndDate)
+            let status = (transaction.response as? HTTPURLResponse)?.statusCode ?? -1
+            logger.info("transport_metrics | connection=\(self.connectionID, privacy: .public) proxy=\(transaction.isProxyConnection) reused=\(transaction.isReusedConnection) dns_ms=\(dns) connect_ms=\(connect) tls_ms=\(tls) http_status=\(status)")
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        // Never log localizedDescription, userInfo, URLs, headers, or response bodies.
+        let value = error as NSError?
+        let domain: String
+        switch value?.domain {
+        case NSURLErrorDomain: domain = "url"
+        case NSPOSIXErrorDomain: domain = "posix"
+        case "kCFErrorDomainCFNetwork": domain = "cfnetwork"
+        case nil: domain = "none"
+        default: domain = "other"
+        }
+        let status = (task.response as? HTTPURLResponse)?.statusCode ?? -1
+        logger.info("transport_completed | connection=\(self.connectionID, privacy: .public) error_domain=\(domain, privacy: .public) error_code=\(value?.code ?? 0) http_status=\(status)")
+    }
+
+    private static func milliseconds(from start: Date?, to end: Date?) -> Int {
+        guard let start, let end else { return -1 }
+        return Int(max(0, end.timeIntervalSince(start)) * 1000)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
