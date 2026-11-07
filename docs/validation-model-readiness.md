@@ -67,3 +67,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 最终定向验证：`LLMValidationServiceTests` 15 项、`ServiceHealthMonitorTests` 24 项、`CloudASRValidationServiceTests` 13 项、`VoiceInputReadinessTests` 11 项、`LLMProviderTests` 26 项，共 89 项通过、0 失败。包含旧配置结果隔离、鉴权／未知错误不自动重试、初始验证与运行期复测取消收尾、用途合并和限流保护。Debug 构建与签名验证通过，`git diff --check` 通过。
 
 14:09:06 重启本地 MemoEcho Dev，14:09:07 的真实启动日志记录 `probe_trigger=startup probe_result=success inference_requests=1 elapsed_ms=1133`，未点击手动刷新。该记录证明当前已配置服务的本地启动验证成功；故障重试由可控测试验证，不把正常启动成功当作真实升级故障已重现。未替换 `/Applications/MemoEcho.app`，未发布更新，Sparkle／手动升级链路及用户原始场景仍待验收，Issue 保持打开。
+
+
+## 发布状态
+
+本地验证后，用户确认当前版本效果可以并授权发布。修复已进入 [beta.27](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.27)，签名、公证、公开包及分发源核验见[发布记录](releases/1.0.0-beta.27.md)。此前“未发布”描述为当时排查阶段状态；原始真实升级故障仍待回归，Issue #34 保持打开。
