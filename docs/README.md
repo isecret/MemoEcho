@@ -10,6 +10,10 @@
 - [技术设计](./TDD.md)：架构、服务协议和实现约束。
 - [任务与验收进度](./EPICS_AND_STORIES.md)：任务拆分与实施记录。
 
+## 版本记录
+
+- [1.0.0-beta.27 发布准备与验证](./releases/1.0.0-beta.27.md)
+
 ## 专项方案
 
 - [单按、双按与按住录音](./plans/hotkey-recording-modes.md)
