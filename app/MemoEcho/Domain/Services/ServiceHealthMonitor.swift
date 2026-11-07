@@ -27,7 +27,6 @@ final class ServiceHealthMonitor {
     private var closingTask: Task<Void, Never>?
     private var cooldownTask: Task<Void, Never>?
     private let policy: Policy
-    private let logger = Logger(subsystem: "me.wangmao.memoecho", category: "ServiceProbe")
 
     init(policy: Policy = .init()) { self.policy = policy }
 
@@ -102,51 +101,15 @@ final class ServiceHealthMonitor {
         generation = id
         let previous = closingTask
         let policy = policy
-        let logger = logger
-        let trigger = automatic ? "runtime" : "manual"
         task = Task { [weak self] in
             await previous?.value
             guard !Task.isCancelled else { return }
-            let deadline = ContinuousClock.now + .seconds(policy.episodeTimeout)
-            let budget = ServiceProbeBudget(maximumRequests: 3)
-            let result: Result<Void, ServiceProbeFailure> = await ServiceProbeContext.$budget.withValue(budget) {
-                var lastFailure = ServiceProbeFailure.classify(URLError(.timedOut))
-                for attempt in 0..<3 {
-                    do {
-                        try Task.checkCancellation()
-                        let remaining = Self.seconds(ContinuousClock.now.duration(to: deadline))
-                        guard remaining > 0 else { break }
-                        logger.info("probe_attempt | purpose=runtime_probe | fixture_version=\(ValidationFixture.version) | probe_trigger=\(trigger, privacy: .public) | probe_attempt=\(attempt + 1)")
-                        try await Self.bounded(seconds: min(requestTimeout, remaining), operation: operation)
-                        return .success(())
-                    } catch {
-                        if ServiceProbeFailure.isCancellation(error) || Task.isCancelled { return .failure(lastFailure) }
-                        let classified = ServiceProbeFailure.classify(error)
-                        if classified.kind != .budgetExhausted { lastFailure = classified }
-                        if let delay = classified.retryAfter { self?.setRetryAfter(delay, generation: id) }
-                        guard classified.kind == .transient, attempt < 2 else { break }
-                        if classified.waitsForNetwork {
-                            let remaining = Self.seconds(ContinuousClock.now.duration(to: deadline))
-                            guard remaining > 0 else { break }
-                            do {
-                                try await Self.bounded(seconds: remaining) { try await policy.waitForNetwork() }
-                            } catch { break }
-                        }
-                        let delay = max(classified.retryAfter ?? 0,
-                                        (policy.delays.indices.contains(attempt) ? policy.delays[attempt] : 5) + policy.jitter())
-                        guard delay < Self.seconds(ContinuousClock.now.duration(to: deadline)) else { break }
-                        do { try await policy.sleep(delay) }
-                        catch { return .failure(lastFailure) }
-                    }
-                }
-                return .failure(lastFailure)
-            }
-            let requests = await budget.requestsUsed
+            let result = await Self.runEpisode(policy: policy, requestTimeout: requestTimeout,
+                trigger: automatic ? .runtime : .manual, operation: operation,
+                onRetryAfter: { [weak self] delay in self?.setRetryAfter(delay, generation: id) })
             guard let self, self.generation == id, !Task.isCancelled else { return }
             self.task = nil
             self.nextAutomaticCheck = .now + .seconds(policy.cooldown)
-            let outcome = (try? result.get()) != nil ? "success" : "failed"
-            logger.info("probe_finished | purpose=runtime_probe | fixture_version=\(ValidationFixture.version) | probe_result=\(outcome, privacy: .public) | inference_requests=\(requests) | cooldown_ms=\(Int(policy.cooldown * 1000))")
             switch result {
             case .success:
                 self.state = .ready
@@ -161,6 +124,63 @@ final class ServiceHealthMonitor {
             }
             completion(result)
         }
+    }
+
+    enum Trigger: String { case startup, runtime, manual }
+
+    /// One bounded fixture episode shared by initial validation and later probes.
+    /// The owner keeps its existing generation and teardown barriers.
+    static func runEpisode(
+        policy: Policy, requestTimeout: TimeInterval, trigger: Trigger,
+        operation: @escaping @MainActor @Sendable () async throws -> Void,
+        onRetryAfter: @escaping @MainActor @Sendable (TimeInterval) -> Void = { _ in }
+    ) async -> Result<Void, ServiceProbeFailure> {
+        let logger = Logger(subsystem: "me.wangmao.memoecho", category: "ServiceProbe")
+        let started = ContinuousClock.now
+        let deadline = ContinuousClock.now + .seconds(policy.episodeTimeout)
+        let budget = ServiceProbeBudget(maximumRequests: 3)
+        let result: Result<Void, ServiceProbeFailure> = await ServiceProbeContext.$budget.withValue(budget) {
+            var lastFailure = ServiceProbeFailure.classify(URLError(.timedOut))
+            for attempt in 0..<3 {
+                do {
+                    try Task.checkCancellation()
+                    let remaining = Self.seconds(ContinuousClock.now.duration(to: deadline))
+                    guard remaining > 0 else { break }
+                    logger.info("probe_attempt | purpose=runtime_probe | fixture_version=\(ValidationFixture.version) | probe_trigger=\(trigger.rawValue, privacy: .public) | probe_attempt=\(attempt + 1)")
+                    try await Self.bounded(seconds: min(requestTimeout, remaining), operation: operation)
+                    return .success(())
+                } catch {
+                    if ServiceProbeFailure.isCancellation(error) || Task.isCancelled { return .failure(lastFailure) }
+                    let classified = ServiceProbeFailure.classify(error)
+                    if classified.kind != .budgetExhausted { lastFailure = classified }
+                    if let delay = classified.retryAfter { onRetryAfter(delay) }
+                    guard classified.kind == .transient, attempt < 2 else { break }
+                    if classified.waitsForNetwork {
+                        let remaining = Self.seconds(ContinuousClock.now.duration(to: deadline))
+                        guard remaining > 0 else { break }
+                        do {
+                            try await Self.bounded(seconds: remaining) { try await policy.waitForNetwork() }
+                        } catch { break }
+                    }
+                    let delay = max(classified.retryAfter ?? 0,
+                                    (policy.delays.indices.contains(attempt) ? policy.delays[attempt] : 5) + policy.jitter())
+                    guard delay < Self.seconds(ContinuousClock.now.duration(to: deadline)) else { break }
+                    do { try await policy.sleep(delay) }
+                    catch { return .failure(lastFailure) }
+                }
+            }
+            return .failure(lastFailure)
+        }
+        let requests = await budget.requestsUsed
+        let outcome = Task.isCancelled ? "cancelled" : ((try? result.get()) != nil ? "success" : "failed")
+        let elapsed = Int(seconds(started.duration(to: .now)) * 1000)
+        logger.info("probe_finished | purpose=runtime_probe | fixture_version=\(ValidationFixture.version) | probe_trigger=\(trigger.rawValue, privacy: .public) | probe_result=\(outcome, privacy: .public) | inference_requests=\(requests) | cooldown_ms=\(Int(policy.cooldown * 1000)) | elapsed_ms=\(elapsed)")
+        return result
+    }
+
+    func observeRetryAfter(_ seconds: TimeInterval, for key: String) {
+        guard fingerprint == key else { return }
+        setRetryAfter(seconds, generation: generation)
     }
 
     private func setRetryAfter(_ seconds: TimeInterval, generation id: UUID) {

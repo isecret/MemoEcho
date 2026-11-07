@@ -7,6 +7,7 @@ final class LLMValidationService {
 
     private let validator: Validator
     private let usesDefaultValidator: Bool
+    private let probePolicy: ServiceHealthMonitor.Policy
     let health: ServiceHealthMonitor
     private var verifiedFingerprint: String?
     private var currentInput: LLMValidationInput?
@@ -25,6 +26,7 @@ final class LLMValidationService {
     private var validationErrorMessage: String?
     var lastErrorMessage: String? { health.failure?.message ?? validationErrorMessage }
     private var legacyTransientFailure = false
+    private var initialRetryNotBefore: ContinuousClock.Instant?
     var isTransientRuntimeFailure: Bool { health.state == .temporaryFailure || legacyTransientFailure }
 
     init(
@@ -35,6 +37,7 @@ final class LLMValidationService {
         self.onThinkingUnsupported = onThinkingUnsupported
         self.validator = validator ?? Self.defaultValidator
         usesDefaultValidator = validator == nil
+        self.probePolicy = probePolicy
         health = ServiceHealthMonitor(policy: probePolicy)
     }
 
@@ -86,21 +89,27 @@ final class LLMValidationService {
         if activeFingerprint == fingerprint { return }
         if !force {
             if lastCompletedFingerprint == fingerprint, validationStatus != .checking {
-                return
+                guard legacyTransientFailure,
+                      initialRetryNotBefore.map({ .now >= $0 }) ?? true else { return }
             }
         }
+        guard !health.isCoolingDown else { return }
 
         cancelOngoingValidation()
         let requestID = UUID()
         activeRequestID = requestID
         activeFingerprint = fingerprint
         legacyTransientFailure = false
+        initialRetryNotBefore = nil
         validationStatus = .checking
         validationErrorMessage = nil
 
         let validator = self.validator
+        let policy = probePolicy
+        var attemptInput = normalizedInput
         let onThinkingUnsupported: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self, self.activeRequestID == requestID else { return }
+            attemptInput.omitThinkingParameter = true
             self.onThinkingUnsupported(normalizedInput)
         }
 
@@ -113,13 +122,18 @@ final class LLMValidationService {
             guard !Task.isCancelled else { return }
             await health.waitForClose()
             guard !Task.isCancelled else { return }
-            let result: Result<Void, Error>
-            do {
-                try await validator(normalizedInput, onThinkingUnsupported)
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
+            var errorMessage: String?
+            let result = await ServiceHealthMonitor.runEpisode(policy: policy, requestTimeout: 15,
+                trigger: .startup, operation: {
+                    do { try await validator(attemptInput, onThinkingUnsupported) }
+                    catch {
+                        errorMessage = Self.errorMessage(from: error)
+                        throw error
+                    }
+                }, onRetryAfter: { [weak self] delay in
+                    guard let self, self.activeRequestID == requestID else { return }
+                    self.health.observeRetryAfter(delay, for: fingerprint)
+                })
 
             guard !Task.isCancelled else { return }
 
@@ -135,9 +149,12 @@ final class LLMValidationService {
                     self.validationStatus = .ready
                     self.verifiedFingerprint = fingerprint
                     self.validationErrorMessage = nil
+                    self.initialRetryNotBefore = nil
                 case .failure(let error):
                     self.validationStatus = .failed
-                    self.validationErrorMessage = Self.errorMessage(from: error)
+                    self.legacyTransientFailure = error.kind == .transient
+                    self.validationErrorMessage = self.legacyTransientFailure ? error.message : (errorMessage ?? error.message)
+                    self.initialRetryNotBefore = self.legacyTransientFailure ? .now + .seconds(policy.cooldown) : nil
                 }
             }
         }
@@ -199,6 +216,7 @@ final class LLMValidationService {
         validationStatus = .ready
         validationErrorMessage = nil
         legacyTransientFailure = false
+        initialRetryNotBefore = nil
     }
 
     private func startProbe(_ input: LLMValidationInput, automatic: Bool) {
