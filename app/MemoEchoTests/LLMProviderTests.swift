@@ -3,6 +3,29 @@ import XCTest
 
 final class LLMProviderTests: XCTestCase {
     @MainActor
+    func testModelApprovedTechnicalTextReachesOutputWithoutChangingCharacters() async throws {
+        let literals = [".env", ".gitignore", "p.example.com", "dev@example.com", "../Config/README.md",
+                        "My Project/Config.yaml", "localhost:3000", "192.168.0.1", "v1.2.3",
+                        "user_name", "--version", "https://example.com/docs?v=1#intro", #"C:\Users\Test\Config.yaml"#]
+        for text in literals {
+            let json = try JSONSerialization.data(withJSONObject: ["mode": "plain_text", "text": text,
+                                                                  "correction_applied": false])
+            let network = ContextRequestRecorder(responseContent: String(decoding: json, as: UTF8.self))
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: true, requestSender: { try await network.send($0) })
+            let checkpoint = SessionRecoveryCheckpoint(transcripts: ["合成口述"], mode: .polish, language: .english,
+                asrPlatform: .openAICompatibleASR, target: nil, context: nil)
+            let worker = SessionRecoveryProcessor(recognize: { _ in XCTFail("Must not rerun ASR"); return "" },
+                polish: { texts, context in try await provider.polish(text: texts.joined(), context: context) },
+                translate: { _, _, _ in XCTFail("Polish must not translate technical text"); return "" })
+            let result = try await worker.process(checkpoint, shouldContinue: { true }, onStage: { _ in })
+            XCTAssertEqual(result, text)
+            let requests = await network.requests
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
+    @MainActor
     func testModelApprovedShortRepliesReachOutputAndTranslationWithoutBeingDeleted() async throws {
         for text in ["嗯", "嗯。", "好", "收到", "嗯，可以。", "啊？", "先保存，然后退出。", "然后，退出。"] {
             for mode in [TextProcessingMode.polish, .translate] {
