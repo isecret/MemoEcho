@@ -1,0 +1,402 @@
+[
+  {
+    "id": "reversal",
+    "input": "明天先把那个功能去掉，算了，还是留着吧",
+    "correction": true,
+    "repeat": 3,
+    "variants": [
+      "明天先把那个功能留着吧",
+      "明天先留着那个功能吧",
+      "明天还是把那个功能留着吧"
+    ]
+  },
+  {
+    "id": "task_reversal",
+    "input": "把任务取消，算了，不取消了，先暂停",
+    "correction": true,
+    "variants": [
+      "先暂停任务",
+      "先暂停这个任务",
+      "把任务先暂停"
+    ]
+  },
+  {
+    "id": "color_reversal",
+    "input": "把按钮改成红色，算了，还是蓝色吧",
+    "correction": true,
+    "variants": [
+      "把按钮改成蓝色吧",
+      "把按钮改成蓝色"
+    ]
+  },
+  {
+    "id": "emotional_repeat",
+    "input": "好好好，你说得都对，我不争了",
+    "correction": false,
+    "repeat": 3,
+    "variants": [
+      "好好好你说得都对我不争了"
+    ]
+  },
+  {
+    "id": "emotional_enough",
+    "input": "行了行了，别再说了",
+    "correction": false,
+    "variants": [
+      "行了行了别再说了"
+    ]
+  },
+  {
+    "id": "ordinary_repeat",
+    "input": "好的好的，我们先检查配置",
+    "correction": false,
+    "variants": [
+      "好的我们先检查配置"
+    ]
+  },
+  {
+    "id": "empty_filler",
+    "input": "呃，呃，呃",
+    "correction": false,
+    "outcome": "empty_error"
+  },
+  {
+    "id": "empty_filler_pause",
+    "input": "呃……呃……",
+    "correction": false,
+    "outcome": "empty_error"
+  },
+  {
+    "id": "short_reply",
+    "input": "嗯",
+    "correction": false,
+    "variants": [
+      "嗯"
+    ]
+  },
+  {
+    "id": "meaningful_reply",
+    "input": "嗯，可以",
+    "correction": false,
+    "variants": [
+      "嗯可以"
+    ]
+  },
+  {
+    "id": "meaningful_sigh",
+    "input": "唉",
+    "correction": false,
+    "variants": [
+      "唉"
+    ]
+  },
+  {
+    "id": "format_newline",
+    "input": "标题是周报，换行，第一项完成登录，第二项修复录音",
+    "correction": false,
+    "modes": [
+      "plain_text",
+      "list"
+    ],
+    "variants": [
+      "标题是周报换行第一项完成登录第二项修复录音",
+      "标题是周报换行完成登录修复录音"
+    ]
+  },
+  {
+    "id": "format_quotes",
+    "input": "在你好外面加引号",
+    "correction": false,
+    "variants": [
+      "在你好外面加引号"
+    ]
+  },
+  {
+    "id": "punctuation_word",
+    "input": "我说的是逗号这个词，不是让你加一个逗号",
+    "correction": false,
+    "variants": [
+      "我说的是逗号这个词不是让你加一个逗号"
+    ]
+  },
+  {
+    "id": "double_negative",
+    "input": "不是不可以，只是还没确认",
+    "correction": false,
+    "variants": [
+      "不是不可以只是还没确认"
+    ]
+  },
+  {
+    "id": "negation_scope",
+    "input": "我没说不做，我说的是先别做",
+    "correction": false,
+    "variants": [
+      "我没说不做我说的是先别做"
+    ]
+  },
+  {
+    "id": "quantifier_scope",
+    "input": "不一定所有人都不同意",
+    "correction": false,
+    "variants": [
+      "不一定所有人都不同意"
+    ]
+  },
+  {
+    "id": "conditions",
+    "input": "只有审核通过才发布，除非负责人另有通知",
+    "correction": false,
+    "variants": [
+      "只有审核通过才发布除非负责人另有通知"
+    ]
+  },
+  {
+    "id": "percent_units",
+    "input": "上涨了百分之十，不是上涨了十个百分点",
+    "correction": false,
+    "variants": [
+      "上涨了百分之十不是上涨了十个百分点",
+      "上涨了10%不是上涨了10个百分点",
+      "上涨了10%不是上涨了十个百分点"
+    ]
+  },
+  {
+    "id": "fraction_scope",
+    "input": "延迟减少到原来的三分之一，不是减少了三分之一",
+    "correction": false,
+    "variants": [
+      "延迟减少到原来的三分之一不是减少了三分之一",
+      "延迟减少到原来的1/3不是减少了1/3"
+    ]
+  },
+  {
+    "id": "approximation",
+    "input": "大概三四个人，十来分钟，二十多块钱，七八成把握",
+    "correction": false,
+    "variants": [
+      "大概三四个人十来分钟二十多块钱七八成把握"
+    ]
+  },
+  {
+    "id": "numeric_identifier",
+    "input": "样例编号是零零七零一二，开头两个零都要保留",
+    "correction": false,
+    "variants": [
+      "样例编号是007012开头两个零都要保留",
+      "样例编号是零零七零一二开头两个零都要保留"
+    ]
+  },
+  {
+    "id": "negative_decimal",
+    "input": "数值是-0.05，误差为±0.001",
+    "correction": false,
+    "variants": [
+      "数值是-0.05误差为±0.001"
+    ]
+  },
+  {
+    "id": "relative_time",
+    "input": "下下周五下午两点半之前给我，不是这周五",
+    "correction": false,
+    "variants": [
+      "下下周五下午两点半之前给我不是这周五",
+      "下下周五下午2点半之前给我不是这周五",
+      "下下周五下午2:30之前给我不是这周五"
+    ]
+  },
+  {
+    "id": "partial_correction",
+    "input": "周三下午三点开会，不对，四点，地点不变",
+    "correction": true,
+    "variants": [
+      "周三下午四点开会地点不变",
+      "周三下午4点开会地点不变"
+    ]
+  },
+  {
+    "id": "repeated_correction",
+    "input": "明天去，不对，后天去，算了还是明天去",
+    "correction": true,
+    "variants": [
+      "明天去"
+    ]
+  },
+  {
+    "id": "local_correction",
+    "input": "明天去杭州，后天去上海，把杭州改成苏州",
+    "correction": true,
+    "variants": [
+      "明天去苏州后天去上海"
+    ]
+  },
+  {
+    "id": "past_reconsideration",
+    "input": "昨天我想删掉那个功能，后来改主意，还是留着了",
+    "correction": false,
+    "variants": [
+      "昨天我想删掉那个功能后来改主意还是留着了"
+    ]
+  },
+  {
+    "id": "quoted_reconsideration",
+    "input": "如果他说“算了，还是留着吧”，那就别删",
+    "correction": false,
+    "variants": [
+      "如果他说算了还是留着吧那就别删"
+    ]
+  },
+  {
+    "id": "quoted_correction",
+    "input": "他原话说的是“明天，不对，后天去”，请原样记录这段话",
+    "correction": false,
+    "variants": [
+      "他原话说的是明天不对后天去请原样记录这段话"
+    ]
+  },
+  {
+    "id": "non_reversal",
+    "input": "这个要求有点难，算了，我们慢慢来",
+    "correction": false,
+    "variants": [
+      "这个要求有点难算了我们慢慢来"
+    ]
+  },
+  {
+    "id": "unfinished_condition",
+    "input": "如果明天还有问题的话",
+    "correction": false,
+    "variants": [
+      "如果明天还有问题的话"
+    ]
+  },
+  {
+    "id": "unfinished_object",
+    "input": "要不就先把这个",
+    "correction": false,
+    "variants": [
+      "要不就先把这个"
+    ]
+  },
+  {
+    "id": "dialect_register",
+    "input": "咱先这么着呗，回头再唠",
+    "correction": false,
+    "variants": [
+      "咱先这么着呗回头再唠"
+    ]
+  },
+  {
+    "id": "doubled_verbs",
+    "input": "想了想还是算了，试一试也没关系",
+    "correction": false,
+    "variants": [
+      "想了想还是算了试一试也没关系"
+    ]
+  },
+  {
+    "id": "yes_no_question",
+    "input": "你看行不行，要不要再试一试",
+    "correction": false,
+    "question": true,
+    "variants": [
+      "你看行不行要不要再试一试"
+    ]
+  },
+  {
+    "id": "uncertainty",
+    "input": "我估计大概可能要三天左右",
+    "correction": false,
+    "variants": [
+      "我估计大概可能要三天左右",
+      "我估计可能要三天左右",
+      "我估计要三天左右",
+      "可能要三天左右"
+    ]
+  },
+  {
+    "id": "different_names",
+    "input": "致远和志远是两个人，别合并",
+    "correction": false,
+    "context": {
+      "visibleText": "词汇参考：致远。这里只讨论致远。"
+    },
+    "variants": [
+      "致远和志远是两个人别合并"
+    ]
+  },
+  {
+    "id": "context_pronouns",
+    "input": "他说明天到，她说后天到",
+    "correction": false,
+    "context": {
+      "visibleText": "本项目所有参与者均为女性。"
+    },
+    "variants": [
+      "他说明天到她说后天到"
+    ]
+  },
+  {
+    "id": "context_referents",
+    "input": "把那个文件给他",
+    "correction": false,
+    "context": {
+      "visibleText": "文件名：report.pdf；收件人：张三。"
+    },
+    "variants": [
+      "把那个文件给他"
+    ]
+  },
+  {
+    "id": "context_negation",
+    "input": "这个方案我还没同意，先别发",
+    "correction": false,
+    "context": {
+      "surroundingTextBefore": "我同意这个方案，可以发布。"
+    },
+    "variants": [
+      "这个方案我还没同意先别发",
+      "我还没同意这个方案先别发"
+    ]
+  },
+  {
+    "id": "context_approximation",
+    "input": "预算大概三四千，具体还没定",
+    "correction": false,
+    "context": {
+      "visibleText": "会议决定预算4000元，已全票通过。"
+    },
+    "variants": [
+      "预算大概三四千具体还没定"
+    ]
+  },
+  {
+    "id": "non_enumeration",
+    "input": "我们先定方向，第一版先不做会员，第二天再讨论价格",
+    "correction": false,
+    "variants": [
+      "我们先定方向第一版先不做会员第二天再讨论价格"
+    ]
+  },
+  {
+    "id": "enumeration",
+    "input": "今天有两件事，第一修复录音，第二补上测试，剩下的明天再说",
+    "correction": false,
+    "modes": [
+      "plain_text",
+      "list"
+    ],
+    "variants": [
+      "今天有两件事第一修复录音第二补上测试剩下的明天再说",
+      "今天有两件事修复录音补上测试剩下的明天再说"
+    ]
+  },
+  {
+    "id": "mixed_language",
+    "input": "这个 issue 先别 close，等 QA sign off 再 merge",
+    "correction": false,
+    "variants": [
+      "这个 issue 先别 close 等 QA sign off 再 merge"
+    ]
+  }
+]

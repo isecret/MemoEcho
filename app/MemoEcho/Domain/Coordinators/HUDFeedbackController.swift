@@ -22,7 +22,7 @@ final class HUDFeedbackController {
 
     // MARK: - Callbacks (由 AppCoordinator 注入)
 
-    var onCancelRecording: (() -> Void)?
+    var onCancelRecording: (() -> Bool)?
     var onConfirmRecording: (() -> Void)?
     var onToggleProcessingMode: (() -> Void)?
     var recoveryActionTitle: String? { didSet { refreshLayout() } }
@@ -70,6 +70,7 @@ final class HUDFeedbackController {
     // MARK: - Private
 
     private let soundPlayer: FeedbackSoundPlaying
+    private let keyboardMonitor: HUDKeyboardMonitoring
     private let modeCueDuration: Duration
     private let learnedTermNoticeDismissSeconds: Double
     private var hudWindow: HUDWindow?
@@ -87,8 +88,6 @@ final class HUDFeedbackController {
     private var modeCueTask: Task<Void, Never>?
     private var levelPollingTask: Task<Void, Never>?
     private var startSoundPlaybackTask: Task<Void, Never>?
-    private var escEventTap: CFMachPort?
-    private var escRunLoopSource: CFRunLoopSource?
     private var opacityGeneration: UInt64 = 0
     private var waveformEnvelope: CGFloat = 0
     private var waveformEnergy: CGFloat = 0
@@ -100,10 +99,12 @@ final class HUDFeedbackController {
 
     init(
         soundPlayer: FeedbackSoundPlaying = FeedbackSoundPlayer(),
+        keyboardMonitor: HUDKeyboardMonitoring = HUDKeyboardMonitor(),
         modeCueDuration: Duration = .milliseconds(650),
         learnedTermNoticeDismissSeconds: Double = HUDFeedbackController.defaultLearnedTermNoticeDismissSeconds
     ) {
         self.soundPlayer = soundPlayer
+        self.keyboardMonitor = keyboardMonitor
         self.modeCueDuration = modeCueDuration
         self.learnedTermNoticeDismissSeconds = learnedTermNoticeDismissSeconds
     }
@@ -182,9 +183,9 @@ final class HUDFeedbackController {
                 soundPlayer.playStop()
             }
             stopLevelPolling()
-            stopEscMonitor()
             resetBars()
             hudState = .processing
+            startEscMonitor()
             updateMouseInteraction()
 
         case .modeSwitched(let mode):
@@ -207,9 +208,9 @@ final class HUDFeedbackController {
             cancelPendingStartSound()
             clearModeCue()
             stopLevelPolling()
-            stopEscMonitor()
             resetBars()
             hudState = .processing
+            startEscMonitor()
             showHUD()
 
         case .outputDispatched:
@@ -315,76 +316,25 @@ final class HUDFeedbackController {
 
     // MARK: - ESC Key Monitor
 
-    /// 录音阶段监听 ESC 键以取消录音，并吞掉该按键避免穿透到前台应用
+    /// 录音与处理阶段监听 ESC；只有录音时消费 Shift+Tab。
     private func startEscMonitor() {
-        stopEscMonitor()
-
-        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
-            guard
-                type == .keyDown,
-                let userInfo
-            else {
-                return Unmanaged.passRetained(event)
-            }
-
-            let controller = Unmanaged<HUDFeedbackController>
-                .fromOpaque(userInfo)
-                .takeUnretainedValue()
-
-            let keycode = event.getIntegerValueField(.keyboardEventKeycode)
-
-            // ESC
+        keyboardMonitor.start { [weak self] keycode, flags in
+            guard let self, !self.isDismissing else { return false }
             if keycode == 53 {
-                Task { @MainActor in
-                    guard controller.hudState == .recording else { return }
-                    controller.onCancelRecording?()
-                }
-                return nil
+                guard self.hudState == .recording || self.hudState == .processing else { return false }
+                return self.onCancelRecording?() ?? false
             }
-
-            // Shift+Tab
-            if keycode == 48 && event.flags.contains(.maskShift) {
-                Task { @MainActor in
-                    guard controller.hudState == .recording else { return }
-                    controller.onToggleProcessingMode?()
-                }
-                return nil
+            if keycode == 48 && flags.contains(.maskShift) {
+                guard self.hudState == .recording else { return false }
+                self.onToggleProcessingMode?()
+                return true
             }
-
-            return Unmanaged.passRetained(event)
+            return false
         }
-
-        let ref = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: callback,
-            userInfo: ref
-        ) else {
-            return
-        }
-
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-
-        escEventTap = tap
-        escRunLoopSource = source
     }
 
     private func stopEscMonitor() {
-        if let source = escRunLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            escRunLoopSource = nil
-        }
-
-        if let tap = escEventTap {
-            CFMachPortInvalidate(tap)
-            escEventTap = nil
-        }
+        keyboardMonitor.stop()
     }
 
     /// 根据音频电平计算声波条高度：低幅待机 + 软触发的有声峰值
@@ -589,7 +539,7 @@ final class HUDFeedbackController {
 
         let contentView = HUDContentView(
             controller: self,
-            onCancel: { [weak self] in self?.onCancelRecording?() },
+            onCancel: { [weak self] in _ = self?.onCancelRecording?() },
             onConfirm: { [weak self] in self?.onConfirmRecording?() }
         )
         let hosting = NSHostingView(rootView: contentView)

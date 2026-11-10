@@ -207,7 +207,7 @@ final class AppCoordinator {
             sessionCoordinator?.currentAudioLevel() ?? 0
         }
         hud.onCancelRecording = { [weak sessionCoordinator] in
-            sessionCoordinator?.cancel()
+            sessionCoordinator?.cancel() ?? false
         }
         hud.onConfirmRecording = { [weak sessionCoordinator] in
             sessionCoordinator?.finishRecording()

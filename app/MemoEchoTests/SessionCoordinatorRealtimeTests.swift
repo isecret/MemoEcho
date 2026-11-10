@@ -239,16 +239,21 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.state, .cancelled)
     }
 
-    func testCancelIgnoresLateFinalWithoutPolishOrInjection() async throws {
+    func testEscDuringThinkingIgnoresLateFinalWithoutPolishOrInjection() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
+        let keyboard = FakeHUDKeyboardMonitor()
+        let hud = HUDFeedbackController(keyboardMonitor: keyboard)
+        hud.isInteractionSoundEnabled = { false }
+        hud.onCancelRecording = { fixture.coordinator.cancel() }
+        fixture.coordinator.onFeedbackEvent = { hud.handleEvent($0) }
         fixture.coordinator.startRecording()
         await fixture.recorder.started.wait()
         fixture.recorder.emit(samples: 8_000)
         await fixture.service.sent.wait()
         fixture.coordinator.finishRecording()
         await fixture.service.finishEntered.wait()
-        fixture.coordinator.cancel()
+        XCTAssertTrue(keyboard.send(53))
         await fixture.service.cancelEntered.wait()
         // The fake deliberately returns a successful final after cancel. Generation
         // guards must reject it even when the provider ignores task cancellation.
@@ -261,6 +266,58 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         XCTAssertNil(fixture.coordinator.lastResult)
         XCTAssertNil(fixture.coordinator.lastInjectionFailureText)
         XCTAssertEqual(fixture.driver.pastes, 0)
+    }
+
+    func testEscDuringPolishOrTranslationRejectsLateResultAfterNewRecordingStarts() async throws {
+        for stage in [SessionRecoveryCheckpoint.Stage.polish, .translation] {
+            let release = CoordinatorRealtimeGate()
+            var stageEntered = false
+            var stageReturned = false
+            let polished = PolishResult(text: "合成整理结果", source: .llm,
+                structured: .init(mode: .plainText, intro: nil, items: nil, outro: nil, correctionApplied: false))
+            let worker = SessionRecoveryProcessor(recognize: { _ in
+                XCTFail("Realtime recording must not use segment recognition"); return ""
+            }, polish: { _, _ in
+                if stage == .polish {
+                    stageEntered = true
+                    await release.wait() // Deliberately ignore task cancellation.
+                    stageReturned = true
+                }
+                return polished
+            }, translate: { _, _, _ in
+                stageEntered = true
+                await release.wait()
+                stageReturned = true
+                return "Synthetic translation."
+            })
+            let fixture = try makeFixture(workerOverride: worker)
+            defer { fixture.cleanup() }
+            let keyboard = FakeHUDKeyboardMonitor()
+            let hud = HUDFeedbackController(keyboardMonitor: keyboard)
+            hud.isInteractionSoundEnabled = { false }
+            hud.onCancelRecording = { fixture.coordinator.cancel() }
+            fixture.coordinator.onFeedbackEvent = { hud.handleEvent($0) }
+            fixture.coordinator.startRecording()
+            await fixture.recorder.started.wait()
+            if stage == .translation { fixture.coordinator.toggleProcessingMode() }
+            fixture.recorder.emit(samples: 8_000)
+            await fixture.service.sent.wait()
+            fixture.coordinator.finishRecording()
+            await fixture.service.finishEntered.wait()
+            await fixture.service.releaseFinal.open()
+            await waitUntil { stageEntered }
+            XCTAssertEqual(fixture.coordinator.state, .polishing)
+            XCTAssertTrue(keyboard.send(53), stage.rawValue)
+            XCTAssertEqual(fixture.coordinator.state, .cancelled)
+            fixture.coordinator.startRecording()
+            await waitUntil { fixture.recorder.completedStarts == 2 }
+            await release.open()
+            await waitUntil { stageReturned }
+            XCTAssertEqual(fixture.coordinator.state, .recording, "Late results must not affect the new session")
+            XCTAssertEqual(fixture.driver.pastes, 0)
+            XCTAssertNil(fixture.coordinator.recovery)
+            XCTAssertNil(fixture.coordinator.lastResult)
+        }
     }
 
     func testReleaseBeforeAsynchronousCaptureStartsLeavesNoRecordingOrRequests() async throws {
@@ -355,7 +412,8 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
     }
 
     private func makeFixture(sendError: RealtimeASRError? = nil, platform: ASRPlatform = .volcengineRealtime,
-                             replayError: RealtimeASRError? = nil) throws -> CoordinatorRealtimeFixture {
+                             replayError: RealtimeASRError? = nil,
+                             workerOverride: SessionRecoveryProcessor? = nil) throws -> CoordinatorRealtimeFixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = ConfigStore(configDirectory: directory)
         var config = ASRConfig()
@@ -393,7 +451,7 @@ final class SessionCoordinatorRealtimeTests: XCTestCase {
         let coordinator = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
             audioDeviceManager: AudioDeviceManager(configStore: store), audioRecorder: recorder, dictionaryStore: dictionary,
             ensureMicrophoneAuthorized: {}, ensureAccessibilityAuthorized: {},
-            textInjector: TextInjector(driver: driver), recoveryProcessorFactory: { _ in worker },
+            textInjector: TextInjector(driver: driver), recoveryProcessorFactory: { _ in workerOverride ?? worker },
             realtimeSessionFactory: { config, hotwords in
                 guard config.selectedPlatform == platform else { throw RealtimeASRError.configuration }
                 return factory.makeSession(hotwords: hotwords)

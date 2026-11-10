@@ -12,10 +12,12 @@
 
 ## 版本记录
 
+- [1.0.0-beta.28 发布与验证](./releases/1.0.0-beta.28.md)
 - [1.0.0-beta.27 发布与验证](./releases/1.0.0-beta.27.md)
 
 ## 专项方案
 
+- [中文润色语义边界与评测](./plans/chinese-polish-boundaries.md)
 - [单按、双按与按住录音](./plans/hotkey-recording-modes.md)
 - [OpenAI 兼容语音识别](./plans/openai-compatible-asr.md)
 - [云端实时 ASR 与 MiMo](./plans/realtime-asr.md)
