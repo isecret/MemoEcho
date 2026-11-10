@@ -156,6 +156,59 @@ class TechnicalDictationAssessmentTests(unittest.TestCase):
         self.assertEqual(self.assess_chinese("emotional_repeat", "好好好，你说得都对，我不争了。"), (True, True))
         self.assertEqual(self.assess_chinese("emotional_repeat", "好，你说得都对，我不争了。"), (True, False))
 
+    def test_discourse_fillers_are_removed_without_losing_qualifiers(self):
+        examples = {
+            "filler_uncertain_opinion": [
+                ("我觉得这个方案可能还需要调整，先别发布。", True),
+                ("我觉得这个方案，然后就是，可能还需要调整，就是先别发布。", False),
+                ("我觉得这个方案还需要调整，先别发布。", False),
+                ("这个方案需要调整，不能发布。", False),
+            ],
+            "filler_multiple_clauses": [
+                ("录音已经正常了，设置页面还有问题，快捷键偶尔失效，还得再检查。", True),
+                ("录音已经正常了。然后，设置页面还有问题。然后，快捷键偶尔失效，还得再检查。", False),
+                ("录音已经正常了，设置页面还有问题，还得再检查。", False),
+            ],
+            "filler_parallel_observations": [
+                ("我看了一下这个页面，这个按钮现在有点小，颜色也不太明显，下面那段说明可能还得再改一下。", True),
+                ("我看了一下这个页面，按钮现在有点小，颜色也不太明显，下面那段说明可能还得再改一下。", True),
+                ("我看了一下这个页面，这个按钮有点小，颜色也不太明显，下面那段说明可能还得再改一下。", False),
+            ],
+        }
+        for name, outputs in examples.items():
+            for text, passed in outputs:
+                with self.subTest(name=name, text=text):
+                    self.assertEqual(self.assess_chinese(name, text), (True, passed))
+
+    def test_repeated_connectors_keep_one_meaningful_relation(self):
+        for name in ["filler_repeated_sequence", "filler_segment_boundaries"]:
+            for text, passed in [
+                ("我们先检查配置，然后再启动服务。", True),
+                ("我们先检查配置，再启动服务。", True),
+                ("我们先检查配置，然后，然后再启动服务。", False),
+                ("我们先检查配置。然后。然后再启动服务。", False),
+                ("我们先检查配置，启动服务。", False),
+                ("我们先启动服务，再检查配置。", False),
+            ]:
+                with self.subTest(name=name, text=text):
+                    self.assertEqual(self.assess_chinese(name, text), (True, passed))
+        self.assertEqual(self.assess_chinese("filler_repeated_judgment", "这个就是我要的结果。"), (True, True))
+        self.assertEqual(self.assess_chinese("filler_repeated_judgment", "这个就是，就是我要的结果。"), (True, False))
+        self.assertEqual(self.assess_chinese("filler_repeated_judgment", "这个就是我要的结果。", correction=True), (True, False))
+
+    def test_meaningful_discourse_words_and_verbatim_repeats_are_protected(self):
+        for name, raw, wrongly_deleted in [
+            ("filler_meaningful_judgment", "这个就是我要的，不是旁边那个。", "这个我要的，不是旁边那个。"),
+            ("filler_meaningful_emphasis", "我就是不同意现在发布。", "我不同意现在发布。"),
+            ("filler_meaningful_condition", "就是下雨也要去。", "下雨也要去。"),
+            ("filler_verbatim_quote", "他说“然后然后，就是就是”，请保留原话。", "他说“然后，就是”，请保留原话。"),
+            ("filler_distinct_sequences", "小王先备份然后升级，小李先检查然后发布。", "小王先备份然后升级。"),
+            ("filler_discussing_words", "不要把“然后”和“就是”这两个词全部删掉。", "不要把这两个词全部删掉。"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.assess_chinese(name, raw), (True, True))
+                self.assertEqual(self.assess_chinese(name, wrongly_deleted), (True, False))
+
     def test_synthetic_context_overrides_only_the_fixture_reference_profile(self):
         case = next(item for item in evaluation.CHINESE_CASES if item[0] == "chinese_context_approximation")
         prompts = evaluation.prompts()
@@ -164,6 +217,88 @@ class TechnicalDictationAssessmentTests(unittest.TestCase):
         self.assertEqual(prompt.count("BEGIN_WINDOW_CONTEXT_JSON"), 1)
         self.assertIn("4000元", prompt)
         self.assertNotIn("UNRELATED_SENTINEL", prompt)
+
+    def test_long_explanation_requires_clean_content_in_original_order(self):
+        clean = ("三个检查项。首先按图形位置查找，把重复、偏移、浅灰色的标签先标成背景，"
+                 "只保存有效标签。后续检查有没有缺的，再对清单做二次读取，"
+                 "包含长度、宽度这类带小数点、斜杠的内容，再逐项比对。")
+        self.assertEqual(self.assess_chinese("explanation_long_cleanup", clean), (True, True))
+        fixture = evaluation.CHINESE_BY_ID["chinese_explanation_long_cleanup"]
+        wrong = [fixture["input"], clean.replace("三个", "四个"), clean.replace("只保存", "保存"),
+                 clean.replace("偏移、", ""), clean.replace("小数点", "."),
+                 clean.replace("长度、宽度", "长度啊、宽度啊"), clean + "第二项检查颜色。",
+                 clean.replace("先标成背景", "先逐项比对").replace("再逐项比对", "再标成背景")]
+        for text in wrong:
+            with self.subTest(text=text):
+                self.assertEqual(self.assess_chinese("explanation_long_cleanup", text), (True, False))
+        self.assertEqual(self.assess_chinese("explanation_long_cleanup", clean, correction=True), (True, False))
+
+    def test_step_cleanup_keeps_each_action_and_does_not_repeat_connectors(self):
+        clean = "先打开示例，再检查标注，导出清单，再和上一版比对。"
+        self.assertEqual(self.assess_chinese("explanation_step_sequence", clean), (True, True))
+        for text in ["先打开示例，再导出清单，检查标注，再和上一版比对。",
+                     "先打开示例，再检查标注，再和上一版比对。",
+                     "先打开示例，然后检查标注，然后导出清单，然后和上一版比对。"]:
+            self.assertEqual(self.assess_chinese("explanation_step_sequence", text), (True, False))
+
+    def test_first_plan_is_not_expanded_into_unspoken_alternatives(self):
+        clean = "有五种备选做法。首先把重复、偏移的标签标出来，只保存正常标签，后续再检查一遍，别的做法还没说。"
+        self.assertEqual(self.assess_chinese("explanation_first_plan_only", clean), (True, True))
+        self.assertEqual(self.assess_chinese("explanation_first_plan_only", clean + "第二种是删除标签。"), (True, False))
+        case = next(item for item in evaluation.CHINESE_CASES if item[0] == "chinese_explanation_first_plan_only")
+        content = json.dumps({"mode": "list", "intro": "有五种备选做法", "items": [
+            "首先把重复、偏移的标签标出来", "只保存正常标签", "后续再检查一遍"],
+            "outro": "别的做法还没说", "correction_applied": False})
+        self.assertEqual(evaluation.assess(content, case), (True, False))
+
+    def test_enumeration_fillers_do_not_authorize_deleting_meaningful_particles(self):
+        self.assertEqual(self.assess_chinese("explanation_enumeration_particles", "这次只检查长度、宽度、面积，别改单位。"), (True, True))
+        self.assertEqual(self.assess_chinese("explanation_enumeration_particles", "这次只检查长度啊、宽度啊、面积啊，别改单位。"), (True, False))
+        for name, raw, deleted in [
+            ("explanation_meaningful_particles", "你先别删啊，这个我还要用呢。", "你先别删，这个我还要用。"),
+            ("explanation_surprised_question", "啊？你说的是那个标注吗？", "你说的是那个标注吗？"),
+            ("explanation_verbatim_particles", "请逐字保留“长度啊、宽度啊、后面呢”。", "请逐字保留“长度、宽度、后面”。"),
+            ("explanation_contrasting_demonstratives", "把这些标注留下，那些标注别动，不是全部删除。", "把标注留下，标注别动，不是全部删除。"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.assess_chinese(name, raw), (True, True))
+                self.assertEqual(self.assess_chinese(name, deleted), (True, False))
+
+    def test_numeric_commas_and_decimal_points_survive_prose_normalization(self):
+        clean = "先校对清单，再核对长度、宽度，数值是0.75和1,024.50，单位还是毫米。"
+        self.assertEqual(self.assess_chinese("explanation_numeric_facts", clean), (True, True))
+        for changed in ["1024.50", "1，024.50", "1X024Y50", "1,02450"]:
+            self.assertEqual(self.assess_chinese("explanation_numeric_facts", clean.replace("1,024.50", changed)), (True, False))
+        self.assertEqual(self.assess_chinese("explanation_numeric_facts", clean.replace("0.75", "075")), (True, False))
+
+    def test_particle_cleanup_includes_enumeration_and_sentence_tails(self):
+        for name, clean, unclean in [
+            ("particle_enumeration_ya", "这次只核对数量、金额，先别改单位。", "这次只核对数量呀、金额呀，先别改单位。"),
+            ("particle_enumeration_mixed", "先检查长度、宽度、面积，再检查单位。", "先检查长度呀、宽度啊、面积啦，再检查单位。"),
+            ("particle_tail_ma", "这几份样例大致相同，我们先核对数字。", "这几份样例大致相同嘛，我们先核对数字。"),
+            ("particle_topic_ne", "这几个参数，我们先核对一下，别改默认值。", "这几个参数呢，我们先核对一下，别改默认值。"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.assess_chinese(name, clean), (True, True))
+                self.assertEqual(self.assess_chinese(name, unclean), (True, False))
+                self.assertEqual(self.assess_chinese(name, clean, correction=True), (True, False))
+        self.assertEqual(self.assess_chinese("particle_tail_ma", "这几份样例相同，我们先核对数字。"), (True, False))
+        self.assertEqual(self.assess_chinese("particle_enumeration_ya", "这次核对数量、金额，先别改单位。"), (True, False))
+
+    def test_particle_candidates_keep_responses_tone_and_word_characters(self):
+        for name, raw, deleted in [
+            ("particle_reply_ya", "好呀，就按这个方案来。", "好，就按这个方案来。"),
+            ("particle_reminder_ya", "先别关呀，我还没保存呢。", "先别关，我还没保存。"),
+            ("particle_question_ne", "为什么呢？", "为什么？"),
+            ("particle_uncertainty_ba", "可能吧，我还没确认。", "我已经确认。"),
+            ("particle_reminder_ma", "别急嘛，等我看完。", "别急，等我看完。"),
+            ("particle_verbatim", "请逐字保留“参数呀、数值嘛、后面呢”。", "请逐字保留“参数、数值、后面”。"),
+            ("particle_within_word", "你干嘛把源码删了？", "你干把源码删了？"),
+            ("particle_discussing_character", "这句话里的“呀”是被讨论的字，不是让你删掉。", "这句话里的是被讨论的字，不是让你删掉。"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.assess_chinese(name, raw), (True, True))
+                self.assertEqual(self.assess_chinese(name, deleted), (True, False))
 
     def test_enumeration_allows_prose_but_preserves_order_and_all_information(self):
         case = next(item for item in evaluation.CASES if item[0] == "list")
