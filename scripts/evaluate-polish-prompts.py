@@ -154,9 +154,11 @@ def prompts(ref=None, provider_source=None):
 
 def normalized_prose(text):
     # Keep numeric punctuation (including time separators); discard only prose marks.
+    text = re.sub(r'\s', '', text)
     text = re.sub(r'(?<=\d)：(?=\d)', ':', text)
     text = re.sub(r'(?<!\d)[:：]|[:：](?!\d)', '', text)
-    return re.sub(r'[\s，,。!！?？；;、“”‘’"「」『』]', "", text)
+    text = re.sub(r'(?<!\d)[,，]|[,，](?!\d)', '', text)
+    return re.sub(r'[。!！?？；;、“”‘’"「」『』]', "", text)
 
 
 def fixture_prompt(prompt, case):
@@ -195,7 +197,16 @@ def assess(content, case):
             # never successful output or injection.
             return True, faithful and mode == "plain_text" and text == ""
         faithful = faithful and bool(text.strip())
-        faithful = faithful and normalized_prose(text) in {normalized_prose(v) for v in fixture["variants"]}
+        if "phrase_variants" in fixture:
+            # An anchored, finite grammar accepts local wording choices while still
+            # rejecting omitted/reordered facts and unlisted additions.
+            pattern = "".join("(?:" + "|".join(re.escape(normalized_prose(v)) for v in group) + ")"
+                              for group in fixture["phrase_variants"])
+            faithful = faithful and re.fullmatch(pattern, normalized_prose(text)) is not None
+        else:
+            faithful = faithful and normalized_prose(text) in {normalized_prose(v) for v in fixture["variants"]}
+        faithful = faithful and all(normalized_prose(text).count(normalized_prose(term)) <= count
+                                    for term, count in fixture.get("max_occurrences", {}).items())
         if fixture.get("question"):
             faithful = faithful and text.rstrip().endswith(("？", "?"))
         return True, faithful

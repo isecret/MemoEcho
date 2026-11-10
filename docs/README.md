@@ -12,16 +12,19 @@
 
 ## 版本记录
 
+- [1.0.0-beta.29 发布与验证](./releases/1.0.0-beta.29.md)
 - [1.0.0-beta.28 发布与验证](./releases/1.0.0-beta.28.md)
 - [1.0.0-beta.27 发布与验证](./releases/1.0.0-beta.27.md)
 
 ## 专项方案
 
 - [中文润色语义边界与评测](./plans/chinese-polish-boundaries.md)
+- [ASR 与 AI 服务开通指南方案](./plans/service-setup-guides.md)
 - [单按、双按与按住录音](./plans/hotkey-recording-modes.md)
 - [OpenAI 兼容语音识别](./plans/openai-compatible-asr.md)
 - [云端实时 ASR 与 MiMo](./plans/realtime-asr.md)
 - [语音与 AI 服务闪断恢复：方案草案](./plans/transient-service-recovery.md)
+- [流式文字输出：可行性与方案草案](./plans/streaming-text-output.md)
 - [口述技术文本还原](./plans/technical-dictation.md)
 - [火山引擎各产品接入](./plans/volcengine-asr-products.md)
 - [HUD 展示](./plans/hud-display-refinement.md)
