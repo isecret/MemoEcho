@@ -5,6 +5,67 @@ import XCTest
 
 @MainActor
 final class HUDFeedbackControllerTests: XCTestCase {
+    func testEscCancelsThinkingAfterRecordingStops() {
+        let keyboard = FakeHUDKeyboardMonitor()
+        let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer(), keyboardMonitor: keyboard)
+        var cancellations = 0
+        controller.onCancelRecording = {
+            cancellations += 1
+            controller.handleEvent(.processingCancelled)
+            return true
+        }
+        controller.handleEvent(.recordingStarted)
+        controller.handleEvent(.recordingStopped)
+        XCTAssertEqual(controller.hudState, .processing)
+        XCTAssertTrue(keyboard.send(53), "Thinking must keep listening for and consume Esc")
+        XCTAssertEqual(cancellations, 1)
+        XCTAssertFalse(keyboard.send(53), "Cancelled sessions must release Esc immediately")
+    }
+
+    func testEscCancelsThinkingStartedFromRecovery() {
+        let keyboard = FakeHUDKeyboardMonitor()
+        let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer(), keyboardMonitor: keyboard)
+        var cancellations = 0
+        controller.onCancelRecording = {
+            cancellations += 1
+            controller.handleEvent(.processingCancelled)
+            return true
+        }
+        controller.handleEvent(.recoveryStarted)
+        XCTAssertTrue(keyboard.send(53))
+        XCTAssertEqual(cancellations, 1)
+        controller.handleEvent(.processingCancelled)
+    }
+
+    func testThinkingPassesShiftTabAndUnrelatedKeysThrough() {
+        let keyboard = FakeHUDKeyboardMonitor()
+        let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer(), keyboardMonitor: keyboard)
+        var toggles = 0
+        controller.onToggleProcessingMode = { toggles += 1 }
+        controller.handleEvent(.recordingStarted)
+        XCTAssertTrue(keyboard.send(48, flags: .maskShift))
+        XCTAssertEqual(toggles, 1)
+        controller.handleEvent(.recordingStopped)
+        XCTAssertFalse(keyboard.send(48, flags: .maskShift))
+        XCTAssertFalse(keyboard.send(0))
+        XCTAssertEqual(toggles, 1)
+        controller.handleEvent(.processingCancelled)
+    }
+
+    func testThinkingPassesEscThroughWhenSessionDeclinesCancellation() {
+        let keyboard = FakeHUDKeyboardMonitor()
+        let controller = HUDFeedbackController(soundPlayer: MockFeedbackSoundPlayer(), keyboardMonitor: keyboard)
+        controller.handleEvent(.recoveryStarted)
+        var attempts = 0
+        controller.onCancelRecording = { attempts += 1; return false }
+        XCTAssertFalse(keyboard.send(53), "An uncancellable injection must leave Esc to the foreground app")
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(controller.hudState, .processing)
+        controller.onCancelRecording = nil
+        XCTAssertFalse(keyboard.send(53), "No cancellation receiver must not consume Esc")
+        controller.handleEvent(.processingCancelled)
+    }
+
     private final class MockFeedbackSoundPlayer: FeedbackSoundPlaying {
         var startCount = 0
         var stopCount = 0
@@ -699,4 +760,12 @@ final class HUDFeedbackControllerTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(20))
         }
     }
+}
+
+@MainActor
+final class FakeHUDKeyboardMonitor: HUDKeyboardMonitoring {
+    private var onKeyDown: (@MainActor (CGKeyCode, CGEventFlags) -> Bool)?
+    func start(onKeyDown: @escaping @MainActor (CGKeyCode, CGEventFlags) -> Bool) { self.onKeyDown = onKeyDown }
+    func stop() { onKeyDown = nil }
+    func send(_ keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool { onKeyDown?(keyCode, flags) ?? false }
 }

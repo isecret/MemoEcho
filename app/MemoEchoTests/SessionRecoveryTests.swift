@@ -347,6 +347,34 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(driver.pastes, 0)
     }
 
+    func testEscCancelsAutomaticRetryWhileThinkingWithoutSendingAgain() async throws {
+        var calls = 0
+        var worker = processor()
+        worker.polish = { _, _ in
+            calls += 1
+            throw MemoEchoError.llmNetworkFailure(message: "HTTP 503")
+        }
+        let driver = FakeInjectionDriver()
+        let (session, directory) = makeCoordinator(driver: driver, worker: worker)
+        defer { session.cancel(); session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+        let keyboard = FakeHUDKeyboardMonitor()
+        let hud = HUDFeedbackController(keyboardMonitor: keyboard)
+        hud.isInteractionSoundEnabled = { false }
+        hud.onCancelRecording = { session.cancel() }
+        session.onFeedbackEvent = { hud.handleEvent($0) }
+        session.retainRecovery(checkpoint(target: driver.current))
+        session.retryRecovery()
+        await waitUntil { calls == 1 }
+        XCTAssertEqual(hud.hudState, .processing)
+        XCTAssertTrue(keyboard.send(53))
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(session.state, .cancelled)
+        XCTAssertFalse(session.isRecovering)
+        XCTAssertNil(session.recovery)
+        XCTAssertEqual(driver.pastes, 0)
+    }
+
     func testNewFailureReplacesAndReleasesOldPayload() {
         let (session, directory) = makeCoordinator(worker: processor())
         defer { session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }

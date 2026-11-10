@@ -575,11 +575,12 @@ final class SessionCoordinator {
     }
 
     /// 取消当前任务
-    func cancel() {
+    @discardableResult
+    func cancel() -> Bool {
         recordingWarning = nil
         if isRecovering {
             discardRecovery()
-            return
+            return true
         }
         recordingStopTask?.cancel()
         recordingStopTask = nil
@@ -603,8 +604,9 @@ final class SessionCoordinator {
             diagnostics.sessionCancelled(sessionID: currentSessionID)
             onFeedbackEvent?(.processingCancelled)
             scheduleResetToIdle()
+            return true
         case .transcribing, .polishing, .injecting:
-            guard state != .injecting || isOnboardingTrial else { return }
+            guard state != .injecting || isOnboardingTrial else { return false }
             sessionGeneration &+= 1
             processingTask?.cancel()
             processingTask = nil
@@ -622,8 +624,9 @@ final class SessionCoordinator {
             diagnostics.sessionCancelled(sessionID: currentSessionID)
             onFeedbackEvent?(.processingCancelled)
             scheduleResetToIdle()
+            return true
         default:
-            break
+            return false
         }
     }
 
