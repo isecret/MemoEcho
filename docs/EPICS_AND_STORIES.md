@@ -1488,4 +1488,4 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 - [x] 新增合成正反例并加强完整有序内容、重复次数及数字标点断言；原始失败、网络超时与离线复核记录均保留，不合并不同 Prompt 版本宣称最终全量通过。
 - [x] 最新助词版本定向模型调用 42 / 42 通过；Python 28 项、XCTest 46 项通过，Debug 构建通过并重新启动。
 - [ ] 最终 Prompt 全量模型矩阵及真实语音 → ASR → 润色 → 外部输入框手工验收，验证其他模型／典型应用与旧能力。
-- [ ] 本地改动提交整合及关联 PR；Issue 保持打开，定向合成验证不替代端到端验收。
+- [x] 本地改动通过 [PR #42](https://github.com/isecret/MemoEcho/pull/42) 合入并发布 [beta.29](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.29)，官网、Homebrew 与 Sparkle 更新源已验证。Issue 保持打开，定向合成验证不替代端到端验收；[发布记录](releases/1.0.0-beta.29.md)。
