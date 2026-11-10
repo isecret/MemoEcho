@@ -3,14 +3,14 @@
     <channel>
         <title>MemoEcho</title>
         <item>
-            <title>1.0.0-beta.27</title>
-            <pubDate>Sat, 07 Nov 2026 07:10:33 +0000</pubDate>
-            <link>https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.27</link>
-            <sparkle:fullReleaseNotesLink>https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.27</sparkle:fullReleaseNotesLink>
-            <sparkle:version>1.0.0b27</sparkle:version>
-            <sparkle:shortVersionString>1.0.0-beta.27</sparkle:shortVersionString>
+            <title>1.0.0-beta.28</title>
+            <pubDate>Tue, 10 Nov 2026 06:50:52 +0000</pubDate>
+            <link>https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.28</link>
+            <sparkle:fullReleaseNotesLink>https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.28</sparkle:fullReleaseNotesLink>
+            <sparkle:version>1.0.0b28</sparkle:version>
+            <sparkle:shortVersionString>1.0.0-beta.28</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/isecret/MemoEcho/releases/download/v1.0.0-beta.27/MemoEcho-v1.0.0-beta.27.zip" length="24354704" type="application/octet-stream" sparkle:edSignature="ZR6D72jNn6mEryt0LrEXcjR9PHNjNN0XuozP53DEYmie6/8GkOX0FXgnjufNKILzUaVSYhtF/EFdjdMlUZlvDg=="/>
+            <enclosure url="https://github.com/isecret/MemoEcho/releases/download/v1.0.0-beta.28/MemoEcho-v1.0.0-beta.28.zip" length="24356920" type="application/octet-stream" sparkle:edSignature="26ob302jSsoshlh1HX5oZscWaHCNLYEdIDPjVjsxy3zmR6o1xSahoB+ULMIfGCbQNwyRdfH6rGB1gKkYZrRDBw=="/>
         </item>
     </channel>
 </rss>
