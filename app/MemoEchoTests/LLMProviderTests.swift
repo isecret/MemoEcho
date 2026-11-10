@@ -3,6 +3,43 @@ import XCTest
 
 final class LLMProviderTests: XCTestCase {
     @MainActor
+    func testPureFillerEmptyResponseFailsSessionWithoutRetryTranslationOrInjection() async {
+        for mode in [TextProcessingMode.polish, .translate] {
+            let network = ContextRequestRecorder(responseContent:
+                #"{"mode":"plain_text","text":"","correction_applied":false}"#)
+            let provider = LLMProvider(baseURL: "https://example.invalid", apiKey: "synthetic", model: "test",
+                omitThinkingParameter: true, requestSender: { try await network.send($0) })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let store = ConfigStore(configDirectory: directory)
+            let driver = FakeInjectionDriver()
+            let worker = SessionRecoveryProcessor(recognize: { _ in XCTFail("ASR already completed"); return "" },
+                polish: { texts, _ in try await provider.polish(text: texts.joined()) },
+                translate: { _, _, _ in XCTFail("Must not translate empty polish"); return "" })
+            let session = SessionCoordinator(permissionsManager: PermissionsManager(), configStore: store,
+                audioDeviceManager: AudioDeviceManager(configStore: store), textInjector: TextInjector(driver: driver),
+                recoveryProcessorFactory: { _ in worker })
+            defer { session.cancel(); session.discardRecovery(); try? FileManager.default.removeItem(at: directory) }
+            let checkpoint = SessionRecoveryCheckpoint(transcripts: ["呃，呃，呃"], mode: mode, language: .english,
+                asrPlatform: .openAICompatibleASR, target: driver.current, context: nil)
+            let failed = expectation(description: "Pure filler uses the existing empty-result failure")
+            session.onFeedbackEvent = { if case .processingFailed = $0 { failed.fulfill() } }
+            session.retainRecovery(checkpoint)
+            session.retryRecovery()
+            await fulfillment(of: [failed], timeout: 2)
+            XCTAssertEqual(session.state, .error)
+            XCTAssertEqual(session.currentError, .llmEmptyResponse)
+            XCTAssertEqual(session.recovery?.id, checkpoint.id)
+            XCTAssertEqual(checkpoint.transcripts, ["呃，呃，呃"])
+            XCTAssertNil(checkpoint.polished)
+            XCTAssertNil(checkpoint.finalText)
+            XCTAssertNil(session.lastResult)
+            XCTAssertEqual(driver.pastes, 0)
+            let requests = await network.requests
+            XCTAssertEqual(requests.count, 1, "Empty results must not automatically retry")
+        }
+    }
+
+    @MainActor
     func testModelApprovedTechnicalTextReachesOutputWithoutChangingCharacters() async throws {
         let literals = [".env", ".gitignore", "p.example.com", "dev@example.com", "../Config/README.md",
                         "My Project/Config.yaml", "localhost:3000", "192.168.0.1", "v1.2.3",
