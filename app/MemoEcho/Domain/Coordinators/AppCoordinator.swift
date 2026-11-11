@@ -135,7 +135,7 @@ final class AppCoordinator {
             cloudASRValidationService: cloudASRValidationService,
             readinessService: readinessService
         )
-        updateService = AppUpdateService()
+        updateService = AppUpdateService(windowPresence: windowPresence)
 
         let hud = HUDFeedbackController()
         hudFeedbackController = hud

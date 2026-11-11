@@ -1,9 +1,10 @@
 import AppKit
 
-/// Tracks only user-facing settings/setup windows, never HUDs or permission panels.
+/// Tracks settings/setup windows and update sessions, never HUDs or permission panels.
 @MainActor
 final class ApplicationWindowPresence: NSObject {
     private var windows: [NSWindow] = []
+    private var reopenUpdate: (() -> Void)?
     private let applyPolicy: (NSApplication.ActivationPolicy) -> Void
     private let restoreWindow: (NSWindow) -> Void
 
@@ -26,7 +27,7 @@ final class ApplicationWindowPresence: NSObject {
 
     /// Called before presentation; closed controllers may reuse their original window.
     func windowOpened(_ window: NSWindow) {
-        let wasEmpty = windows.isEmpty
+        let wasEmpty = windows.isEmpty && reopenUpdate == nil
         windows.removeAll { $0 === window }
         windows.append(window)
         if wasEmpty { applyPolicy(.regular) }
@@ -34,16 +35,32 @@ final class ApplicationWindowPresence: NSObject {
 
     @discardableResult
     func reopen() -> Bool {
+        if let reopenUpdate {
+            reopenUpdate()
+            return true
+        }
         guard let window = windows.last else { return false }
         restoreWindow(window)
         return true
+    }
+
+    func updateSessionOpened(reopen: @escaping () -> Void) {
+        let wasEmpty = windows.isEmpty && reopenUpdate == nil
+        reopenUpdate = reopen
+        if wasEmpty { applyPolicy(.regular) }
+    }
+
+    func updateSessionClosed() {
+        guard reopenUpdate != nil else { return }
+        reopenUpdate = nil
+        if windows.isEmpty { applyPolicy(.accessory) }
     }
 
     @objc private func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
               windows.contains(where: { $0 === window }) else { return }
         windows.removeAll { $0 === window }
-        if windows.isEmpty { applyPolicy(.accessory) }
+        if windows.isEmpty && reopenUpdate == nil { applyPolicy(.accessory) }
     }
 
     @objc private func windowDidBecomeKey(_ notification: Notification) {

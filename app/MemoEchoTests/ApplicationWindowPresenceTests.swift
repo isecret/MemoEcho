@@ -4,6 +4,47 @@ import XCTest
 
 @MainActor
 final class ApplicationWindowPresenceTests: XCTestCase {
+    func testUpdateKeepsDockVisibleAfterSettingsCloseAndRestoresItsWindow() {
+        var policies: [NSApplication.ActivationPolicy] = []
+        var updateReopens = 0
+        let presence = ApplicationWindowPresence(applyPolicy: { policies.append($0) }, restoreWindow: { _ in
+            XCTFail("The update should receive the reopen request")
+        })
+        let delegate = MemoEchoApplicationDelegate()
+        delegate.windowPresence = presence
+        let settings = NSWindow()
+        presence.windowOpened(settings)
+        presence.updateSessionOpened { updateReopens += 1 }
+        presence.updateSessionOpened { updateReopens += 1 }
+
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: settings)
+
+        XCTAssertEqual(policies, [.regular])
+        XCTAssertFalse(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: true))
+        XCTAssertEqual(updateReopens, 1)
+        presence.updateSessionClosed()
+        presence.updateSessionClosed()
+        XCTAssertEqual(policies, [.regular, .accessory])
+        XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
+    }
+
+    func testFinishingUpdateKeepsSettingsAvailableUntilTheirWindowCloses() {
+        var policies: [NSApplication.ActivationPolicy] = []
+        var restored: NSWindow?
+        let presence = ApplicationWindowPresence(applyPolicy: { policies.append($0) }, restoreWindow: { restored = $0 })
+        let settings = NSWindow()
+        presence.updateSessionOpened {}
+        presence.windowOpened(settings)
+
+        presence.updateSessionClosed()
+
+        XCTAssertEqual(policies, [.regular])
+        XCTAssertTrue(presence.reopen())
+        XCTAssertTrue(restored === settings)
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: settings)
+        XCTAssertEqual(policies, [.regular, .accessory])
+    }
+
     func testMultipleWindowsAndRepeatedOpenOnlyChangePolicyAtBoundaries() {
         var policies: [NSApplication.ActivationPolicy] = []
         let presence = ApplicationWindowPresence(applyPolicy: { policies.append($0) }, restoreWindow: { _ in })
