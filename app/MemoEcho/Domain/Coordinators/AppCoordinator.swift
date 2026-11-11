@@ -87,11 +87,12 @@ final class AppCoordinator {
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var recordingValidationIdentity: (llm: String, asr: String)?
 
-    init() {
-        let store = ConfigStore()
-        let perms = PermissionsManager()
+    init(
+        configStore store: ConfigStore = ConfigStore(),
+        permissionsManager perms: PermissionsManager = PermissionsManager(),
+        dictionaryStore dict: PersonalDictionaryStore = PersonalDictionaryStore()
+    ) {
         let audioDevices = AudioDeviceManager(configStore: store)
-        let dict = PersonalDictionaryStore()
         configStore = store
         permissionsManager = perms
         accessibilityGuideController = AccessibilityAuthorizationGuideController(
@@ -239,7 +240,11 @@ final class AppCoordinator {
         perms.onAccessibilityGranted = { [weak self] in
             guard let self else { return }
             self.accessibilityGuideController.dismiss()
-            self.setupHotkey()
+            // The first trust check can run inside the press that starts a hold.
+            // Reinstalling its working listener would discard the matching release.
+            if !self.hotkeyManager.isHolding(self.configStore.generalConfig.hotkey) {
+                self.setupHotkey()
+            }
             if self.onboardingCoordinator.isPresented { self.onboardingCoordinator.refresh() }
         }
         lifecycleObservers = [

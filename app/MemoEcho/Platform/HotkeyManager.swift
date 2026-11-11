@@ -119,6 +119,10 @@ final class HotkeyManager: @unchecked Sendable {
         return result
     }
 
+    func isHolding(_ hotkey: HotkeyCombo) -> Bool {
+        isKeyDown && hotkey.triggerMode == .hold && registeredHotkey == hotkey
+    }
+
     private func install(_ hotkey: HotkeyCombo) -> HotkeyRegistrationResult {
         if let testInstallHandler {
             return testInstallHandler(hotkey)
