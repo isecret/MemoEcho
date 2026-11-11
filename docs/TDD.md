@@ -119,7 +119,7 @@
 ### 5.1 AppCoordinator
 
 - 启动应用并初始化菜单栏
-- `ApplicationWindowPresence` 统一跟踪设置与引导窗口的打开、聚焦和关闭：首个窗口展示前切换为 `.regular`，最后一个关闭时恢复 `.accessory`；最小化不移除跟踪，辅助窗口不参与。应用委托处理 Dock reopen，恢复最近使用的受管窗口；窗口关闭不退出进程。保留 `LSUIElement` 启动方式，不增加持久配置（Issue #9）。
+- `ApplicationWindowPresence` 统一跟踪设置／引导窗口与 Sparkle 更新会话：首个可见入口展示前切换为 `.regular`，全部结束后恢复 `.accessory`；最小化不移除跟踪，HUD 与授权辅助窗口不参与。应用委托处理 Dock reopen，更新会话优先恢复更新窗口，其余时间恢复最近使用的受管窗口；窗口关闭不退出进程。保留 `LSUIElement` 启动方式（Issue #9、#45）。
 - 品牌母图保存在 `assets/branding/`。`scripts/generate_app_icon.swift` 导出 `AppIcon.appiconset` 的 10 档 PNG（16–1024 px），以及 `MenuBarIcon.imageset` 的 1×／2× PNG（24×18／48×36 px，图形宽 22 pt、高约 13 pt）。菜单栏资源设为 template，透明背景、月牙与分隔缝都由 alpha 表达，系统负责明暗着色；`MenuBarExtra` 使用固定资源名，不新增状态图标。关于页和权限引导继续使用应用包的 App Icon。导出流程和实际像素预览见 `assets/branding/README.md`。
 - 根据引导进度在首次启动打开独立欢迎页，恢复未完成引导时定位上次步骤
 - 订阅 `SessionCoordinator` 状态用于刷新菜单栏 UI
@@ -429,6 +429,7 @@ Issue #34：`LLMValidationService` 保留现有验证任务取消／收尾屏障
 ### 5.9 AppUpdateService
 
 - 使用 `SPUStandardUpdaterController` 托管 Sparkle 2 标准更新流程
+- `AppUpdateService` 实现并绑定 `SPUStandardUserDriverDelegate` 的 gentle reminders 回调。更新窗口展示时由共享 `ApplicationWindowPresence` 保留 Dock／⌘Tab 入口，后台更新附加 Dock 徽标；用户关注更新时清除徽标，会话结束时释放更新入口。点击 Dock 通过原控制器聚焦现有更新窗口，现有更新会话期间也允许设置页再次查看更新。参考 [Sparkle 官方提醒集成](https://sparkle-project.org/documentation/gentle-reminders/)（Issue #45）。
 - 更新元数据来自 `https://raw.githubusercontent.com/isecret/MemoEcho/main/updates/appcast.xml`
 - 更新包来自 GitHub Release 中的已签名 `.zip` 资产，应用内直接下载并安装
 - 自动检查开关仅放在关于窗口，不在菜单栏增加入口

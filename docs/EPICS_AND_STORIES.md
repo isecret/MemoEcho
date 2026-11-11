@@ -1499,3 +1499,15 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 - [x] 本地定向 XCTest 74 项通过；全量 970 项、9 项按既有条件跳过、0 失败。Debug 构建已启动。
 - [x] [PR #44](https://github.com/isecret/MemoEcho/pull/44) 合入并发布 [1.0.0-beta.30](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.30)。PR／合入 CI、签名与公证发布均通过；公开 DMG／ZIP、官网两个域名、Sparkle 与 Homebrew 已独立核验，详见[发布记录](releases/1.0.0-beta.30.md)。
 - [ ] 真实键盘与完整语音输入手工验收。
+
+## Issue #45：后台更新提醒可见性
+
+跟踪 [Issue #45](https://github.com/isecret/MemoEcho/issues/45)。用户于 2026-11-11 要求修复后台自动发现更新后不易注意到弹窗的问题，并登记 Bug。
+
+- [x] 正式版 Sparkle 日志报告菜单栏后台应用缺少 gentle reminders；手动检查能够发现 beta.30。
+- [x] 新增回归复现未实现提醒回调。接入标准用户驱动回调，更新会话保留 Dock／⌘Tab 入口，后台检查增加 Dock 徽标；用户关注后清除徽标，会话结束后按设置／引导窗口状态清理入口。
+- [x] Dock reopen 恢复现有更新窗口；更新会话期间设置页也可再次查看。更新、设置与引导共用 `ApplicationWindowPresence`。
+- [x] 定向 XCTest 19 项通过，覆盖后台与手动检查、提醒关注与结束清理、Dock 恢复、窗口并存及 Debug 更新禁用。
+- [x] 独立本地 QA 应用执行真实 Sparkle 后台定时检查，旧代码出现可见但未聚焦的后台更新窗口，Dock 保持 accessory 且无徽标；新代码出现相同更新窗口并显示 Dock 徽标，应用仍未激活。通过“稍后提醒”实测窗口关闭、徽标清除及 accessory 恢复。
+- [x] 用户解锁桌面后，通过系统重开入口回放原应用委托 → 窗口入口管理 → Sparkle 原更新器，确认已有更新窗口实际成为 key window、应用激活且徽标清除。原生 QA 对照与核验摘要保存在忽略的 `build/update-reminder-qa/`；测试应用已退出。
+- [ ] 发布 `1.0.0-beta.31`，同步并核验官网、Homebrew 与 Sparkle，详见[发布记录](releases/1.0.0-beta.31.md)。

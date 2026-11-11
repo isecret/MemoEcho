@@ -1,10 +1,10 @@
-import Foundation
+import AppKit
 import Observation
 import Sparkle
 
 @MainActor
 @Observable
-final class AppUpdateService {
+final class AppUpdateService: NSObject, @preconcurrency SPUStandardUserDriverDelegate {
     // A development installation must never replace itself with the public app.
     static var updatesEnabled: Bool {
         #if DEBUG
@@ -17,7 +17,14 @@ final class AppUpdateService {
     var isAvailable: Bool { Self.updatesEnabled }
 
     @ObservationIgnored
-    private let updaterController: SPUStandardUpdaterController
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: false,
+        updaterDelegate: nil,
+        userDriverDelegate: self
+    )
+
+    private let windowPresence: ApplicationWindowPresence
+    private let setUpdateBadge: (String?) -> Void
 
     @ObservationIgnored
     private var automaticChecksObservation: NSKeyValueObservation?
@@ -27,21 +34,18 @@ final class AppUpdateService {
 
     @ObservationIgnored
     private var didStart = false
+    private var isPresentingUpdate = false
 
-    private(set) var automaticallyChecksForUpdates: Bool
-    private(set) var canCheckForUpdates: Bool
+    private(set) var automaticallyChecksForUpdates = false
+    private(set) var canCheckForUpdates = false
 
-    init() {
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-
-        let updater = updaterController.updater
-        automaticallyChecksForUpdates = Self.updatesEnabled && updater.automaticallyChecksForUpdates
-        canCheckForUpdates = Self.updatesEnabled && updater.canCheckForUpdates
-
+    init(
+        windowPresence: ApplicationWindowPresence = ApplicationWindowPresence(),
+        setUpdateBadge: @escaping (String?) -> Void = { NSApp.dockTile.badgeLabel = $0 }
+    ) {
+        self.windowPresence = windowPresence
+        self.setUpdateBadge = setUpdateBadge
+        super.init()
         bindUpdaterState()
         syncStateFromUpdater()
     }
@@ -60,8 +64,32 @@ final class AppUpdateService {
             start()
         }
 
-        guard updaterController.updater.canCheckForUpdates else { return }
+        guard updaterController.updater.canCheckForUpdates || isPresentingUpdate else { return }
         updaterController.checkForUpdates(nil)
+        syncStateFromUpdater()
+    }
+
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        isPresentingUpdate = true
+        windowPresence.updateSessionOpened { [weak self] in self?.checkForUpdates() }
+        if !state.userInitiated { setUpdateBadge("1") }
+        syncStateFromUpdater()
+    }
+
+    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        setUpdateBadge(nil)
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        isPresentingUpdate = false
+        setUpdateBadge(nil)
+        windowPresence.updateSessionClosed()
         syncStateFromUpdater()
     }
 
@@ -88,7 +116,7 @@ final class AppUpdateService {
     private func syncStateFromUpdater() {
         let updater = updaterController.updater
         automaticallyChecksForUpdates = Self.updatesEnabled && updater.automaticallyChecksForUpdates
-        canCheckForUpdates = Self.updatesEnabled && updater.canCheckForUpdates
+        canCheckForUpdates = Self.updatesEnabled && (updater.canCheckForUpdates || isPresentingUpdate)
     }
 
 }
