@@ -1497,5 +1497,5 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 - [x] 复现首次辅助功能权限检查触发快捷键重注册，长按被取消而录音已启动，松键无法结束录音。
 - [x] 权限回调保留当前配置对应的有效长按；补充首次按下／松开与注册失败后权限恢复的协调器回归。
 - [x] 本地定向 XCTest 74 项通过；全量 970 项、9 项按既有条件跳过、0 失败。Debug 构建已启动。
-- [ ] 发布 `1.0.0-beta.30`，核验公开 DMG／ZIP、官网、Sparkle 与 Homebrew，详见[发布记录](releases/1.0.0-beta.30.md)。
+- [x] [PR #44](https://github.com/isecret/MemoEcho/pull/44) 合入并发布 [1.0.0-beta.30](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.30)。PR／合入 CI、签名与公证发布均通过；公开 DMG／ZIP、官网两个域名、Sparkle 与 Homebrew 已独立核验，详见[发布记录](releases/1.0.0-beta.30.md)。
 - [ ] 真实键盘与完整语音输入手工验收。
