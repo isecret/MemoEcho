@@ -1510,4 +1510,4 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 - [x] 定向 XCTest 19 项通过，覆盖后台与手动检查、提醒关注与结束清理、Dock 恢复、窗口并存及 Debug 更新禁用。
 - [x] 独立本地 QA 应用执行真实 Sparkle 后台定时检查，旧代码出现可见但未聚焦的后台更新窗口，Dock 保持 accessory 且无徽标；新代码出现相同更新窗口并显示 Dock 徽标，应用仍未激活。通过“稍后提醒”实测窗口关闭、徽标清除及 accessory 恢复。
 - [x] 用户解锁桌面后，通过系统重开入口回放原应用委托 → 窗口入口管理 → Sparkle 原更新器，确认已有更新窗口实际成为 key window、应用激活且徽标清除。原生 QA 对照与核验摘要保存在忽略的 `build/update-reminder-qa/`；测试应用已退出。
-- [ ] 发布 `1.0.0-beta.31`，同步并核验官网、Homebrew 与 Sparkle，详见[发布记录](releases/1.0.0-beta.31.md)。
+- [x] [PR #46](https://github.com/isecret/MemoEcho/pull/46) 合入并发布 [1.0.0-beta.31](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.31)。PR／合入 CI 全量 974 项、9 项按条件跳过、0 失败；签名、公证发布及公开 DMG／ZIP、官网、Homebrew 与 Sparkle 分发核验均通过，详见[发布记录](releases/1.0.0-beta.31.md)。
