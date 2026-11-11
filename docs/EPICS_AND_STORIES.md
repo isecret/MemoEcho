@@ -1489,3 +1489,13 @@ python3 scripts/evaluate-polish-prompts.py --run --baseline-ref 63bae51b69833363
 - [x] 最新助词版本定向模型调用 42 / 42 通过；Python 28 项、XCTest 46 项通过，Debug 构建通过并重新启动。
 - [ ] 最终 Prompt 全量模型矩阵及真实语音 → ASR → 润色 → 外部输入框手工验收，验证其他模型／典型应用与旧能力。
 - [x] 本地改动通过 [PR #42](https://github.com/isecret/MemoEcho/pull/42) 合入并发布 [beta.29](https://github.com/isecret/MemoEcho/releases/tag/v1.0.0-beta.29)，官网、Homebrew 与 Sparkle 更新源已验证。Issue 保持打开，定向合成验证不替代端到端验收；[发布记录](releases/1.0.0-beta.29.md)。
+
+## Issue #43：启动后首次长按无法随松键结束录音
+
+跟踪 [Issue #43](https://github.com/isecret/MemoEcho/issues/43)。用户于 2026-11-11 授权登记 Bug、提交修复并发布新测试版，随后同步官网和软件源。
+
+- [x] 复现首次辅助功能权限检查触发快捷键重注册，长按被取消而录音已启动，松键无法结束录音。
+- [x] 权限回调保留当前配置对应的有效长按；补充首次按下／松开与注册失败后权限恢复的协调器回归。
+- [x] 本地定向 XCTest 74 项通过；全量 970 项、9 项按既有条件跳过、0 失败。Debug 构建已启动。
+- [ ] 发布 `1.0.0-beta.30`，核验公开 DMG／ZIP、官网、Sparkle 与 Homebrew，详见[发布记录](releases/1.0.0-beta.30.md)。
+- [ ] 真实键盘与完整语音输入手工验收。

@@ -12,6 +12,7 @@
 
 ## 版本记录
 
+- [1.0.0-beta.30 发布与验证](./releases/1.0.0-beta.30.md)
 - [1.0.0-beta.29 发布与验证](./releases/1.0.0-beta.29.md)
 - [1.0.0-beta.28 发布与验证](./releases/1.0.0-beta.28.md)
 - [1.0.0-beta.27 发布与验证](./releases/1.0.0-beta.27.md)
